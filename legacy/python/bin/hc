@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+REPO="$(cd "$ROOT/../.." && pwd)"
 CFG="${MUSE_RELAY_CONFIG:-$ROOT/config.json}"
 [[ -f "$CFG" ]] || CFG="$ROOT/config.example.json"
+[[ -f "$CFG" ]] || CFG="$REPO/config.example.json"
 BASE="$(python3 -c "import json; from pathlib import Path; c=json.load(open('$CFG')); print(c.get('base') or '$ROOT')")"
 # normalize
 BASE="$(cd "$BASE" 2>/dev/null && pwd || echo "$ROOT")"

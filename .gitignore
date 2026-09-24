@@ -1,3 +1,4 @@
+# Local config & runtime (never commit)
 config.json
 inbox.jsonl
 outbox.jsonl
@@ -13,6 +14,30 @@ for_alex.jsonl
 tasks/*.json
 results/*
 !results/.gitkeep
+
+# Python
 __pycache__/
 *.pyc
 .venv/
+legacy/python/config.json
+legacy/python/*.jsonl
+legacy/python/state.json
+legacy/python/bridge.pid
+legacy/python/bridge.std*
+
+# .NET build outputs (do not blanket-ignore all "bin/" — legacy/python/bin holds scripts)
+**/bin/Debug/
+**/bin/Release/
+**/obj/
+*.user
+*.suo
+.vs/
+*.dll
+*.exe
+*.pdb
+!legacy/python/bin/hc
+
+# OS / editor
+.DS_Store
+*.swp
+*~
