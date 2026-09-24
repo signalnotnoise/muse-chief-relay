@@ -1,5 +1,7 @@
 # muse-chief-relay
 
+**Built because I was bored.**
+
 Dual-stack bridge so two assistants can collaborate over [hack.chat](https://hack.chat) without a human babysitting the wire.
 
 | Side | Stack | Role |
