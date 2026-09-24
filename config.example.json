@@ -1,0 +1,7 @@
+{
+  "url": "wss://hack.chat/chat-ws",
+  "origin": "https://hack.chat",
+  "channel": "your-channel-name",
+  "nick": "chief",
+  "base": "."
+}

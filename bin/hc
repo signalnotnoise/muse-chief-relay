@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+CFG="${MUSE_RELAY_CONFIG:-$ROOT/config.json}"
+[[ -f "$CFG" ]] || CFG="$ROOT/config.example.json"
+BASE="$(python3 -c "import json; from pathlib import Path; c=json.load(open('$CFG')); print(c.get('base') or '$ROOT')")"
+# normalize
+BASE="$(cd "$BASE" 2>/dev/null && pwd || echo "$ROOT")"
+cmd="${1:-help}"; shift || true
+nick() { python3 -c "import json; print(json.load(open('$CFG'))['nick'])"; }
+channel() { python3 -c "import json; print(json.load(open('$CFG'))['channel'])"; }
+case "$cmd" in
+  status)
+    echo "channel: $(channel)"; echo "nick: $(nick)"
+    if [[ -f $BASE/bridge.pid ]] && ps -p "$(cat $BASE/bridge.pid)" >/dev/null 2>&1; then echo "bridge: up (pid $(cat $BASE/bridge.pid))"; else echo "bridge: down"; fi
+    [[ -f $BASE/state.json ]] && echo "state: $(cat $BASE/state.json)"
+    unread=0; [[ -f $BASE/unread.jsonl ]] && unread=$(wc -l < "$BASE/unread.jsonl" | tr -d ' ')
+    echo "unread: $unread";;
+  say|send)
+    text="$*"; [[ -n "$text" ]] || { echo "usage: hc say <text>" >&2; exit 1; }
+    mkdir -p "$BASE"
+    python3 -c "import json,sys; open(sys.argv[1],'a').write(json.dumps({'cmd':'chat','text':sys.argv[2]})+'\n')" "$BASE/outbox.jsonl" "$text"
+    echo "queued";;
+  join|restart)
+    mkdir -p "$BASE"
+    [[ -f $BASE/bridge.pid ]] && kill "$(cat $BASE/bridge.pid)" 2>/dev/null || true
+    sleep 0.4
+    : > "$BASE/bridge.stderr" 2>/dev/null || true
+    nohup env MUSE_RELAY_CONFIG="$CFG" python3 "$ROOT/bridge.py" >>"$BASE/bridge.stdout" 2>>"$BASE/bridge.stderr" &
+    echo $! > "$BASE/bridge.pid"; sleep 1.2; "$0" status;;
+  stop) [[ -f $BASE/bridge.pid ]] && kill "$(cat $BASE/bridge.pid)" 2>/dev/null || true; echo stopped;;
+  config)
+    if [[ $# -ge 2 ]]; then
+      python3 - << PY
+import json
+from pathlib import Path
+p=Path("$CFG")
+c=json.loads(p.read_text()) if p.exists() else json.loads(Path("$ROOT/config.example.json").read_text())
+c["$1"]="$2"
+p.write_text(json.dumps(c, indent=2)+"\n")
+print("set $1=$2 ->", p)
+PY
+    else cat "$CFG"; fi;;
+  tail)
+    n="${1:-20}"
+    python3 - << PY
+import json
+from pathlib import Path
+p=Path("$BASE/inbox.jsonl")
+if not p.exists():
+  print("(empty)"); raise SystemExit
+for line in p.read_text().splitlines()[-int("$n"):]:
+  o=json.loads(line); m=o.get("msg",{})
+  if not isinstance(m, dict):
+    continue
+  if m.get("cmd")=="chat":
+    print(f"<{m.get('nick','?')}> {m.get('text','')}")
+  elif m.get("cmd") in ("onlineAdd","onlineRemove"):
+    print(f"* {m['cmd']} {m.get('nick')}")
+  elif m.get("cmd")=="onlineSet":
+    print(f"* online {m.get('nicks')}")
+PY
+    ;;
+  unread)
+    if [[ ! -f $BASE/unread.jsonl ]] || [[ ! -s $BASE/unread.jsonl ]]; then echo "(none)"; exit 0; fi
+    cat "$BASE/unread.jsonl"
+    [[ "${1:-}" == "--clear" ]] && : > "$BASE/unread.jsonl" && echo "(cleared)";;
+  help|*) cat << EOF
+hc — Muse↔Chief hack.chat relay helper
+  hc status | hc say <text> | hc join | hc stop
+  hc config [key val] | hc tail [n] | hc unread [--clear]
+Config: $CFG
+EOF
+  ;;
+esac
