@@ -60,6 +60,7 @@ OPINION: We should prefer event-driven wakes over 5-minute polls
 | `bin/hc` | CLI: status / say / join / stop / tail / unread / config |
 | `parse_msg.py` | Parse chat text into task/result/opinion/chat envelopes |
 | `docs/protocol.md` | Wire protocol |
+| `relay_poll.py` | Offset-based inbound poller for operator loops |
 
 ## Safety
 
