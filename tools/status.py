@@ -6,6 +6,13 @@ are published. Untagged tasks, and tasks tagged with anything else, are left
 out (fail closed). A result can't change a task's visibility: it inherits the
 task's repo.
 
+Only messages carrying a hack.chat tripcode listed in "publish_trips" count,
+including the bridge's own messages (give the bridge a trip with "pass").
+An empty or missing publish_trips publishes nothing.
+
+Shortcut tasks ("TASK to chief: ...") carry no id or repo, so they never
+appear in the view.
+
 Usage:
   python3 tools/status.py [--config config.json] [--inbox PATH] [--out docs/status.json]
 """
@@ -55,9 +62,8 @@ def load_config(path: Path | None) -> dict:
 def build(inbox: Path, cfg: dict) -> dict:
     # Missing or null uses the default; an explicit [] publishes nothing.
     raw_publish = cfg.get("publish_repos")
-    publish = {r for r in (DEFAULT_PUBLISH if raw_publish is None else raw_publish) if isinstance(r, str)}
-    trips = {t for t in (cfg.get("publish_trips") or []) if isinstance(t, str)}
-    own_nick = cfg.get("nick", "chief")
+    publish = {r.lower() for r in (DEFAULT_PUBLISH if raw_publish is None else raw_publish) if isinstance(r, str)}
+    trips = {t for t in (cfg.get("publish_trips") or []) if isinstance(t, str) and t}
 
     tasks: dict[str, dict] = {}
     # Coverage: each outbound join starts a session that runs until the last
@@ -82,7 +88,8 @@ def build(inbox: Path, cfg: dict) -> dict:
             continue
         nick = msg.get("nick") or ""
         trip = msg.get("trip") or ""
-        if trips and nick != own_nick and trip not in trips:
+        # Every publisher needs a listed trip, the bridge included; no nick bypass.
+        if trip not in trips:
             continue
         env = parse(msg.get("text", ""))
         if not env:
@@ -112,7 +119,7 @@ def build(inbox: Path, cfg: dict) -> dict:
             tasks[tid]["summary"] = str(env.get("summary") or "")[:500]
             tasks[tid]["updated"] = iso(ts)
 
-    published = [t for t in tasks.values() if t.get("repo") in publish]
+    published = [t for t in tasks.values() if isinstance(t.get("repo"), str) and t["repo"].lower() in publish]
     published.sort(key=lambda t: t["created"], reverse=True)
 
     coverage = [{"from": iso(a), "to": iso(b)} for a, b in sessions]

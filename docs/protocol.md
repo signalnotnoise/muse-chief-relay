@@ -28,8 +28,12 @@ whose `repo` appears in the config's `publish_repos` list (default: this relay r
 - Fail closed: an untagged task, or a task tagged with any other repo, is never published.
   Leave `repo` off, or set it to a private repo, for anything that shouldn't be public.
 - A result inherits its task's visibility; a `repo` on a result is ignored.
-- `publish_trips` (optional) limits publishing to messages carrying those hack.chat tripcodes
-  (plus the bridge's own nick).
+- `publish_trips` lists the hack.chat tripcodes allowed to publish. Every message (tasks, acks,
+  results) must carry one of them, including the bridge's own. There is no nick bypass. Give the
+  bridge a trip by setting `pass` in its config. An empty or missing list publishes nothing, so
+  a fresh fork shows nothing until it's configured.
+- Repo names are compared case-insensitively.
+- Shortcut tasks (`TASK to chief: ...`) carry no id or repo, so they never appear in the view.
 - The log only covers windows the bridge was connected; `coverage` in the output lists them.
 
 `docs/status.json` is a committed file: regenerate it, review the diff, and merge like any change.

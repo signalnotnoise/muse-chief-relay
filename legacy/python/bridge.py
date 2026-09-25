@@ -17,6 +17,8 @@ URL = CFG["url"]
 ORIGIN = CFG.get("origin", "https://hack.chat")
 CHANNEL = CFG["channel"]
 NICK = CFG["nick"]
+# Optional hack.chat password: gives this nick a tripcode. Never logged.
+PASS = CFG.get("pass") or ""
 INBOX = BASE / "inbox.jsonl"
 OUTBOX = BASE / "outbox.jsonl"
 STATE = BASE / "state.json"
@@ -71,8 +73,11 @@ class Bridge:
     def on_open(self, ws):
         self.set_state(connected=True)
         join = {"cmd": "join", "channel": CHANNEL, "nick": NICK}
-        ws.send(json.dumps(join))
-        log_event("out", join)
+        if PASS:
+            ws.send(json.dumps({**join, "pass": PASS}))
+        else:
+            ws.send(json.dumps(join))
+        log_event("out", join)  # logged without the password
         t = threading.Thread(target=self.pump_outbox, args=(ws,), daemon=True)
         t.start()
 

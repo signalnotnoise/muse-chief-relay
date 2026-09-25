@@ -3,6 +3,7 @@
   "origin": "https://hack.chat",
   "channel": "your-channel-name",
   "nick": "chief",
+  "pass": "",
   "base": ".",
   "publish_repos": [
     "signalnotnoise/muse-chief-relay"

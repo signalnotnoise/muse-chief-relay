@@ -121,6 +121,9 @@ internal sealed class RelayConfig
     public string Nick { get; set; } = "";
     public string Base { get; set; } = ".";
 
+    // Optional hack.chat password; gives this nick a tripcode. Never logged.
+    public string? Pass { get; set; }
+
     [System.Text.Json.Serialization.JsonIgnore]
     public string BaseDir { get; set; } = ".";
 
@@ -265,8 +268,11 @@ internal sealed class HackChatBridge
         await ws.ConnectAsync(new Uri(_cfg.Url), ct);
 
         var join = new { cmd = "join", channel = _cfg.Channel, nick = _cfg.Nick };
-        await SendJsonAsync(ws, join, ct);
-        LogEvent("out", join);
+        if (string.IsNullOrEmpty(_cfg.Pass))
+            await SendJsonAsync(ws, join, ct);
+        else
+            await SendJsonAsync(ws, new { cmd = "join", channel = _cfg.Channel, nick = _cfg.Nick, pass = _cfg.Pass }, ct);
+        LogEvent("out", join); // logged without the password
         WriteState(alive: true, connected: true, reconnecting: false);
         Console.WriteLine($"[chief] joined #{_cfg.Channel} as {_cfg.Nick}");
 

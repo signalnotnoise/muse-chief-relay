@@ -12,7 +12,10 @@ import status  # noqa: E402
 PUB = "signalnotnoise/muse-chief-relay"
 
 
-def chat(ts, nick, text, trip=""):
+TRIP = "TRUSTED"
+
+
+def chat(ts, nick, text, trip=TRIP):
     return json.dumps({"ts": ts, "dir": "in", "msg": {"cmd": "chat", "nick": nick, "trip": trip, "text": text}})
 
 
@@ -28,7 +31,9 @@ class StatusTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / "inbox.jsonl"
             p.write_text("\n".join(lines) + "\n")
-            return status.build(p, cfg or {})
+            base = {"publish_trips": [TRIP]}
+            base.update(cfg or {})
+            return status.build(p, base)
 
     def test_untagged_task_is_not_published(self):
         out = self.run_build([chat(1, "Fuse", task("a"))])
@@ -66,12 +71,28 @@ class StatusTests(unittest.TestCase):
         self.assertEqual([t["id"] for t in out["tasks"]], ["b"])
 
     def test_trip_filter(self):
-        cfg = {"publish_trips": ["EtBBNv"]}
         out = self.run_build([
-            chat(1, "Fuse", task("a", PUB), trip="EtBBNv"),
+            chat(1, "Fuse", task("a", PUB)),
             chat(2, "Fuse", task("b", PUB), trip=""),
-        ], cfg)
+            chat(3, "Fuse", task("c", PUB), trip="other"),
+        ])
         self.assertEqual([t["id"] for t in out["tasks"]], ["a"])
+
+    def test_own_nick_needs_trip_too(self):
+        out = self.run_build([
+            chat(1, "Fuse", task("a", PUB)),
+            chat(2, "chief", json.dumps({"type": "result", "id": "a", "status": "done", "summary": "squatter"}), trip=""),
+        ], {"nick": "chief"})
+        self.assertEqual(out["tasks"][0]["status"], "open")
+
+    def test_empty_trips_publishes_nothing(self):
+        for trips in ([], None):
+            out = self.run_build([chat(1, "Fuse", task("a", PUB))], {"publish_trips": trips})
+            self.assertEqual(out["tasks"], [])
+
+    def test_repo_match_is_case_insensitive(self):
+        out = self.run_build([chat(1, "Fuse", task("a", "SignalNotNoise/Muse-Chief-Relay"))])
+        self.assertEqual(len(out["tasks"]), 1)
 
     def test_duplicate_task_id_first_wins(self):
         out = self.run_build([chat(1, "Fuse", task("a", PUB, "first")), chat(2, "x", task("a", PUB, "spoof"))])
