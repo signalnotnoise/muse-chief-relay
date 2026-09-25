@@ -35,6 +35,13 @@
   let retryAttempt = 0;
   let retryTimer = null;
   let hasJoinedOnce = false;
+  let awaitingJoin = false;
+
+  // hack.chat rejects a join with a "warn" and leaves the socket open. After
+  // a mobile tab dies, the old session can hold our nick for a while, so a
+  // taken nick (or a rate limit) is worth retrying; anything else (e.g. an
+  // invalid nick) is permanent.
+  const RETRYABLE_JOIN_WARN = /taken|too fast|rate|wait/i;
 
   el.channel.value = DEFAULT_CHANNEL;
   el.nick.value = DEFAULT_NICK;
@@ -217,6 +224,7 @@
       if (!hasJoinedOnce) el.transcript.innerHTML = "";
       online = new Set();
       renderUsers();
+      awaitingJoin = true;
       sendRaw({ cmd: "join", channel: myChannel, nick: myNick });
       appendRow({
         text: `${hasJoinedOnce ? "rejoining" : "joining"} #${myChannel} as ${myNick}`,
@@ -232,10 +240,24 @@
       catch { appendRow({ text: String(ev.data), kind: "sys" }); return; }
       if (data && data.cmd === "onlineSet") {
         // Join confirmed, so reset the backoff.
+        awaitingJoin = false;
         retryAttempt = 0;
         hasJoinedOnce = true;
       }
       handleMessage(data);
+      if (awaitingJoin && data && data.cmd === "warn") {
+        // Join rejected. Without this we'd sit "connected" but not in the channel.
+        awaitingJoin = false;
+        // On a first join a taken nick means someone else has it, so don't loop.
+        if (hasJoinedOnce && RETRYABLE_JOIN_WARN.test(data.text || "")) {
+          dropSocket();
+          scheduleReconnect();
+        } else {
+          wantConnected = false;
+          dropSocket();
+          setStatus("join rejected", "err");
+        }
+      }
     };
 
     sock.onerror = () => {
@@ -246,6 +268,7 @@
     sock.onclose = () => {
       if (sock !== ws) return;
       ws = null;
+      awaitingJoin = false;
       if (!wantConnected) {
         setStatus("disconnected", "off");
         return;
