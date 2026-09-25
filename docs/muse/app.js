@@ -26,7 +26,25 @@
   let myNick = DEFAULT_NICK;
   let myChannel = DEFAULT_CHANNEL;
   let online = new Set();
-  let intentionalClose = false;
+
+  // Reconnect state. wantConnected is true between Connect and Disconnect.
+  // A socket that closes while it's still true gets retried with backoff.
+  const BACKOFF_BASE_MS = 1000;
+  const BACKOFF_MAX_MS = 30000;
+  let wantConnected = false;
+  let retryAttempt = 0;
+  let retryTimer = null;
+  let hasJoinedOnce = false;
+  let awaitingJoin = false;
+
+  // hack.chat rejects a join with a "warn" and leaves the socket open. After
+  // a mobile tab dies, the old session can hold our nick for a while, so a
+  // taken nick (or a rate limit) is worth retrying; anything else (e.g. an
+  // invalid nick) is permanent.
+  const RETRYABLE_JOIN_WARN = /taken|too fast|rate|wait/i;
+  // A page reload can race its own not-yet-expired session, so a first join
+  // gets a few retries before we decide the nick really belongs to someone else.
+  const FIRST_JOIN_MAX_RETRIES = 3;
 
   el.channel.value = DEFAULT_CHANNEL;
   el.nick.value = DEFAULT_NICK;
@@ -113,8 +131,10 @@
 
   function sendChatText(text) {
     const t = (text || "").trim();
-    if (!t) return;
-    sendRaw({ cmd: "chat", text: t });
+    if (!t) return true;
+    if (sendRaw({ cmd: "chat", text: t })) return true;
+    appendRow({ text: "not connected, message not sent (it's still in the box)", kind: "sys" });
+    return false;
   }
 
   function handleMessage(data) {
@@ -161,47 +181,133 @@
     appendRow({ text: JSON.stringify(data), kind: "sys" });
   }
 
+  function clearRetry() {
+    if (retryTimer) {
+      clearTimeout(retryTimer);
+      retryTimer = null;
+    }
+  }
+
+  function socketIsLive() {
+    return ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING);
+  }
+
+  function dropSocket() {
+    if (!ws) return;
+    const old = ws;
+    ws = null;
+    // Detach first so the old socket's close can't schedule a retry.
+    old.onopen = old.onmessage = old.onerror = old.onclose = null;
+    try { old.close(); } catch (_) { /* ignore */ }
+  }
+
+  function scheduleReconnect() {
+    clearRetry();
+    const exp = BACKOFF_BASE_MS * 2 ** Math.min(retryAttempt, 10);
+    // ±20% jitter, then hard cap so the wait never exceeds 30s.
+    const delay = Math.min(BACKOFF_MAX_MS, Math.round(exp * (0.8 + Math.random() * 0.4)));
+    retryAttempt += 1;
+    setStatus(`reconnecting in ${Math.ceil(delay / 1000)}s`, "err");
+    retryTimer = setTimeout(() => {
+      retryTimer = null;
+      openSocket();
+    }, delay);
+  }
+
+  function openSocket() {
+    clearRetry();
+    dropSocket();
+    setStatus(hasJoinedOnce ? "reconnecting…" : "connecting…", "off");
+
+    const sock = new WebSocket(WS_URL);
+    ws = sock;
+
+    sock.onopen = () => {
+      if (sock !== ws) return;
+      setStatus("connected", "on");
+      showChat(true);
+      if (!hasJoinedOnce) el.transcript.innerHTML = "";
+      online = new Set();
+      renderUsers();
+      awaitingJoin = true;
+      sendRaw({ cmd: "join", channel: myChannel, nick: myNick });
+      appendRow({
+        text: `${hasJoinedOnce ? "rejoining" : "joining"} #${myChannel} as ${myNick}`,
+        kind: "sys",
+      });
+      // Only focus on the first join; refocusing on an auto-rejoin pops the
+      // keyboard on mobile.
+      if (!hasJoinedOnce) el.message.focus();
+    };
+
+    sock.onmessage = (ev) => {
+      if (sock !== ws) return;
+      let data;
+      try { data = JSON.parse(ev.data); }
+      catch { appendRow({ text: String(ev.data), kind: "sys" }); return; }
+      if (data && data.cmd === "onlineSet") {
+        // Join confirmed, so reset the backoff.
+        awaitingJoin = false;
+        retryAttempt = 0;
+        hasJoinedOnce = true;
+      }
+      handleMessage(data);
+      if (awaitingJoin && data && data.cmd === "warn") {
+        // Join rejected. Without this we'd sit "connected" but not in the channel.
+        awaitingJoin = false;
+        const retryable = RETRYABLE_JOIN_WARN.test(data.text || "") &&
+          (hasJoinedOnce || retryAttempt < FIRST_JOIN_MAX_RETRIES);
+        if (retryable) {
+          dropSocket();
+          scheduleReconnect();
+        } else {
+          wantConnected = false;
+          dropSocket();
+          setStatus("join rejected", "err");
+        }
+      }
+    };
+
+    sock.onerror = () => {
+      if (sock !== ws) return;
+      setStatus("error", "err");
+    };
+
+    sock.onclose = () => {
+      if (sock !== ws) return;
+      ws = null;
+      awaitingJoin = false;
+      if (!wantConnected) {
+        setStatus("disconnected", "off");
+        return;
+      }
+      appendRow({ text: "connection closed, will retry", kind: "sys" });
+      scheduleReconnect();
+    };
+  }
+
   function connect(channel, nick) {
-    intentionalClose = false;
     myChannel = channel || DEFAULT_CHANNEL;
     myNick = nick || DEFAULT_NICK;
     el.metaChannel.textContent = myChannel;
     el.metaNick.textContent = myNick;
-    setStatus("connecting…", "off");
-
-    if (ws) {
-      try { ws.close(); } catch (_) { /* ignore */ }
-    }
-
-    ws = new WebSocket(WS_URL);
-
-    ws.onopen = () => {
-      setStatus("connected", "on");
-      showChat(true);
-      el.transcript.innerHTML = "";
-      online = new Set();
-      renderUsers();
-      sendRaw({ cmd: "join", channel: myChannel, nick: myNick });
-      appendRow({ text: `joining #${myChannel} as ${myNick}`, kind: "sys" });
-      el.message.focus();
-    };
-
-    ws.onmessage = (ev) => {
-      let data;
-      try { data = JSON.parse(ev.data); }
-      catch { appendRow({ text: String(ev.data), kind: "sys" }); return; }
-      handleMessage(data);
-    };
-
-    ws.onerror = () => setStatus("error", "err");
-
-    ws.onclose = () => {
-      setStatus("disconnected", intentionalClose ? "off" : "err");
-      if (!intentionalClose) {
-        appendRow({ text: "connection closed", kind: "sys" });
-      }
-    };
+    wantConnected = true;
+    retryAttempt = 0;
+    hasJoinedOnce = false;
+    openSocket();
   }
+
+  function reconnectNowIfNeeded() {
+    if (!wantConnected || socketIsLive()) return;
+    openSocket();
+  }
+
+  // Mobile browsers kill sockets in background tabs, so reconnect right
+  // away when the tab comes back instead of waiting out the backoff.
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") reconnectNowIfNeeded();
+  });
+  window.addEventListener("online", reconnectNowIfNeeded);
 
   el.joinForm.addEventListener("submit", (e) => {
     e.preventDefault();
@@ -209,17 +315,16 @@
   });
 
   el.disconnect.addEventListener("click", () => {
-    intentionalClose = true;
-    if (ws) ws.close();
+    wantConnected = false;
+    clearRetry();
+    dropSocket();
     showChat(false);
     setStatus("disconnected", "off");
   });
 
   el.sendForm.addEventListener("submit", (e) => {
     e.preventDefault();
-    const text = el.message.value;
-    el.message.value = "";
-    sendChatText(text);
+    if (sendChatText(el.message.value)) el.message.value = "";
   });
 
   el.taskForm.addEventListener("submit", (e) => {
@@ -232,8 +337,7 @@
       title: String(fd.get("title") || "").trim(),
       body: String(fd.get("body") || "").trim(),
     };
-    sendChatText(JSON.stringify(payload));
-    el.taskForm.reset();
+    if (sendChatText(JSON.stringify(payload))) el.taskForm.reset();
   });
 
   el.opinionForm.addEventListener("submit", (e) => {
@@ -245,8 +349,7 @@
       topic: String(fd.get("topic") || "").trim() || "general",
       text: String(fd.get("text") || "").trim(),
     };
-    sendChatText(JSON.stringify(payload));
-    el.opinionForm.reset();
+    if (sendChatText(JSON.stringify(payload))) el.opinionForm.reset();
   });
 
   el.resultForm.addEventListener("submit", (e) => {
@@ -259,7 +362,6 @@
       status: String(fd.get("status") || "done"),
       summary: String(fd.get("summary") || "").trim(),
     };
-    sendChatText(JSON.stringify(payload));
-    el.resultForm.reset();
+    if (sendChatText(JSON.stringify(payload))) el.resultForm.reset();
   });
 })();
