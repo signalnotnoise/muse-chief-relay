@@ -84,6 +84,17 @@ class StatusTests(unittest.TestCase):
         self.assertEqual(len(out["coverage"]), 2)
         self.assertEqual(out["coverage"][0]["to"], status.iso(3602))
 
+    def test_non_string_repo_is_untagged_not_a_crash(self):
+        lines = [chat(1, "Fuse", json.dumps({"type": "task", "id": i, "to": "chief", "title": "t", "repo": r}))
+                 for i, r in [("a", []), ("b", {"x": 1}), ("c", 5)]]
+        self.assertEqual(self.run_build(lines)["tasks"], [])
+
+    def test_explicit_empty_allowlist_publishes_nothing(self):
+        out = self.run_build([chat(1, "Fuse", task("a", PUB))], {"publish_repos": []})
+        self.assertEqual(out["tasks"], [])
+        out = self.run_build([chat(1, "Fuse", task("a", PUB))], {"publish_repos": None})
+        self.assertEqual(len(out["tasks"]), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

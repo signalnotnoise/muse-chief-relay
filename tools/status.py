@@ -53,8 +53,10 @@ def load_config(path: Path | None) -> dict:
 
 
 def build(inbox: Path, cfg: dict) -> dict:
-    publish = set(cfg.get("publish_repos") or DEFAULT_PUBLISH)
-    trips = set(cfg.get("publish_trips") or [])
+    # Missing or null uses the default; an explicit [] publishes nothing.
+    raw_publish = cfg.get("publish_repos")
+    publish = {r for r in (DEFAULT_PUBLISH if raw_publish is None else raw_publish) if isinstance(r, str)}
+    trips = {t for t in (cfg.get("publish_trips") or []) if isinstance(t, str)}
     own_nick = cfg.get("nick", "chief")
 
     tasks: dict[str, dict] = {}
@@ -95,7 +97,8 @@ def build(inbox: Path, cfg: dict) -> dict:
                 "title": str(env.get("title") or "")[:200],
                 "to": env.get("to"),
                 "from": nick,
-                "repo": env.get("repo"),
+                # Arbitrary JSON: anything that isn't a string counts as untagged.
+                "repo": env.get("repo") if isinstance(env.get("repo"), str) else None,
                 "status": "open",
                 "created": iso(ts),
                 "updated": iso(ts),
