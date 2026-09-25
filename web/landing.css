@@ -26,11 +26,13 @@ a { color: var(--accent); text-decoration: none; }
 a:hover { text-decoration: underline; }
 code, pre { font-family: var(--mono); }
 .wrap { max-width: 960px; margin: 0 auto; padding: 1.2rem 1.2rem 3rem; }
-.top { display: flex; justify-content: space-between; align-items: center; }
+.top { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: .5rem 1rem; }
 .brand { display: flex; align-items: baseline; gap: .55rem; }
 .logo { font-weight: 700; font-size: 1.25rem; letter-spacing: .02em; }
 .sub { color: var(--muted); font-size: .9rem; }
-.top nav a { color: var(--muted); margin-left: 1rem; font-size: .9rem; }
+.top nav { display: flex; flex-wrap: wrap; gap: .3rem 1rem; }
+.top nav a { color: var(--muted); font-size: .9rem; }
+section { scroll-margin-top: 1rem; }
 .hero { padding: 3.5rem 0 2.5rem; }
 .hero h1 { font-size: clamp(1.9rem, 4.5vw, 2.8rem); line-height: 1.15; margin: 0 0 1rem; }
 .hero h1 .a { color: var(--accent); }
