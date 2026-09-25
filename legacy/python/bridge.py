@@ -48,6 +48,7 @@ class Bridge:
         self._out_pos = OUTBOX.stat().st_size if OUTBOX.exists() else 0
         self._greeted = False
         self._stop = False
+        self._live_ws = None  # the connection whose pump may send
 
     def set_state(self, **extra):
         data = {"alive": True, "at": time.time(), "channel": CHANNEL, "nick": NICK, **extra}
@@ -67,6 +68,8 @@ class Bridge:
         log_event("err", {"error": str(error)})
 
     def on_close(self, ws, status, msg):
+        if self._live_ws is ws:
+            self._live_ws = None
         log_event("close", {"status": status, "msg": msg})
         write_json(STATE, {"alive": False, "at": time.time(), "channel": CHANNEL, "nick": NICK})
 
@@ -78,11 +81,17 @@ class Bridge:
         else:
             ws.send(json.dumps(join))
         log_event("out", join)  # logged without the password
+        self._live_ws = ws
         t = threading.Thread(target=self.pump_outbox, args=(ws,), daemon=True)
         t.start()
 
     def pump_outbox(self, ws):
-        while not self._stop:
+        # One pump per connection. It exits as soon as its connection is no
+        # longer the live one, so a stale pump can't grab lines after a
+        # reconnect and send them into a closed socket. The read position only
+        # moves past a line once that line has been sent, so a failed send is
+        # retried on the next connection instead of being dropped.
+        while not self._stop and self._live_ws is ws:
             time.sleep(0.35)
             try:
                 if not OUTBOX.exists():
@@ -92,22 +101,28 @@ class Bridge:
                     self._out_pos = 0
                 if size == self._out_pos:
                     continue
-                with OUTBOX.open() as f:
+                with OUTBOX.open("rb") as f:
                     f.seek(self._out_pos)
                     chunk = f.read()
-                    self._out_pos = f.tell()
-                for line in chunk.splitlines():
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        obj = json.loads(line)
-                    except Exception:
-                        obj = {"cmd": "chat", "text": line}
-                    if "cmd" not in obj:
-                        obj = {"cmd": "chat", "text": str(obj.get("text", obj))}
-                    ws.send(json.dumps(obj))
-                    log_event("out", obj)
+                pos = self._out_pos
+                for raw in chunk.splitlines(keepends=True):
+                    if not raw.endswith(b"\n"):
+                        break  # partial line still being written
+                    if self._live_ws is not ws:
+                        return
+                    line = raw.decode("utf-8", "replace").strip()
+                    if line:
+                        try:
+                            obj = json.loads(line)
+                        except Exception:
+                            obj = {"cmd": "chat", "text": line}
+                        if not isinstance(obj, dict) or "cmd" not in obj:
+                            text = obj.get("text", obj) if isinstance(obj, dict) else obj
+                            obj = {"cmd": "chat", "text": str(text)}
+                        ws.send(json.dumps(obj))
+                        log_event("out", obj)
+                    pos += len(raw)
+                    self._out_pos = pos
             except Exception as e:
                 log_event("err", {"error": f"outbox: {e}"})
 
