@@ -42,6 +42,9 @@
   // taken nick (or a rate limit) is worth retrying; anything else (e.g. an
   // invalid nick) is permanent.
   const RETRYABLE_JOIN_WARN = /taken|too fast|rate|wait/i;
+  // A page reload can race its own not-yet-expired session, so a first join
+  // gets a few retries before we decide the nick really belongs to someone else.
+  const FIRST_JOIN_MAX_RETRIES = 3;
 
   el.channel.value = DEFAULT_CHANNEL;
   el.nick.value = DEFAULT_NICK;
@@ -128,8 +131,10 @@
 
   function sendChatText(text) {
     const t = (text || "").trim();
-    if (!t) return;
-    sendRaw({ cmd: "chat", text: t });
+    if (!t) return true;
+    if (sendRaw({ cmd: "chat", text: t })) return true;
+    appendRow({ text: "not connected, message not sent (it's still in the box)", kind: "sys" });
+    return false;
   }
 
   function handleMessage(data) {
@@ -230,7 +235,9 @@
         text: `${hasJoinedOnce ? "rejoining" : "joining"} #${myChannel} as ${myNick}`,
         kind: "sys",
       });
-      el.message.focus();
+      // Only focus on the first join; refocusing on an auto-rejoin pops the
+      // keyboard on mobile.
+      if (!hasJoinedOnce) el.message.focus();
     };
 
     sock.onmessage = (ev) => {
@@ -248,8 +255,9 @@
       if (awaitingJoin && data && data.cmd === "warn") {
         // Join rejected. Without this we'd sit "connected" but not in the channel.
         awaitingJoin = false;
-        // On a first join a taken nick means someone else has it, so don't loop.
-        if (hasJoinedOnce && RETRYABLE_JOIN_WARN.test(data.text || "")) {
+        const retryable = RETRYABLE_JOIN_WARN.test(data.text || "") &&
+          (hasJoinedOnce || retryAttempt < FIRST_JOIN_MAX_RETRIES);
+        if (retryable) {
           dropSocket();
           scheduleReconnect();
         } else {
@@ -316,9 +324,7 @@
 
   el.sendForm.addEventListener("submit", (e) => {
     e.preventDefault();
-    const text = el.message.value;
-    el.message.value = "";
-    sendChatText(text);
+    if (sendChatText(el.message.value)) el.message.value = "";
   });
 
   el.taskForm.addEventListener("submit", (e) => {
@@ -331,8 +337,7 @@
       title: String(fd.get("title") || "").trim(),
       body: String(fd.get("body") || "").trim(),
     };
-    sendChatText(JSON.stringify(payload));
-    el.taskForm.reset();
+    if (sendChatText(JSON.stringify(payload))) el.taskForm.reset();
   });
 
   el.opinionForm.addEventListener("submit", (e) => {
@@ -344,8 +349,7 @@
       topic: String(fd.get("topic") || "").trim() || "general",
       text: String(fd.get("text") || "").trim(),
     };
-    sendChatText(JSON.stringify(payload));
-    el.opinionForm.reset();
+    if (sendChatText(JSON.stringify(payload))) el.opinionForm.reset();
   });
 
   el.resultForm.addEventListener("submit", (e) => {
@@ -358,7 +362,6 @@
       status: String(fd.get("status") || "done"),
       summary: String(fd.get("summary") || "").trim(),
     };
-    sendChatText(JSON.stringify(payload));
-    el.resultForm.reset();
+    if (sendChatText(JSON.stringify(payload))) el.resultForm.reset();
   });
 })();
