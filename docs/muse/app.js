@@ -26,7 +26,15 @@
   let myNick = DEFAULT_NICK;
   let myChannel = DEFAULT_CHANNEL;
   let online = new Set();
-  let intentionalClose = false;
+
+  // Reconnect state. wantConnected is true between Connect and Disconnect.
+  // A socket that closes while it's still true gets retried with backoff.
+  const BACKOFF_BASE_MS = 1000;
+  const BACKOFF_MAX_MS = 30000;
+  let wantConnected = false;
+  let retryAttempt = 0;
+  let retryTimer = null;
+  let hasJoinedOnce = false;
 
   el.channel.value = DEFAULT_CHANNEL;
   el.nick.value = DEFAULT_NICK;
@@ -161,47 +169,114 @@
     appendRow({ text: JSON.stringify(data), kind: "sys" });
   }
 
+  function clearRetry() {
+    if (retryTimer) {
+      clearTimeout(retryTimer);
+      retryTimer = null;
+    }
+  }
+
+  function socketIsLive() {
+    return ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING);
+  }
+
+  function dropSocket() {
+    if (!ws) return;
+    const old = ws;
+    ws = null;
+    // Detach first so the old socket's close can't schedule a retry.
+    old.onopen = old.onmessage = old.onerror = old.onclose = null;
+    try { old.close(); } catch (_) { /* ignore */ }
+  }
+
+  function scheduleReconnect() {
+    clearRetry();
+    const exp = BACKOFF_BASE_MS * 2 ** Math.min(retryAttempt, 10);
+    // ±20% jitter, then hard cap so the wait never exceeds 30s.
+    const delay = Math.min(BACKOFF_MAX_MS, Math.round(exp * (0.8 + Math.random() * 0.4)));
+    retryAttempt += 1;
+    setStatus(`reconnecting in ${Math.ceil(delay / 1000)}s`, "err");
+    retryTimer = setTimeout(() => {
+      retryTimer = null;
+      openSocket();
+    }, delay);
+  }
+
+  function openSocket() {
+    clearRetry();
+    dropSocket();
+    setStatus(hasJoinedOnce ? "reconnecting…" : "connecting…", "off");
+
+    const sock = new WebSocket(WS_URL);
+    ws = sock;
+
+    sock.onopen = () => {
+      if (sock !== ws) return;
+      setStatus("connected", "on");
+      showChat(true);
+      if (!hasJoinedOnce) el.transcript.innerHTML = "";
+      online = new Set();
+      renderUsers();
+      sendRaw({ cmd: "join", channel: myChannel, nick: myNick });
+      appendRow({
+        text: `${hasJoinedOnce ? "rejoining" : "joining"} #${myChannel} as ${myNick}`,
+        kind: "sys",
+      });
+      el.message.focus();
+    };
+
+    sock.onmessage = (ev) => {
+      if (sock !== ws) return;
+      let data;
+      try { data = JSON.parse(ev.data); }
+      catch { appendRow({ text: String(ev.data), kind: "sys" }); return; }
+      if (data && data.cmd === "onlineSet") {
+        // Join confirmed, so reset the backoff.
+        retryAttempt = 0;
+        hasJoinedOnce = true;
+      }
+      handleMessage(data);
+    };
+
+    sock.onerror = () => {
+      if (sock !== ws) return;
+      setStatus("error", "err");
+    };
+
+    sock.onclose = () => {
+      if (sock !== ws) return;
+      ws = null;
+      if (!wantConnected) {
+        setStatus("disconnected", "off");
+        return;
+      }
+      appendRow({ text: "connection closed, will retry", kind: "sys" });
+      scheduleReconnect();
+    };
+  }
+
   function connect(channel, nick) {
-    intentionalClose = false;
     myChannel = channel || DEFAULT_CHANNEL;
     myNick = nick || DEFAULT_NICK;
     el.metaChannel.textContent = myChannel;
     el.metaNick.textContent = myNick;
-    setStatus("connecting…", "off");
-
-    if (ws) {
-      try { ws.close(); } catch (_) { /* ignore */ }
-    }
-
-    ws = new WebSocket(WS_URL);
-
-    ws.onopen = () => {
-      setStatus("connected", "on");
-      showChat(true);
-      el.transcript.innerHTML = "";
-      online = new Set();
-      renderUsers();
-      sendRaw({ cmd: "join", channel: myChannel, nick: myNick });
-      appendRow({ text: `joining #${myChannel} as ${myNick}`, kind: "sys" });
-      el.message.focus();
-    };
-
-    ws.onmessage = (ev) => {
-      let data;
-      try { data = JSON.parse(ev.data); }
-      catch { appendRow({ text: String(ev.data), kind: "sys" }); return; }
-      handleMessage(data);
-    };
-
-    ws.onerror = () => setStatus("error", "err");
-
-    ws.onclose = () => {
-      setStatus("disconnected", intentionalClose ? "off" : "err");
-      if (!intentionalClose) {
-        appendRow({ text: "connection closed", kind: "sys" });
-      }
-    };
+    wantConnected = true;
+    retryAttempt = 0;
+    hasJoinedOnce = false;
+    openSocket();
   }
+
+  function reconnectNowIfNeeded() {
+    if (!wantConnected || socketIsLive()) return;
+    openSocket();
+  }
+
+  // Mobile browsers kill sockets in background tabs, so reconnect right
+  // away when the tab comes back instead of waiting out the backoff.
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") reconnectNowIfNeeded();
+  });
+  window.addEventListener("online", reconnectNowIfNeeded);
 
   el.joinForm.addEventListener("submit", (e) => {
     e.preventDefault();
@@ -209,8 +284,9 @@
   });
 
   el.disconnect.addEventListener("click", () => {
-    intentionalClose = true;
-    if (ws) ws.close();
+    wantConnected = false;
+    clearRetry();
+    dropSocket();
     showChat(false);
     setStatus("disconnected", "off");
   });
