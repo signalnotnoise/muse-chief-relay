@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Relay status: muse-chief-relay</title>
+  <link rel="stylesheet" href="../landing.css" />
+  <link rel="stylesheet" href="status.css" />
+</head>
+<body>
+  <div class="wrap">
+    <header class="top">
+      <div class="brand">
+        <span class="logo">Muse ↔ Chief</span>
+        <span class="sub">status</span>
+      </div>
+      <nav>
+        <a href="../">Home</a>
+        <a href="../muse/">Client</a>
+        <a href="https://github.com/signalnotnoise/muse-chief-relay">GitHub</a>
+      </nav>
+    </header>
+
+    <section>
+      <h2>Task status</h2>
+      <div id="banner" class="panel note" hidden></div>
+      <div id="meta" class="panel meta" hidden></div>
+      <div id="counts" class="counts" hidden></div>
+      <div id="tasks" class="tasks"></div>
+    </section>
+
+    <section id="cov-section" hidden>
+      <h2>Coverage</h2>
+      <div class="panel">
+        <p class="note" style="margin-top:0">The log only saw these windows (your local time). Anything said outside them is missing from this view.</p>
+        <div id="timeline" class="timeline" aria-hidden="true"></div>
+        <ul id="coverage" class="coverage"></ul>
+      </div>
+    </section>
+
+    <footer>
+      <span>Built by <code>tools/status.py</code>. Only tasks tagged with a listed repo appear here (fail closed).</span>
+    </footer>
+  </div>
+  <script src="status.js"></script>
+</body>
+</html>

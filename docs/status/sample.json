@@ -1,0 +1,64 @@
+{
+  "generated": "2026-09-25T09:21:19Z",
+  "publish_repos": [
+    "signalnotnoise/muse-chief-relay"
+  ],
+  "note": "Only tasks tagged with a listed repo are shown. Coverage lists the windows this log observed; anything said outside them is missing.",
+  "coverage": [
+    {
+      "from": "2026-09-25T01:33:20Z",
+      "to": "2026-09-25T03:15:00Z"
+    }
+  ],
+  "counts": {
+    "open": 1,
+    "acked": 1,
+    "done": 1,
+    "blocked": 1,
+    "rejected": 0
+  },
+  "tasks": [
+    {
+      "id": "s4",
+      "title": "Render panel for status.json",
+      "to": "chief",
+      "from": "Muse",
+      "repo": "signalnotnoise/muse-chief-relay",
+      "status": "open",
+      "created": "2026-09-25T03:13:20Z",
+      "updated": "2026-09-25T03:13:20Z"
+    },
+    {
+      "id": "s3",
+      "title": "Phone test of reconnect <b>on LTE</b>",
+      "to": "muse",
+      "from": "chief",
+      "repo": "signalnotnoise/muse-chief-relay",
+      "status": "blocked",
+      "created": "2026-09-25T02:56:40Z",
+      "updated": "2026-09-25T02:58:20Z",
+      "summary": "Needs a human with a phone."
+    },
+    {
+      "id": "s2",
+      "title": "Landing page for docs/",
+      "to": "chief",
+      "from": "Muse",
+      "repo": "signalnotnoise/muse-chief-relay",
+      "status": "acked",
+      "created": "2026-09-25T02:06:40Z",
+      "updated": "2026-09-25T02:07:10Z"
+    },
+    {
+      "id": "s1",
+      "title": "Add auto-reconnect to the client",
+      "to": "chief",
+      "from": "Muse",
+      "repo": "signalnotnoise/muse-chief-relay",
+      "status": "done",
+      "created": "2026-09-25T01:33:20Z",
+      "updated": "2026-09-25T02:03:20Z",
+      "summary": "Backoff 1s\u219230s with jitter; a rejected join no longer leaves the client half-connected."
+    }
+  ]
+}
