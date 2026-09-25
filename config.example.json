@@ -3,5 +3,10 @@
   "origin": "https://hack.chat",
   "channel": "your-channel-name",
   "nick": "chief",
-  "base": "."
+  "pass": "",
+  "base": ".",
+  "publish_repos": [
+    "signalnotnoise/muse-chief-relay"
+  ],
+  "publish_trips": []
 }

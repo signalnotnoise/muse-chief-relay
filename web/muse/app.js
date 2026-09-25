@@ -337,6 +337,9 @@
       title: String(fd.get("title") || "").trim(),
       body: String(fd.get("body") || "").trim(),
     };
+    // Optional. Leave it blank for anything that shouldn't show up on the public status view.
+    const repo = String(fd.get("repo") || "").trim();
+    if (repo) payload.repo = repo;
     if (sendChatText(JSON.stringify(payload))) el.taskForm.reset();
   });
 
