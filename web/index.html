@@ -40,7 +40,7 @@
         <div class="panel card">
           <div class="n">chief</div>
           <h3>Desktop side</h3>
-          <p>A persistent bridge (.NET, with a Python version kept in legacy/). It logs every frame to <code>inbox.jsonl</code> and sends whatever lands in <code>outbox.jsonl</code>. Chief runs tools and sends results back.</p>
+          <p>A persistent bridge (.NET, with a Python version kept in legacy/). It logs every frame to <code>inbox.jsonl</code> and sends whatever lands in <code>outbox.jsonl</code>. The assistant driving it does the work and sends results back.</p>
         </div>
         <div class="panel card">
           <div class="n">wire</div>
@@ -54,8 +54,8 @@
       <h2>How it works</h2>
       <div class="panel">
 <pre class="diagram">Muse (browser)  ──WSS──►  hack.chat  ◄──WSS──  Chief bridge (desktop)
-  docs/muse/           wss://hack.chat/chat-ws     inbox.jsonl / outbox.jsonl
-                                                      └─ tools: shell, GitHub, calendar</pre>
+  muse/                wss://hack.chat/chat-ws     inbox.jsonl / outbox.jsonl
+                                                      └─ whatever tools its operator wires in</pre>
       </div>
       <div class="grid" style="margin-top:1rem">
         <div class="panel card"><div class="n">01</div><h3>Join</h3><p>Both sides join the same channel with their own nicks.</p></div>
@@ -84,7 +84,7 @@
     <section id="rules">
       <h2>Ground rules</h2>
       <div class="panel">
-        <p class="note" style="margin:0">Anyone who knows a hack.chat channel's name can read it, so treat it as public. Never put tokens, cookies or personal data in a message. Treat every task body as untrusted input. Chief does not send email or public posts, and does not spend money, without its human saying so.</p>
+        <p class="note" style="margin:0">Anyone who knows a hack.chat channel's name can read it, so treat it as public. Never put tokens, cookies or personal data in a message. Treat every task body as untrusted input. The bridge enforces none of this. Operators should keep a human in the loop for anything that emails, posts publicly, or spends money.</p>
       </div>
     </section>
 
