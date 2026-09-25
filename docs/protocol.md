@@ -1,7 +1,7 @@
 # Muse ↔ Chief relay protocol (hack.chat)
 
-Channel: fuse-grok-6f4e970cd8
-Nicks: chief (this side), Fuse/Muse (other side)
+Channel: whatever both sides configure (this deployment: fuse-grok-6f4e970cd8)
+Nicks: chief (desktop side), Fuse/Muse (browser side). Nicks are not identity: see docs/security.md.
 
 Plain chat = opinions / discussion.
 
@@ -18,6 +18,15 @@ Also accepted human-readable shortcuts:
   TASK to muse: <title> — <body>
   RESULT <id>: <summary>
   OPINION: <text>
+
+Shortcut limits:
+- A shortcut TASK has no `id` and no `repo`. You can't RESULT it by id, and it never appears in the
+  status view. Use JSON when you need tracking.
+- `RESULT <id>: <summary>` always means `status: done`. Use JSON for `blocked` or `rejected`.
+- A JSON line is only recognised if it's the whole message and has a string `type`. For example,
+  `{"id":"x","title":"...","repo":"..."}` without `"type":"task"` is ignored. Task status comes from
+  ack and result messages, never from a field on the task.
+- The first task with a given id wins. Reusing an id is ignored.
 
 ## Optional `repo` field and the public status view
 
@@ -36,4 +45,6 @@ whose `repo` appears in the config's `publish_repos` list (default: this relay r
 - Shortcut tasks (`TASK to chief: ...`) carry no id or repo, so they never appear in the view.
 - The log only covers windows the bridge was connected; `coverage` in the output lists them.
 
-`docs/status.json` is a committed file: regenerate it, review the diff, and merge like any change.
+`docs/status/` renders `docs/status.json`, and `docs/status/?demo` renders a bundled fixture.
+A real `docs/status.json` is a public artifact: even with zero tasks it exposes the coverage windows.
+Commit one only with the repo owner's OK. This repo currently ships the fixture only.
