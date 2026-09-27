@@ -129,24 +129,59 @@ test("loadBoardText: first hit wins, html is rejected, 404 is missing, a throw i
   assert.equal(thrown.via, "");
 });
 
-test("the seeded room board is one hashed file: a decision plus open task #1", () => {
+test("the seeded room board keeps its first lines and records the classroom-kit pick", () => {
   const dir = path.join(ROOT, "boards");
   const files = fs.readdirSync(dir).filter((name) => name.endsWith(".jsonl"));
   assert.equal(files.length, 1);
   assert.match(files[0], /^[0-9a-f]{64}\.jsonl$/);
   const text = fs.readFileSync(path.join(dir, files[0]), "utf8");
   assert.ok(text.endsWith("\n"), "seeded file ends with a newline, so its last line is complete");
+  const lines = text.split("\n").slice(0, -1);
+  assert.equal(
+    lines[0],
+    '{"type":"decision","ts":1790514400,"decider":"Fuse","decision":"Room board created","context":"Task board + decision log + scratch pad shared by the room\'s human and agents (Fuse + chief). Commit like CHANGELOG."}'
+  );
+  assert.equal(
+    lines[1],
+    '{"type":"task","id":1,"title":"teaching-kit card — Alex picks the workload","owner":"Alex","state":"open"}'
+  );
   const parsed = board.parseBoard(text);
   assert.equal(parsed.skipped, 0);
   assert.equal(parsed.scratch.length, 0);
-  assert.equal(parsed.decisions.length, 1);
+  assert.equal(parsed.decisions.length, 4);
   assert.equal(parsed.decisions[0].decider, "Fuse");
   assert.equal(parsed.decisions[0].decision, "Room board created");
-  assert.equal(parsed.tasks.length, 1);
-  assert.equal(parsed.tasks[0].id, 1);
-  assert.equal(parsed.tasks[0].owner, "Alex");
-  assert.equal(parsed.tasks[0].state, "open");
-  assert.equal(parsed.tasks[0].title, "teaching-kit card — Alex picks the workload");
+  assert.equal(parsed.decisions[1].decider, "Alex");
+  assert.equal(parsed.decisions[1].decision, "task 1 closed");
+  assert.equal(parsed.decisions[2].decider, "Alex");
+  assert.equal(parsed.decisions[2].decision, "Classroom / lesson-coach kit is build priority #1");
+  assert.equal(
+    parsed.decisions[2].context,
+    "Closest to shipped bridge+boards+knowledge. Medical parked. 3D asset-QA is promo angle, not first product build. First card: Lesson outline coach (SME-gate checklist on teacher outlines → knowledge/ + board tasks)."
+  );
+  assert.equal(parsed.decisions[3].decider, "chief");
+  assert.equal(parsed.decisions[3].decision, "First teaching-kit card is Lesson outline coach");
+  assert.equal(parsed.decisions[3].context, "Alex authorized chief to pick the closest card.");
+  assert.equal(parsed.decisions[2].ts, parsed.decisions[1].ts + 1);
+  assert.equal(parsed.decisions[3].ts, parsed.decisions[2].ts + 1);
+  assert.equal(parsed.tasks.length, 5);
+  const byId = new Map(parsed.tasks.map((item) => [item.id, item]));
+  assert.equal(byId.get(1).owner, "Alex");
+  assert.equal(byId.get(1).state, "done");
+  assert.equal(byId.get(1).title, "teaching-kit card — Alex picked the classroom / lesson-coach kit");
+  assert.equal(byId.get(2).owner, "chief");
+  assert.equal(byId.get(2).state, "claimed");
+  assert.equal(byId.get(2).title, "Lesson outline coach — SME-gate checklist + outline critique path");
+  assert.equal(byId.get(3).owner, "chief");
+  assert.equal(byId.get(3).state, "done");
+  assert.equal(byId.get(3).title, "Persist morning OSS brainstorm into knowledge note");
+  assert.equal(byId.get(4).owner, "Alex");
+  assert.equal(byId.get(4).state, "blocked");
+  assert.equal(byId.get(4).blocked_on, "privacy design");
+  assert.equal(byId.get(4).title, "Park medical track until privacy story");
+  assert.equal(byId.get(5).owner, "SocialMgr");
+  assert.equal(byId.get(5).state, "open");
+  assert.equal(byId.get(5).title, "3D asset-QA bot — SocialMgr promo clips only for now");
 });
 
 test("an unterminated last line is kept when it is a valid record and ignored when it is not", () => {

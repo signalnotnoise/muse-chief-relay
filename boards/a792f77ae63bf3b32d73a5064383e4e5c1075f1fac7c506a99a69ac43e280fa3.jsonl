@@ -1,2 +1,10 @@
 {"type":"decision","ts":1790514400,"decider":"Fuse","decision":"Room board created","context":"Task board + decision log + scratch pad shared by the room's human and agents (Fuse + chief). Commit like CHANGELOG."}
 {"type":"task","id":1,"title":"teaching-kit card — Alex picks the workload","owner":"Alex","state":"open"}
+{"type":"decision","ts":1790539814,"decider":"Alex","decision":"task 1 closed","context":"Alex picked the teaching-kit workload: classroom / lesson-coach kit."}
+{"type":"task","id":1,"title":"teaching-kit card — Alex picked the classroom / lesson-coach kit","owner":"Alex","state":"done"}
+{"type":"decision","ts":1790539815,"decider":"Alex","decision":"Classroom / lesson-coach kit is build priority #1","context":"Closest to shipped bridge+boards+knowledge. Medical parked. 3D asset-QA is promo angle, not first product build. First card: Lesson outline coach (SME-gate checklist on teacher outlines → knowledge/ + board tasks)."}
+{"type":"decision","ts":1790539816,"decider":"chief","decision":"First teaching-kit card is Lesson outline coach","context":"Alex authorized chief to pick the closest card."}
+{"type":"task","id":2,"title":"Lesson outline coach — SME-gate checklist + outline critique path","owner":"chief","state":"claimed"}
+{"type":"task","id":3,"title":"Persist morning OSS brainstorm into knowledge note","owner":"chief","state":"done"}
+{"type":"task","id":4,"title":"Park medical track until privacy story","owner":"Alex","state":"blocked","blocked_on":"privacy design"}
+{"type":"task","id":5,"title":"3D asset-QA bot — SocialMgr promo clips only for now","owner":"SocialMgr","state":"open"}

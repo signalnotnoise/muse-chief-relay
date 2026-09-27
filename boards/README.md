@@ -41,4 +41,4 @@ hashlib.sha256(channel.strip().encode("utf-8")).hexdigest()
 Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(channel.Trim()))).ToLowerInvariant()
 ```
 
-The seeded board's task #1 stays open until Alex picks the teaching-kit card.
+A later task line with the same id replaces the card. Task #1 is done: Alex picked the classroom / lesson-coach kit.
