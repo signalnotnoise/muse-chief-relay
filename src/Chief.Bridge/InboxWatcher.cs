@@ -65,9 +65,12 @@ internal enum WaitOutcome
 /// <item>Frames that aren't inbound chats, the bridge's own nick, blank and malformed lines are skipped
 /// (and consumed).</item>
 /// <item>The offset file is written atomically (temp file, then rename). One watcher per offset file.</item>
+/// <item>A poll that hits transient filesystem trouble (a torn read, a locked file) doesn't stop a
+/// <c>--wait</c>: the failure is recorded as a warning and the next loop retries, so the listener
+/// stays up instead of dying quietly.</item>
 /// </list>
 /// </summary>
-internal sealed class InboxWatcher
+internal class InboxWatcher
 {
     public const int HeadBytes = 256;
     public static readonly TimeSpan DefaultPollInterval = TimeSpan.FromSeconds(1);
@@ -90,7 +93,7 @@ internal sealed class InboxWatcher
     /// <see cref="WaitAsync"/> still sees it.</summary>
     public string? Warning { get; private set; }
 
-    public WatchPoll Poll()
+    public virtual WatchPoll Poll()
     {
         var saved = ReadOffset(out var warning);
         Warning ??= warning;
@@ -137,6 +140,27 @@ internal sealed class InboxWatcher
         return new WatchPoll(chats, nextOffset, false, reset, dirty);
     }
 
+    /// <summary>
+    /// One poll that never throws on filesystem trouble: returns false with a message instead, so a
+    /// long-running <c>watch --wait</c> survives a transient read failure and retries on the next loop
+    /// rather than dying unnoticed. Tests override <see cref="Poll"/> to inject failures.
+    /// </summary>
+    internal bool TryPoll(out WatchPoll? poll, out string? error)
+    {
+        try
+        {
+            poll = Poll();
+            error = null;
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            poll = null;
+            error = ex.Message;
+            return false;
+        }
+    }
+
     public void Commit(WatchPoll poll)
     {
         if (poll.Dirty)
@@ -169,8 +193,15 @@ internal sealed class InboxWatcher
 
         while (true)
         {
-            var poll = Poll();
-            if (poll.Chats.Count > 0)
+            // A failed poll is transient trouble (a torn read, a locked file), not a reason to stop
+            // listening: warn once and retry on the next loop. A listener that dies quietly is how
+            // messages pile up unnoticed.
+            var poll = TryPoll(out var p, out var error) ? p : null;
+            if (poll is null)
+            {
+                Warning ??= $"inbox poll failed ({error}); retrying";
+            }
+            else if (poll.Chats.Count > 0)
             {
                 if (settle is { } st && st > TimeSpan.Zero)
                     poll = await SettleAsync(poll, st, changed, onTick, ct);
@@ -178,8 +209,11 @@ internal sealed class InboxWatcher
                 Commit(poll);
                 return WaitOutcome.Delivered;
             }
+            else
+            {
+                Commit(poll);
+            }
 
-            Commit(poll);
             if (ct.IsCancellationRequested)
                 return WaitOutcome.Cancelled;
             onTick?.Invoke(WatchPhase.Waiting);
@@ -235,10 +269,19 @@ internal sealed class InboxWatcher
                 return latest; // stopping: deliver what we already have
             }
 
-            var p = Poll();
-            if (p.Chats.Count > latest.Chats.Count)
-                lastNew = clock.Elapsed;
-            latest = p;
+            var p = TryPoll(out var fresh, out var error) ? fresh : null;
+            if (p is null)
+            {
+                // Transient trouble mid-burst: keep what we have and keep waiting. The quiet-timer and
+                // the cap still bound the window, and the chats in hand are always delivered.
+                Warning ??= $"inbox poll failed during settle ({error}); retrying";
+            }
+            else
+            {
+                if (p.Chats.Count > latest.Chats.Count)
+                    lastNew = clock.Elapsed;
+                latest = p;
+            }
         }
     }
 

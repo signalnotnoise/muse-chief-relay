@@ -4,6 +4,14 @@ Merged work, newest first. Times are ET.
 
 ## Unreleased
 
+- **Tool packaging + `watch` hardening** (open). `Chief.Bridge` is now installable as a .NET tool:
+  `dotnet pack` produces `Chief.Bridge.0.1.0.nupkg`, and `dotnet tool install --global Chief.Bridge`
+  puts a `chief-bridge` command on the PATH (`PackAsTool`, `ToolCommandName`, MIT license, repo URL and
+  tags in the csproj). README quick start and `agents/chief.md` now use `chief-bridge`.
+  `watch` is harder to lose: a poll that hits transient filesystem trouble (a torn read, a locked file)
+  no longer kills `watch --wait` — it records a warning (printed on stderr when the wait ends) and retries
+  on the next loop, and a failure mid-`--settle` keeps the chats already collected. A one-shot `watch`
+  that can't read the inbox exits 2 with a clean error instead of a stack trace. 4 new tests (171 total).
 - **#12 Chief responsiveness: bridge auto-ack, `watch --settle`, listener status** (open). chief only acts
   when a background `watch --wait` exits and wakes it, so every reply costs a full wake (about a minute),
   and a missed re-arm goes unnoticed. On 2026-09-27 a listener exited and wasn't re-armed, and Alex's

@@ -75,7 +75,12 @@ internal static class Program
 
         if (!opts.Wait)
         {
-            var poll = watcher.Poll();
+            // A torn read here used to crash with a stack trace; report it as a clean error instead.
+            if (!watcher.TryPoll(out var poll, out var error) || poll is null)
+            {
+                Console.Error.WriteLine($"[chief] watch: cannot read the inbox ({error})");
+                return 2;
+            }
             if (watcher.Warning is { } w)
                 Console.Error.WriteLine($"[chief] warning: {w}");
             Print(poll.Chats); // printed before the offset is saved: a crash repeats, never loses
@@ -140,8 +145,9 @@ internal static class Program
                                                 new chat arrives; --settle keeps collecting until the burst has been
                                                 quiet for <s> seconds (0-60, at most 4x<s> in all) and returns it as
                                                 one array. Writes <state>.status (armed, heartbeat, how it ended) for
-                                                `status`. Exit codes: 0 printed, 2 usage/config error, 3 --timeout
-                                                reached (prints []), 130/143 stopped by SIGINT/SIGTERM (prints []).
+                                                `status`. Exit codes: 0 printed, 2 usage/config error (also an
+                                                unreadable inbox), 3 --timeout reached (prints []), 130/143 stopped
+                                                by SIGINT/SIGTERM (prints []).
               help                              This text
 
             Config for the bridge run: --config or the first argument, then MUSE_RELAY_CONFIG, then

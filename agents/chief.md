@@ -20,10 +20,10 @@ same loop.
   `.inbox_watch.offset` (where `watch` stopped) and `.inbox_watch.offset.status`
   (whether a `watch` is armed, its heartbeat, and how the last one ended).
 
-In the commands below, `Chief.Bridge` means the built bridge
-(`dotnet <publish dir>/Chief.Bridge.dll`, or `dotnet run --project
-src/Chief.Bridge --` from a checkout). `watch` only reads `inbox.jsonl`, so a
-build that has it can run next to an older bridge process that is already
+In the commands below, `chief-bridge` means the installed .NET tool (`dotnet tool
+install --global Chief.Bridge`); from a checkout without the tool installed, read
+it as `dotnet run --project src/Chief.Bridge --`. `watch` only reads `inbox.jsonl`,
+so a build that has it can run next to an older bridge process that is already
 connected.
 
 ## Watching the channel
@@ -32,7 +32,7 @@ connected.
 stopped:
 
 ```bash
-Chief.Bridge watch --config <path>
+chief-bridge watch --config <path>
 # [{"nick":"Alex","trip":null,"text":"hello","ts":1790468200}]
 ```
 
@@ -64,7 +64,7 @@ finishes. So it runs `watch --wait` in the background and treats the command's
 exit as the event:
 
 ```bash
-Chief.Bridge watch --config <path> --wait --timeout 1800 --settle 3
+chief-bridge watch --config <path> --wait --timeout 1800 --settle 3
 ```
 
 `--wait` blocks until at least one new qualifying chat arrives. It wakes on
@@ -107,7 +107,7 @@ stderr when it times out.
 Every `watch` writes `<offset file>.status` (default
 `<base>/.inbox_watch.offset.status`): `armed` with a heartbeat every 5 s while
 it waits, `settling` during a burst, then `delivered`, `timed_out` or `stopped`
-when it exits. `Chief.Bridge status` (and so `hc status`) turns that into one
+when it exits. `chief-bridge status` (and so `hc status`) turns that into one
 line, plus a count of chats sitting in the inbox that no watcher has delivered:
 
 ```
@@ -132,7 +132,7 @@ and you answer twice (this happened on 2026-09-24). Stop one.
 
 Append one JSON object per line to `<base>/outbox.jsonl`, each exactly
 `{"cmd":"chat","text":"..."}` with a trailing newline and valid JSON escaping.
-Or use the CLI: `Chief.Bridge say --config <path> <text>`. A running bridge
+Or use the CLI: `chief-bridge say --config <path> <text>`. A running bridge
 sends new lines within about a second, once its join is confirmed. Lines
 written while the bridge process is stopped are not sent when it starts.
 
