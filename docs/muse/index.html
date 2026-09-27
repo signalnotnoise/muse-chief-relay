@@ -16,6 +16,15 @@
       <div id="status" class="status off">disconnected</div>
     </header>
 
+    <section id="room-board" class="panel room-board" aria-label="Room board">
+      <div class="room-board-head">
+        <h2>Room board</h2>
+        <span class="room-board-ro">read-only</span>
+      </div>
+      <p data-board-note class="room-board-note">Loading room board…</p>
+      <div data-board-lists class="room-board-lists"></div>
+    </section>
+
     <section id="join-panel" class="panel join">
       <h1>Join channel</h1>
       <form id="join-form">
@@ -94,5 +103,6 @@
   </div>
   <script src="reconnect.js"></script>
   <script src="app.js"></script>
+  <script src="board.js"></script>
 </body>
 </html>

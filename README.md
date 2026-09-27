@@ -266,6 +266,8 @@ No build step. Open the static client:
 
 Type the same channel as Chief (the `channel` in its `config.json`; examples here use `your-channel-name`). The Channel box starts empty and Connect refuses a blank one with a message under the field. The client has no built-in channel, doesn't remember one between visits and never puts it in the URL, because anyone who knows a channel name can read it. The nick defaults to `Muse`. hack.chat WSS works from `file://` and any static HTTPS host. The same client is published at `docs/muse/`. Keep `web/muse/` and `docs/muse/` identical.
 
+The page shows a read-only Room board. It fetches `boards/fuse-grok-6f4e970cd8.jsonl` and renders tasks, decisions, and scratch. It never writes. From the deployed page (`docs/muse/`) that path is `../boards/fuse-grok-6f4e970cd8.jsonl`. If the file isn't reachable, the panel says so and chat still works.
+
 ### Getting a trip in Muse (optional password)
 
 1. On the join screen, fill in **Channel**, **Nick** (e.g. `alex`) and **Password (optional, for a trip)**. Pick a password you don't use anywhere else and leave `#` out of it (hack.chat ignores everything after a second `#`).
@@ -313,6 +315,8 @@ Examples (send as the **entire** chat message text):
 | `tests/Chief.Bridge.Tests/` | xunit tests for the bridge's outbox reader, frame handling, config, CLI, inbox watcher, webhook poller (against a local HTTP listener) and auto-ack |
 | `agents/chief.md` | Relay instructions for the chief agent: watch loops, replying, protocol, authority, trust |
 | `web/muse/` | Primary Muse browser client |
+| `boards/` | Room board jsonl (one file per room). The Muse page reads `boards/fuse-grok-6f4e970cd8.jsonl` and does not write it. |
+| `docs/boards/` | Same bytes as that room file, so GitHub Pages (root `docs/`) can serve it to the Muse page |
 | `docs/protocol.md` | Wire protocol |
 | `docs/security.md` | Trust model: trips, pass handling, what needs a human |
 | `docs/index.html` | Landing page (GitHub Pages root) |

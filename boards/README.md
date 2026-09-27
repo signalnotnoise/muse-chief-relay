@@ -25,3 +25,7 @@ file as read-only and never assume they own the last line.
 
 This room's board: `boards/fuse-grok-6f4e970cd8.jsonl`. Task #1 is seeded
 empty, waiting on Alex to pick the teaching-kit card.
+
+The Muse page reads that file and does not append. GitHub Pages only publishes
+`docs/`, so `docs/boards/fuse-grok-6f4e970cd8.jsonl` is a copy of the same
+bytes. Keep the two files identical.
