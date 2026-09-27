@@ -1,0 +1,40 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Room board record (one per line in boards/<room>.jsonl)",
+  "type": "object",
+  "required": ["type"],
+  "oneOf": [
+    {
+      "properties": {
+        "type": { "const": "task" },
+        "id": { "description": "Card number, starts at 1", "type": "integer", "minimum": 1 },
+        "title": { "type": "string", "minLength": 1 },
+        "owner": { "description": "Nick of the human or agent who owns it", "type": "string" },
+        "state": { "enum": ["open", "claimed", "blocked", "done"] },
+        "blocked_on": { "description": "What the card is waiting for (blocked only)", "type": "string" },
+        "handoff_to": { "description": "Who it moves to next", "type": "string" }
+      },
+      "required": ["type", "id", "title", "owner", "state"]
+    },
+    {
+      "properties": {
+        "type": { "const": "decision" },
+        "ts": { "description": "Unix seconds", "type": "integer" },
+        "decider": { "type": "string" },
+        "decision": { "type": "string" },
+        "context": { "type": "string" }
+      },
+      "required": ["type", "ts", "decider", "decision"]
+    },
+    {
+      "properties": {
+        "type": { "const": "scratch" },
+        "ts": { "description": "Unix seconds", "type": "integer" },
+        "author": { "type": "string" },
+        "text": { "type": "string" }
+      },
+      "required": ["type", "ts", "author", "text"]
+    }
+  ]
+}
+

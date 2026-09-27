@@ -449,6 +449,7 @@
       body: String(fd.get("body") || "").trim(),
     };
     // Optional. Leave it blank for anything that shouldn't show up on the public status view.
+    // Never tag Voizle. The Voizle knowledge graph stays off this repo and off the status page.
     const repo = String(fd.get("repo") || "").trim();
     if (repo) payload.repo = repo;
     if (sendChatText(JSON.stringify(payload))) el.taskForm.reset();

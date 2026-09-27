@@ -16,6 +16,26 @@
       <div id="status" class="status off">disconnected</div>
     </header>
 
+    <section id="board-panel" class="panel board" aria-labelledby="board-heading">
+      <h2 id="board-heading">Room board</h2>
+      <p class="hint">Read-only room file <code id="board-path">boards/fuse-grok-6f4e970cd8.jsonl</code>. Tasks, decisions, and scratch committed in the repo. Separate from chat tasks. This page only fetches the file.</p>
+      <p id="board-note" class="hint" role="status">Loading board…</p>
+      <div class="board-grid">
+        <div class="board-col">
+          <h3>Tasks</h3>
+          <ul id="board-tasks"></ul>
+        </div>
+        <div class="board-col">
+          <h3>Decisions</h3>
+          <ul id="board-decisions"></ul>
+        </div>
+        <div class="board-col">
+          <h3>Scratch</h3>
+          <ul id="board-scratch"></ul>
+        </div>
+      </div>
+    </section>
+
     <section id="join-panel" class="panel join">
       <h1>Join channel</h1>
       <form id="join-form">
@@ -93,6 +113,7 @@
     </section>
   </div>
   <script src="reconnect.js"></script>
+  <script src="board.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

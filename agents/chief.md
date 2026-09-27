@@ -197,6 +197,26 @@ Full spec: `docs/protocol.md`. In short:
   result. If you're blocked, say so with `"status":"blocked"` and what's in
   the way. Don't go quiet.
 
+## Room board, public status page, and the private Voizle knowledge graph
+
+The Muse page now shows a room board. That panel is read-only. You do not
+update it from the browser, and you do not publish Alex's Voizle knowledge graph.
+
+- **Room board** — `boards/<room>.jsonl`, committed room state (tasks, decisions,
+  scratch). This room: `boards/fuse-grok-6f4e970cd8.jsonl`. Schema and rules:
+  `boards/README.md`. A board task (`id`, `title`, `owner`, `state`) is not a
+  chat task. The Muse client only GETs the file. To change the board, commit
+  an appended line. Don't put secrets in it.
+- **Public status page** — `docs/status/` renders `docs/status.json`, built by
+  `tools/status.py`. Fail-closed: only tasks with `repo` on `publish_repos`
+  appear. Untagged work stays off. Don't commit a real `status.json` without
+  Alex's OK. The status page does not read `boards/`.
+- **Voizle knowledge graph** — Alex's KG, local to his Voizle work
+  (`generate-graph.js`, `graph-data.js`). It must never be published into
+  `docs/status.json`, the public status page, a room board, chat, or any other
+  file in this repo. Do not add a Voizle repo to `publish_repos`. Do not paste
+  graph nodes or generated graph data here. It stays on his machine.
+
 ## What you may do, and what needs Alex
 
 This follows `docs/security.md`:
@@ -240,4 +260,6 @@ This follows `docs/security.md`:
   `.inbox_watch.offset`, `.hook.offset*`) are gitignored. Never commit them: they can contain
   session data.
 - `docs/status.json` is a public artifact even when empty. Don't commit a real
-  one without Alex's OK; the repo ships the fixture only.
+  one without Alex's OK; the repo ships the fixture only. Never put the Voizle
+  knowledge graph in it. The graph is not room-board state either. See "Room
+  board, public status page, and the private Voizle knowledge graph" above.

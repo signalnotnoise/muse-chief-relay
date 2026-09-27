@@ -111,3 +111,15 @@ whose `repo` appears in the config's `publish_repos` list (default: this relay r
 `docs/status/` renders `docs/status.json`, and `docs/status/?demo` renders a bundled fixture.
 A real `docs/status.json` is a public artifact: even with zero tasks it exposes the coverage windows.
 Commit one only with the repo owner's OK. This repo currently ships the fixture only.
+
+## Room board, public status page, and the private Voizle knowledge graph
+
+Chat on the wire, the committed room board, and the public status page are three different things. Alex's Voizle knowledge graph is a fourth, and it does not belong in this repo at all. They do not feed each other.
+
+**Wire messages** (this document). One JSON object as a whole hack.chat line: `task`, `result`, `opinion`, `ping`, `ack`. A task here has `id`, `to`, `title`, `body`, and an optional `repo`. The Muse client can send these. They are not written into `boards/`.
+
+**Room board** (`boards/<room>.jsonl`, see `boards/README.md` and `boards/schema.json`). Committed room state: `task` (`id`, `title`, `owner`, `state`), `decision`, and `scratch`, one record per line. This room's file is `boards/fuse-grok-6f4e970cd8.jsonl`. It is public the way the CHANGELOG is public. It is not a secret store. The Muse client (`docs/muse/` and `web/muse/`, kept identical) GETs the file and renders the three lists. It never writes. A missing or empty file shows an empty board. A later task line with the same numeric `id` replaces the earlier card. A board `task` is not a wire `task`: different fields, different store.
+
+**Public status page** (`docs/status/`, merged PR #3). Built by `tools/status.py` from an inbox log into `docs/status.json`. Fail-closed: only wire tasks whose `repo` is on `publish_repos` are published, and every counted message needs a trip on `publish_trips`. Untagged work and any other repo stay off the page. The page does not read `boards/`. A real `docs/status.json` is a public artifact even when empty. This repo ships the fixture only.
+
+**Private Voizle knowledge graph.** Alex's knowledge graph is the Voizle KG. It lives locally under his Voizle work and is produced there (`generate-graph.js`, `graph-data.js`). It must never be published into `docs/status.json`, the public status page, a room board, or any other file in this repository. Do not add a Voizle repo to `publish_repos`. Do not paste graph nodes, edges, or generated `graph-data.js` output here. The graph stays on Alex's machine.

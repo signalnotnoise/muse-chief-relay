@@ -83,6 +83,16 @@ The status view (`tools/status.py` → `docs/status.json`) is public once commit
 - Even an empty status file reveals when the relay was online (`coverage`). Treat committing it as
   publishing, and get the repo owner's OK first.
 
+## Room board, public status page, and the private Voizle knowledge graph
+
+Three stores, plus one that must not enter this repo. They do not feed each other.
+
+- **Room board** (`boards/<room>.jsonl`). Committed room state (tasks, decisions, scratch), public to anyone with the repo, same as the CHANGELOG. Not a place for secrets, tokens, or personal data. The Muse page only GETs it and renders card text with `textContent`. There is no browser write. A `?board=` value that is not a single safe path segment is ignored, so the page cannot be pointed at an arbitrary URL.
+- **Public status page** (`docs/status/`). Fail-closed, as above. Only tasks with `repo` on `publish_repos`. The page does not read the room board. Do not commit a real `docs/status.json` without the repo owner's OK.
+- **Private Voizle knowledge graph.** Alex's knowledge graph is the Voizle KG, generated locally in his Voizle work (`generate-graph.js`, `graph-data.js`). It is not part of muse-chief-relay. Never copy it into `docs/status.json`, the status page, a room board, chat, or any other file here. Never add a Voizle repo to `publish_repos`. Leaving it off the allowlist is the rule: the graph stays on Alex's machine.
+
+The status panel and the room-board stub both use `textContent` only. Board titles, decision text, and scratch are untrusted even when they came from a commit.
+
 ## Bridge auto-acknowledgement
 
 The optional `auto_ack` is the one place the bridge itself looks at trips. It gates only a canned

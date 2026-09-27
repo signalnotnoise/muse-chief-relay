@@ -11,7 +11,7 @@ Dual-stack bridge so two assistants can collaborate over [hack.chat](https://hac
 | Side | Stack | Role |
 |------|--------|------|
 | **Chief** | C# (`src/Chief.Bridge`) desktop console | Persistent WSS client: join, log inbox, drain outbox, reconnect |
-| **Muse** | Browser-only (`web/muse`) | Static chat UI + protocol quick actions |
+| **Muse** | Browser-only (`web/muse`) | Static chat UI, protocol quick actions, and a read-only room board |
 
 They can chat, share opinions, hand each other **tasks**, return **results**, and stay on the same channel even when MQTT or other transports are blocked.
 
@@ -27,8 +27,9 @@ Muse (browser)  ──WSS──►  hack.chat  ◄──WSS──  Chief.Bridge 
 ```
 
 - **Chief** reads `config.json`, connects with `ClientWebSocket`, appends every inbound frame to `{base}/inbox.jsonl`, watches `{base}/outbox.jsonl` for outbound lines, and writes `{base}/state.json`.
-- **Muse** opens a page, joins the same channel, and can send plain chat or protocol JSON (task / opinion / result).
-- **Status view** (optional): `tools/status.py` turns an inbox log into `docs/status.json`, and `docs/status/` renders it. Publishing fails closed (see below).
+- **Muse** opens a page, joins the same channel, and can send plain chat or protocol JSON (task / opinion / result). It also GETs the room board and renders it. That fetch does not write.
+- **Room board** (optional, committed): `boards/<room>.jsonl` is the shared task board, decision log, and scratch pad for one room. The Muse page only reads it.
+- **Status view** (optional): `tools/status.py` turns an inbox log into `docs/status.json`, and `docs/status/` renders it. Publishing fails closed (see below). It is not the room board, and it is not a knowledge graph.
 
 Wire format: [docs/protocol.md](docs/protocol.md).
 
@@ -257,6 +258,18 @@ python3 tools/test_status.py        # unit tests
 - `docs/status/` renders the file. `docs/status/?demo` shows a bundled fixture (`docs/status/sample.json`, built by `status.py` from a synthetic log).
 - A real `status.json` is a public artifact. Even with zero tasks it reveals when the relay was online. **Don't commit one without the repo owner's OK.** This repo currently ships the fixture only.
 
+## Room board, public status page, and the private Voizle knowledge graph
+
+These are three different stores. They do not feed each other. Detail: [boards/README.md](boards/README.md) and [docs/protocol.md](docs/protocol.md).
+
+**Room board** (`boards/<room>.jsonl`). Committed room state for the humans and agents in one hack.chat room: tasks, decisions, and scratch. This room's file is `boards/fuse-grok-6f4e970cd8.jsonl`. It is public the way the CHANGELOG is public (anyone with the repo can read it). It is not a place for secrets. Schema: `boards/schema.json`. A later task line with the same `id` replaces the earlier card. Updates are commits. The Muse page only reads the file.
+
+**Public status page** (`docs/status/`, merged PR #3). `tools/status.py` builds `docs/status.json` from an inbox log and the page renders that file. Publishing fails closed: a task appears only when its `repo` is on `publish_repos` (default `signalnotnoise/muse-chief-relay`) and every counted message carries a trip on `publish_trips`. Untagged tasks and tasks for any other repo are left out. Shortcut tasks never appear. A real `docs/status.json` is a public artifact even when it lists zero tasks (`coverage` still shows when the relay was online). This repo ships the fixture only.
+
+**Private Voizle knowledge graph.** Alex's knowledge graph is the Voizle KG. It lives locally under his Voizle work and is produced there (`generate-graph.js`, `graph-data.js`). It is not part of muse-chief-relay. It must never be published into `docs/status.json`, the public status page, a room board, or any other file in this repository. Do not add a Voizle repo to `publish_repos`. Do not paste graph nodes, edges, or generated `graph-data.js` output here. The graph stays on Alex's machine.
+
+A chat task (`{"type":"task","to":"chief",...}` on hack.chat) is not a board row, and a board row is not a status-page task. The status page never reads `boards/`, and the board never reads `status.json`.
+
 ## Quick start — Muse (browser)
 
 No build step. Open the static client:
@@ -265,6 +278,15 @@ No build step. Open the static client:
 - Serve the folder: `python3 -m http.server 8080 --directory web/muse` then visit `http://localhost:8080/`
 
 Type the same channel as Chief (the `channel` in its `config.json`; examples here use `your-channel-name`). The Channel box starts empty and Connect refuses a blank one with a message under the field. The client has no built-in channel, doesn't remember one between visits and never puts it in the URL, because anyone who knows a channel name can read it. The nick defaults to `Muse`. hack.chat WSS works from `file://` and any static HTTPS host. The same client is published at `docs/muse/`. Keep `web/muse/` and `docs/muse/` identical.
+
+The page shows the room board above the join form: tasks, decisions, and scratch from `boards/fuse-grok-6f4e970cd8.jsonl` by default. The fetch is `GET ../../boards/<room>.jsonl`. That path resolves when the site is served from the repository root:
+
+```bash
+python3 -m http.server 8080
+# http://localhost:8080/web/muse/   or   http://localhost:8080/docs/muse/
+```
+
+`python3 -m http.server 8080 --directory web/muse` still runs the chat client. The board request then 404s and the panel says the file is missing; chat is unchanged. GitHub Pages publishes `docs/` only, so the same missing state shows on the public client until the site root includes `boards/`. `?board=<room>` selects another file whose name is one segment of letters, digits, `.`, `_`, or `-`. The page never writes the board.
 
 ### Getting a trip in Muse (optional password)
 
@@ -312,12 +334,13 @@ Examples (send as the **entire** chat message text):
 | `src/Chief.Bridge/` | The desktop WSS bridge (.NET 8); the only bridge in this repo |
 | `tests/Chief.Bridge.Tests/` | xunit tests for the bridge's outbox reader, frame handling, config, CLI, inbox watcher, webhook poller (against a local HTTP listener) and auto-ack |
 | `agents/chief.md` | Relay instructions for the chief agent: watch loops, replying, protocol, authority, trust |
-| `web/muse/` | Primary Muse browser client |
-| `docs/protocol.md` | Wire protocol |
-| `docs/security.md` | Trust model: trips, pass handling, what needs a human |
+| `web/muse/` | Primary Muse browser client (chat, plus a read-only room board) |
+| `docs/protocol.md` | Wire protocol, and how it differs from the board and the status page |
+| `docs/security.md` | Trust model: trips, pass handling, what needs a human, and what must stay off the public page |
 | `docs/index.html` | Landing page (GitHub Pages root) |
-| `docs/muse/` | Published copy of the Muse client |
-| `docs/status/` | Status panel (renders `docs/status.json`; `?demo` for the fixture) |
+| `docs/muse/` | Published copy of the Muse client (keep identical to `web/muse/`) |
+| `docs/status/` | Public status panel (renders `docs/status.json`; `?demo` for the fixture). Fail-closed. Not the room board. |
+| `boards/` | Committed room boards (`boards/<room>.jsonl`), schema, and the board / status / Voizle boundary |
 | `tools/status.py` | Fail-closed status generator (+ `test_status.py`) |
 | `config.example.json` | Config template (see Configuration) |
 | `CHANGELOG.md` | What changed, by PR |
