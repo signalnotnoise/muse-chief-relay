@@ -1,0 +1,64 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Segoe UI", system-ui, -apple-system, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
+  --color-bg: #0f1218;
+  --color-panel: #171b24;
+  --color-panel-2: #1e2430;
+  --color-line: #2a3344;
+  --color-ink: #e6ebf2;
+  --color-muted: #8b97a8;
+  --color-dim: #5f6d80;
+  --color-time: #5a677a;
+  --color-accent: #6ea8fe;
+  --color-accent-2: #7ee0b0;
+  --color-warn: #f0b45a;
+  --color-danger: #f07178;
+  --color-chat: #c9d4e4;
+  --color-proto: #b8a4ff;
+  --color-sys: #6f7d90;
+  --color-on-border: #2f5a48;
+  --color-err-border: #5a3036;
+  --color-btn-top: #4d7fd6;
+  --color-btn-bottom: #3a66b8;
+  --color-btn-border: #2f5294;
+
+  --color-panel-soft: color-mix(in srgb, #171b24 92%, transparent);
+  --color-sidebar: color-mix(in srgb, #1e2430 70%, transparent);
+  --color-actions: color-mix(in srgb, #1e2430 40%, transparent);
+  --color-row-hover: color-mix(in srgb, #1e2430 55%, transparent);
+  --color-me: color-mix(in srgb, #6ea8fe 16%, transparent);
+  --color-proto-border: color-mix(in srgb, #b8a4ff 28%, #2a3344);
+  --color-proto-bg: color-mix(in srgb, #b8a4ff 8%, transparent);
+  --color-proto-tag: color-mix(in srgb, #b8a4ff 40%, transparent);
+  --color-focus: color-mix(in srgb, #6ea8fe 60%, #2a3344);
+  --color-focus-ring: color-mix(in srgb, #6ea8fe 18%, transparent);
+}
+
+@layer base {
+  html,
+  body,
+  #app {
+    height: 100%;
+  }
+  #app {
+    height: 100dvh;
+  }
+  body {
+    overflow: hidden;
+    background:
+      radial-gradient(1200px 600px at 10% -10%, #1a2740 0%, transparent 55%),
+      radial-gradient(900px 500px at 100% 0%, #1a2a28 0%, transparent 50%),
+      var(--color-bg);
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+  }
+}
+
+/* Join and chat panels toggle with this class. !important beats Tailwind
+   display utilities, and the client tests look for the class name "hidden". */
+.hidden {
+  display: none !important;
+}

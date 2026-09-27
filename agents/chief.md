@@ -247,3 +247,4 @@ The folder is public. Never put a channel name, a trip password, a token, or any
   session data.
 - `docs/status.json` is a public artifact even when empty. Don't commit a real
   one without Alex's OK; the repo ships the fixture only.
+- Alex's private knowledge graph (Voizle) is not in this repo; see `docs/security.md`.

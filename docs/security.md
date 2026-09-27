@@ -35,13 +35,15 @@ and derives the trip from the part after it. Beyond that frame, the client:
 - never displays the password: the field is `type="password"` and is cleared as soon as you press
   Connect; every echo (join line, sidebar, online list) shows only the name;
 - never logs it (no `console.*` calls) and never writes it to `localStorage`, `sessionStorage`,
-  cookies or the URL. The inputs have no `name` attribute, so even a native form submit (script
-  failed to load) can't put them in a query string;
-- keeps it in one JavaScript variable inside the page script's closure (not on `window`) so an
-  automatic rejoin after a dropped socket, a tab coming back into view or the network returning
-  gets the **same trip**. Disconnect, a first join that is rejected for good (bad nick, or a
-  taken nick that is still taken after a few tries), or closing/reloading the tab forgets it. A drop
-  after a successful join does not: that rejoin keeps retrying, password included, until Disconnect.
+  cookies or the URL. The join inputs have no `name` attribute. The form is rendered by the Vue
+  app, so a failed script load is an empty page rather than a native submit that could put the
+  field in a query string;
+- keeps it in one JavaScript variable inside the chat module's closure. It is not a Vue `ref`
+  and not a property of `window`, so an automatic rejoin after a dropped socket, a tab coming
+  back into view or the network returning gets the **same trip**. Disconnect, a first join that
+  is rejected for good (bad nick, or a taken nick that is still taken after a few tries), or
+  closing/reloading the tab forgets it. A drop after a successful join does not: that rejoin
+  keeps retrying, password included, until Disconnect.
 - treats a legacy `name#password` typed into the Nick box the same way: as soon as the `#` is typed
   or pasted, the rest moves into the masked Password field and focus follows it. A `name#password`
   that reaches Connect without an input event (e.g. autofill) is split at submit, and the Nick box
@@ -66,10 +68,20 @@ Limits you should know about:
 ## Channel names
 
 The channel name is the only thing keeping a hack.chat channel private. The Muse client has no
-default channel and doesn't remember one: you type it each time, and it isn't put in the URL.
-Keep real channel names out of public pages, examples, issues and screenshots, and use a
-placeholder like `your-channel-name`. A name that has been published (including in git history or
-an old GitHub Pages build) should be treated as known; switching to a fresh name is the only fix.
+default channel and doesn't remember one: you type it each time, and it isn't put in the URL,
+`localStorage`, `sessionStorage`, the console, or the page title. Keep real channel names out of
+public pages, examples, issues and screenshots, and use a placeholder like `your-channel-name`.
+
+Board filenames are the SHA-256 of the channel, so the repo and Pages don't contain the name.
+A hash of a guessable name can be brute-forced, so pick a high-entropy channel. A name already
+published (git history, old PRs, old Pages builds) stays known, and rotating the channel is the
+only fix. The Vue client hashes the channel with Web Crypto after Connect and renders the board
+as text. A missing board, a failed fetch, or a page without `crypto.subtle` leaves the chat up.
+The channel and the hash are not written to the URL, storage, logged output, or the page title.
+
+## Knowledge graph
+
+Alex's private knowledge graph (Voizle) is not in this repo. Never copy it into docs/status.json, the status page, a room board, or chat, and never add a Voizle repo to publish_repos. The room board (committed, public), the status page (fail-closed) and the knowledge graph (private, local) are separate and don't feed each other.
 
 ## Publishing: why untagged means private
 

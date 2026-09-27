@@ -4,95 +4,11 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Muse — hack.chat relay</title>
-  <link rel="stylesheet" href="styles.css" />
+  <script type="module" crossorigin src="./assets/index-S_8oWcI5.js"></script>
+  <link rel="stylesheet" crossorigin href="./assets/index-D9E3oGFM.css">
 </head>
 <body>
-  <div class="app">
-    <header class="top">
-      <div class="brand">
-        <span class="logo">Muse</span>
-        <span class="sub">↔ Chief relay</span>
-      </div>
-      <div id="status" class="status off">disconnected</div>
-    </header>
-
-    <section id="join-panel" class="panel join">
-      <h1>Join channel</h1>
-      <form id="join-form">
-        <label>
-          Channel
-          <input id="channel" type="text" placeholder="your-channel-name" autocomplete="off" spellcheck="false" aria-required="true" aria-describedby="channel-error" />
-        </label>
-        <p id="channel-error" class="field-error hidden" role="alert">Enter a channel name. Use the same one as Chief (the <code>channel</code> in its <code>config.json</code>).</p>
-        <label>
-          Nick
-          <input id="nick" type="text" value="Muse" autocomplete="off" spellcheck="false" />
-        </label>
-        <!-- No name attribute on purpose: even if the script fails to load and the
-             browser submits the form natively, the password can't end up in the URL. -->
-        <label>
-          Password (optional, for a trip)
-          <input id="password" type="password" autocomplete="current-password" spellcheck="false" aria-describedby="password-hint" />
-        </label>
-        <p id="password-hint" class="field-hint">Gives your nick a tripcode so others can tell it's really you. Sent to hack.chat only in the join, never shown, logged or saved by this page. hack.chat ignores anything after a <code>#</code> in the password.</p>
-        <button type="submit">Connect</button>
-      </form>
-      <p class="hint">Uses <code>wss://hack.chat/chat-ws</code>. Works from <code>file://</code> or any static host.</p>
-    </section>
-
-    <section id="chat-panel" class="panel chat hidden">
-      <aside class="sidebar">
-        <h2>Online</h2>
-        <ul id="users"></ul>
-        <div class="meta">
-          <div><span class="k">channel</span> <span id="meta-channel">—</span></div>
-          <div><span class="k">you</span> <span id="meta-nick">—</span></div>
-          <div><span class="k">trip</span> <span id="meta-trip">—</span></div>
-        </div>
-        <button id="disconnect" type="button" class="ghost">Disconnect</button>
-      </aside>
-
-      <main class="main">
-        <div id="transcript" class="transcript" aria-live="polite"></div>
-
-        <form id="send-form" class="composer">
-          <input id="message" type="text" placeholder="Say something…" autocomplete="off" />
-          <button type="submit">Send</button>
-        </form>
-
-        <details class="actions">
-          <summary>Quick protocol actions</summary>
-          <div class="action-grid">
-            <form id="task-form" class="action">
-              <h3>Task → chief</h3>
-              <input name="title" placeholder="Title" required />
-              <textarea name="body" placeholder="Body" rows="2" required></textarea>
-              <input name="repo" placeholder="Repo (optional, owner/name; public status only if listed)" autocomplete="off" spellcheck="false" />
-              <button type="submit">Send task</button>
-            </form>
-            <form id="opinion-form" class="action">
-              <h3>Opinion</h3>
-              <input name="topic" placeholder="Topic" />
-              <textarea name="text" placeholder="Your take" rows="2" required></textarea>
-              <button type="submit">Send opinion</button>
-            </form>
-            <form id="result-form" class="action">
-              <h3>Result</h3>
-              <input name="id" placeholder="Task id" required />
-              <select name="status">
-                <option value="done">done</option>
-                <option value="blocked">blocked</option>
-                <option value="rejected">rejected</option>
-              </select>
-              <textarea name="summary" placeholder="Summary" rows="2" required></textarea>
-              <button type="submit">Send result</button>
-            </form>
-          </div>
-        </details>
-      </main>
-    </section>
-  </div>
-  <script src="reconnect.js"></script>
-  <script src="app.js"></script>
+  <div id="app"></div>
+  <noscript>Muse needs JavaScript to join hack.chat.</noscript>
 </body>
 </html>

@@ -150,15 +150,29 @@ public class ReconnectTests
     }
 
     [Fact]
-    public void Muse_client_copies_are_identical()
+    public void Muse_pages_build_is_the_vite_client()
     {
+        // web/muse is the Vue source. docs/muse is the Vite build GitHub Pages
+        // serves. They are not byte-identical copies anymore.
         var root = RepoRoot();
-        foreach (var name in new[] { "app.js", "reconnect.js", "index.html", "styles.css" })
-        {
-            var docs = File.ReadAllBytes(Path.Combine(root, "docs", "muse", name));
-            var web = File.ReadAllBytes(Path.Combine(root, "web", "muse", name));
-            Assert.Equal(docs, web);
-        }
+        var source = Path.Combine(root, "web", "muse");
+        var published = Path.Combine(root, "docs", "muse");
+
+        Assert.True(File.Exists(Path.Combine(source, "package.json")));
+        Assert.True(File.Exists(Path.Combine(source, "src", "reconnect.js")));
+        Assert.True(File.Exists(Path.Combine(source, "src", "App.vue")));
+
+        var index = File.ReadAllText(Path.Combine(published, "index.html"));
+        Assert.Contains("id=\"app\"", index, StringComparison.Ordinal);
+        Assert.Contains("<script", index, StringComparison.Ordinal);
+        Assert.False(File.Exists(Path.Combine(published, "app.js")));
+        Assert.False(File.Exists(Path.Combine(published, "reconnect.js")));
+
+        var built = string.Concat(Directory.GetFiles(published, "*.*", SearchOption.AllDirectories)
+            .Where(f => f.EndsWith(".js", StringComparison.Ordinal) || f.EndsWith(".html", StringComparison.Ordinal))
+            .Select(File.ReadAllText));
+        Assert.Contains("reconnecting in ", built, StringComparison.Ordinal);
+        Assert.Contains("with a trip password", built, StringComparison.Ordinal);
     }
 
     private static string RepoRoot()
