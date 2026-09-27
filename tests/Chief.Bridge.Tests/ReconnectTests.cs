@@ -1,0 +1,492 @@
+using System.Net;
+using System.Net.WebSockets;
+using System.Text;
+using System.Text.Json;
+
+namespace Chief.Bridge.Tests;
+
+public class ReconnectTests
+{
+    [Fact]
+    public void Jitter_stays_inside_twenty_percent_and_the_cap()
+    {
+        Assert.Equal(TimeSpan.FromMilliseconds(800), Backoff.WithJitter(1, 0));
+        Assert.Equal(TimeSpan.FromMilliseconds(1000), Backoff.WithJitter(1, 0.5));
+        Assert.Equal(TimeSpan.FromMilliseconds(1200), Backoff.WithJitter(1, 1));
+        Assert.Equal(TimeSpan.FromSeconds(30), Backoff.WithJitter(30, 1));
+        Assert.Equal(TimeSpan.FromSeconds(24), Backoff.WithJitter(30, 0));
+        // A bad draw is treated as 0, which is the short end of the range (80%).
+        Assert.Equal(TimeSpan.FromMilliseconds(800), Backoff.WithJitter(1, double.NaN));
+    }
+
+    [Fact]
+    public async Task More_than_three_transient_failures_then_a_join_succeeds()
+    {
+        const string pass = "s3cret-trip-pass";
+        await using var fx = new RelayFixture(pass);
+        // Six failures, each a different way the socket can die, then a join that sticks.
+        // A cap of 3 would stop before the onlineSet.
+        fx.Script.Enqueue(
+            Attempt.ConnectThrows(new IOException($"dns lookup failed {pass}")),
+            Attempt.ConnectThrows(new IOException("connection refused")),
+            Attempt.ConnectThrows(new System.Security.Authentication.AuthenticationException("tls handshake failed")),
+            Attempt.Warn("Nickname taken"),
+            Attempt.CloseDuringJoin(),
+            Attempt.Warn("You are joining channels too fast. Wait a moment and try again."),
+            Attempt.OnlineSetHold(fx.Nick));
+
+        await fx.RunUntilConnected();
+
+        Assert.Equal(7, fx.Script.Created);
+        Assert.Equal(
+            new[] { 1, 2, 4, 8, 16, 30 }.Select(s => TimeSpan.FromSeconds(s)).ToArray(),
+            fx.Delays);
+        var inbox = File.ReadAllText(Path.Combine(fx.Dir.Path, "inbox.jsonl"));
+        Assert.DoesNotContain(pass, inbox);
+        Assert.Contains("join rejected: Nickname taken", inbox);
+        Assert.Contains("\"attempt\":6", inbox);
+        Assert.Contains(pass, fx.Script.SentText);
+    }
+
+    [Fact]
+    public async Task A_drop_after_a_confirmed_join_reconnects()
+    {
+        await using var fx = new RelayFixture();
+        fx.Script.Enqueue(Attempt.OnlineSetThenClose(fx.Nick), Attempt.OnlineSetHold(fx.Nick));
+
+        await fx.RunUntilConnected(minCreated: 2);
+
+        Assert.Equal(2, fx.Script.Created);
+        Assert.Equal(TimeSpan.FromSeconds(1), Assert.Single(fx.Delays));
+        Assert.Contains("server closed the connection", File.ReadAllText(Path.Combine(fx.Dir.Path, "inbox.jsonl")));
+    }
+
+    [Fact]
+    public async Task A_hung_connect_is_abandoned_and_retried()
+    {
+        await using var fx = new RelayFixture { ConnectTimeout = TimeSpan.FromMilliseconds(40) };
+        fx.Script.Enqueue(
+            Attempt.HangConnect(),
+            Attempt.HangConnect(),
+            Attempt.HangConnect(),
+            Attempt.HangConnect(),
+            Attempt.OnlineSetHold(fx.Nick));
+
+        await fx.RunUntilConnected();
+
+        Assert.Equal(5, fx.Script.Created);
+        Assert.Contains("connect not completed within 40ms", File.ReadAllText(Path.Combine(fx.Dir.Path, "inbox.jsonl")));
+    }
+
+    [Fact]
+    public async Task A_failure_to_write_the_log_or_state_does_not_exit()
+    {
+        await using var fx = new RelayFixture();
+        // The session catch already swallows a dead socket. These two paths used to run
+        // *after* that catch, so an IOException here killed the process on the first retry.
+        Directory.CreateDirectory(Path.Combine(fx.Dir.Path, "inbox.jsonl"));
+        Directory.CreateDirectory(Path.Combine(fx.Dir.Path, "state.json"));
+        fx.Script.Enqueue(
+            Attempt.ConnectThrows(new IOException("connection refused")),
+            Attempt.ConnectThrows(new IOException("connection refused")),
+            Attempt.ConnectThrows(new IOException("connection refused")),
+            Attempt.ConnectThrows(new IOException("connection refused")));
+        fx.CancelAfterCreates = 4;
+
+        var ex = await Record.ExceptionAsync(() => fx.RunToCompletion());
+
+        Assert.Null(ex);
+        Assert.Equal(4, fx.Script.Created);
+    }
+
+    [Theory]
+    [InlineData("ftp://example.com/chat")]
+    [InlineData("http://hack.chat/chat-ws")]
+    [InlineData("not a url")]
+    public async Task A_url_that_can_never_work_fails_fast(string url)
+    {
+        await using var fx = new RelayFixture { Url = url };
+        fx.Script.Enqueue(Attempt.OnlineSetHold("n"));
+
+        var ex = await Assert.ThrowsAsync<ConfigException>(() => fx.RunToCompletion());
+
+        Assert.Equal(0, fx.Script.Created);
+        Assert.Contains("url", ex.Message);
+    }
+
+    [Fact]
+    public async Task A_real_socket_keeps_retrying_past_three_rejected_handshakes()
+    {
+        await using var server = await LocalChat.Start();
+        await using var fx = new RelayFixture { Url = server.Url, UseRealSocket = true };
+        server.RejectHandshakes(5);
+        server.ThenOnlineSet("n");
+
+        await fx.RunUntilConnected();
+
+        Assert.True(server.Handshakes >= 6, $"server saw {server.Handshakes} handshakes");
+    }
+
+    [Fact]
+    public void Muse_client_copies_are_identical()
+    {
+        var root = RepoRoot();
+        foreach (var name in new[] { "app.js", "reconnect.js", "index.html", "styles.css" })
+        {
+            var docs = File.ReadAllBytes(Path.Combine(root, "docs", "muse", name));
+            var web = File.ReadAllBytes(Path.Combine(root, "web", "muse", name));
+            Assert.Equal(docs, web);
+        }
+    }
+
+    private static string RepoRoot()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir is not null)
+        {
+            if (File.Exists(Path.Combine(dir.FullName, "MuseChiefRelay.sln")))
+                return dir.FullName;
+            dir = dir.Parent;
+        }
+
+        throw new InvalidOperationException("repo root not found from " + AppContext.BaseDirectory);
+    }
+}
+
+internal sealed class RelayFixture : IAsyncDisposable
+{
+    public TempDir Dir { get; } = new();
+    public string Nick { get; } = "n";
+    public SocketScript Script { get; } = new();
+    public List<TimeSpan> Delays { get; } = new();
+    public string? Url { get; init; }
+    public bool UseRealSocket { get; init; }
+    public TimeSpan ConnectTimeout { get; init; } = TimeSpan.FromSeconds(2);
+    public int CancelAfterCreates { get; set; }
+
+    private readonly string _pass;
+
+    public RelayFixture(string pass = "") => _pass = pass;
+
+    public async Task RunUntilConnected(int minCreated = 1)
+    {
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+        var run = Run(cts);
+        var statePath = Path.Combine(Dir.Path, "state.json");
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(6);
+        var connected = false;
+        while (DateTime.UtcNow < deadline && !cts.IsCancellationRequested)
+        {
+            var attemptsReady = UseRealSocket || Script.Created >= minCreated;
+            if (attemptsReady && StateFlag(statePath, "connected"))
+            {
+                connected = true;
+                break;
+            }
+
+            await Task.Delay(15);
+        }
+
+        cts.Cancel();
+        await run;
+        Assert.True(connected, $"never connected (attempts={Script.Created})");
+    }
+
+    public async Task RunToCompletion()
+    {
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+        await Run(cts);
+    }
+
+    private async Task Run(CancellationTokenSource cts)
+    {
+        var cfg = WriteConfig();
+        var runtime = new BridgeRuntime
+        {
+            SocketFactory = timeout =>
+            {
+                if (UseRealSocket)
+                    return new ClientRelaySocket(cfg.Origin, timeout);
+                var socket = Script.Create(timeout);
+                if (CancelAfterCreates > 0 && Script.Created >= CancelAfterCreates)
+                    cts.Cancel();
+                return socket;
+            },
+            Delay = (delay, token) =>
+            {
+                Delays.Add(delay);
+                token.ThrowIfCancellationRequested();
+                return Task.CompletedTask;
+            },
+            JitterUnit = () => 0.5,
+            ConnectTimeout = ConnectTimeout,
+            JoinTimeout = TimeSpan.FromSeconds(2),
+            CloseGrace = TimeSpan.FromMilliseconds(30),
+            OutboxPoll = TimeSpan.FromMilliseconds(20)
+        };
+
+        var bridge = new HackChatBridge(cfg, runtime);
+        await bridge.RunForeverAsync(cts.Token);
+    }
+
+    public ValueTask DisposeAsync()
+    {
+        Dir.Dispose();
+        return ValueTask.CompletedTask;
+    }
+
+    private RelayConfig WriteConfig()
+    {
+        var path = Dir.File("config.json");
+        var url = Url ?? "wss://hack.chat/chat-ws";
+        var json = JsonSerializer.Serialize(new
+        {
+            url,
+            origin = "https://hack.chat",
+            channel = "throwaway-test",
+            nick = Nick,
+            pass = _pass,
+            @base = "."
+        });
+        File.WriteAllText(path, json);
+        return RelayConfig.Load(path, false, Dir.Path, _ => null);
+    }
+
+    private static bool StateFlag(string path, string name)
+    {
+        try
+        {
+            if (!File.Exists(path))
+                return false;
+            using var doc = JsonDocument.Parse(File.ReadAllText(path));
+            return doc.RootElement.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.True;
+        }
+        catch (Exception ex) when (ex is IOException or JsonException)
+        {
+            return false;
+        }
+    }
+}
+
+internal sealed class SocketScript
+{
+    private readonly Queue<Attempt> _attempts = new();
+    public int Created { get; private set; }
+    public List<string> Sent { get; } = new();
+    public string SentText => string.Join("\n", Sent);
+
+    public void Enqueue(params Attempt[] attempts)
+    {
+        foreach (var a in attempts)
+            _attempts.Enqueue(a);
+    }
+
+    public IRelaySocket Create(TimeSpan _)
+    {
+        Created++;
+        var attempt = _attempts.Count > 0 ? _attempts.Dequeue() : Attempt.CloseDuringJoin();
+        return new ScriptedSocket(attempt, Sent);
+    }
+}
+
+internal sealed class Attempt
+{
+    public Exception? ConnectError { get; init; }
+    public bool Hang { get; init; }
+    public bool Hold { get; init; }
+    public string[] Messages { get; init; } = [];
+
+    public static Attempt ConnectThrows(Exception ex) => new() { ConnectError = ex };
+    public static Attempt HangConnect() => new() { Hang = true };
+    public static Attempt Warn(string text) => new()
+    {
+        Messages = [JsonSerializer.Serialize(new { cmd = "warn", text })]
+    };
+    public static Attempt CloseDuringJoin() => new();
+    public static Attempt OnlineSetHold(string nick) => OnlineSet(nick, hold: true);
+    public static Attempt OnlineSetThenClose(string nick) => OnlineSet(nick, hold: false);
+
+    private static Attempt OnlineSet(string nick, bool hold) => new()
+    {
+        Hold = hold,
+        Messages =
+        [
+            JsonSerializer.Serialize(new
+            {
+                cmd = "onlineSet",
+                nicks = new[] { nick },
+                users = new[] { new { nick, isme = true, trip = "AbCdEf" } }
+            })
+        ]
+    };
+}
+
+internal sealed class ScriptedSocket(Attempt attempt, List<string> sent) : IRelaySocket
+{
+    private readonly Queue<byte[]> _incoming = new(attempt.Messages.Select(m => Encoding.UTF8.GetBytes(m)));
+    private bool _open;
+
+    public bool CanCloseOutput => _open;
+
+    public async Task ConnectAsync(Uri uri, CancellationToken cancellationToken)
+    {
+        if (attempt.Hang)
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+        if (attempt.ConnectError is { } error)
+            throw error;
+        _open = true;
+    }
+
+    public ValueTask SendAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken)
+    {
+        sent.Add(Encoding.UTF8.GetString(buffer.Span));
+        return ValueTask.CompletedTask;
+    }
+
+    public async ValueTask<RelayReceiveResult> ReceiveAsync(Memory<byte> buffer, CancellationToken cancellationToken)
+    {
+        if (_incoming.Count > 0)
+        {
+            var msg = _incoming.Dequeue();
+            if (msg.Length > buffer.Length)
+                throw new InvalidOperationException("test frame does not fit the receive buffer");
+            msg.CopyTo(buffer.Span);
+            return new RelayReceiveResult(msg.Length, true, false, null, null);
+        }
+
+        if (attempt.Hold)
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+        _open = false;
+        return RelayReceiveResult.Closed("Close", null);
+    }
+
+    public ValueTask CloseOutputAsync(CancellationToken cancellationToken)
+    {
+        _open = false;
+        return ValueTask.CompletedTask;
+    }
+
+    public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+}
+
+/// <summary>A localhost hack.chat stand-in. It never dials the public service.</summary>
+internal sealed class LocalChat : IAsyncDisposable
+{
+    private readonly HttpListener _listener;
+    private readonly CancellationTokenSource _cts = new();
+    private readonly Task _loop;
+    private int _rejectsLeft;
+    private int _handshakes;
+    private volatile bool _accept;
+
+    public string Url { get; }
+    public int Handshakes => _handshakes;
+
+    private LocalChat(HttpListener listener, int port)
+    {
+        _listener = listener;
+        Url = $"ws://127.0.0.1:{port}/";
+        _loop = Task.Run(Serve);
+    }
+
+    public static Task<LocalChat> Start()
+    {
+        var port = 18080 + Random.Shared.Next(0, 2000);
+        for (var i = 0; i < 20; i++)
+        {
+            var listener = new HttpListener();
+            listener.Prefixes.Add($"http://127.0.0.1:{port}/");
+            try
+            {
+                listener.Start();
+                return Task.FromResult(new LocalChat(listener, port));
+            }
+            catch (HttpListenerException)
+            {
+                listener.Close();
+                port++;
+            }
+        }
+
+        throw new InvalidOperationException("no free localhost port");
+    }
+
+    public void RejectHandshakes(int count) => _rejectsLeft = count;
+
+    public void ThenOnlineSet(string nick)
+    {
+        _nick = nick;
+        _accept = true;
+    }
+
+    private string _nick = "n";
+
+    private async Task Serve()
+    {
+        while (!_cts.IsCancellationRequested)
+        {
+            HttpListenerContext ctx;
+            try
+            {
+                ctx = await _listener.GetContextAsync();
+            }
+            catch
+            {
+                return;
+            }
+
+            Interlocked.Increment(ref _handshakes);
+            if (Interlocked.Decrement(ref _rejectsLeft) >= 0)
+            {
+                try
+                {
+                    ctx.Response.StatusCode = 500;
+                    ctx.Response.Close();
+                }
+                catch { /* client already gone */ }
+                continue;
+            }
+
+            if (!_accept || !ctx.Request.IsWebSocketRequest)
+            {
+                try { ctx.Response.Abort(); } catch { /* ignore */ }
+                continue;
+            }
+
+            WebSocket? ws = null;
+            try
+            {
+                var accepted = await ctx.AcceptWebSocketAsync(subProtocol: null);
+                ws = accepted.WebSocket;
+                var payload = Encoding.UTF8.GetBytes(
+                    JsonSerializer.Serialize(new
+                    {
+                        cmd = "onlineSet",
+                        nicks = new[] { _nick },
+                        users = new[] { new { nick = _nick, isme = true } }
+                    }));
+                await ws.SendAsync(payload, WebSocketMessageType.Text, true, CancellationToken.None);
+                var buf = new byte[256];
+                while (ws.State == WebSocketState.Open && !_cts.IsCancellationRequested)
+                    await ws.ReceiveAsync(buf, _cts.Token);
+            }
+            catch
+            {
+                // the bridge closed, or the test ended
+            }
+            finally
+            {
+                try { ws?.Abort(); } catch { /* ignore */ }
+            }
+        }
+    }
+
+    public ValueTask DisposeAsync()
+    {
+        _cts.Cancel();
+        _listener.Stop();
+        _listener.Close();
+        _cts.Dispose();
+        return ValueTask.CompletedTask;
+    }
+}

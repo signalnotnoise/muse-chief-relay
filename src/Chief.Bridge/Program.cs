@@ -126,7 +126,9 @@ internal static class Program
             """
             Chief.Bridge — Muse↔Chief hack.chat WSS relay (desktop)
 
-              [--config <path> | <path>]        Run the bridge until SIGTERM / Ctrl+C
+              [--config <path> | <path>]        Run the bridge until SIGTERM / Ctrl+C.
+                                                Transient failures retry forever (backoff 1s–30s
+                                                with jitter). A bad config exits 2; it is not retried.
               say [--config <path>] <text>      Append one chat line to {base}/outbox.jsonl and exit
               status [--config <path>] [--state <file>]
                                                 Print channel/nick, the bridge state from state.json, whether a

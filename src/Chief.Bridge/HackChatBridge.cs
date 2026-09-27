@@ -1,5 +1,4 @@
 using System.Collections.Concurrent;
-using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -8,12 +7,11 @@ namespace Chief.Bridge;
 
 internal sealed class HackChatBridge
 {
-    private static readonly TimeSpan JoinTimeout = TimeSpan.FromSeconds(15);
-    private static readonly TimeSpan CloseGrace = TimeSpan.FromSeconds(2);
-    private static readonly TimeSpan OutboxPoll = TimeSpan.FromMilliseconds(350);
     private const int MaxMessageBytes = 1 << 20;
 
     private readonly RelayConfig _cfg;
+    private readonly BridgeRuntime _runtime;
+    private readonly Func<TimeSpan, IRelaySocket> _socketFactory;
     private readonly string _inbox;
     private readonly string _unread;
     private readonly string _state;
@@ -26,9 +24,11 @@ internal sealed class HackChatBridge
     private readonly ConcurrentQueue<JsonObject> _acks = new();
     private readonly SemaphoreSlim _sendWake = new(0, 1);
 
-    public HackChatBridge(RelayConfig cfg)
+    public HackChatBridge(RelayConfig cfg, BridgeRuntime? runtime = null)
     {
         _cfg = cfg;
+        _runtime = runtime ?? BridgeRuntime.For(cfg);
+        _socketFactory = _runtime.SocketFactory ?? (timeout => new ClientRelaySocket(cfg.Origin, timeout));
         Directory.CreateDirectory(cfg.BaseDir);
         _inbox = Path.Combine(cfg.BaseDir, "inbox.jsonl");
         _unread = Path.Combine(cfg.BaseDir, "unread.jsonl");
@@ -51,13 +51,24 @@ internal sealed class HackChatBridge
 
     public async Task RunForeverAsync(CancellationToken ct)
     {
+        // A bad URL cannot start working on the next try. Fail before the loop so the process exits
+        // (Main maps ConfigException to exit 2) instead of retrying it forever.
+        if (RelayUrl.PermanentProblem(_cfg.Url) is { } problem)
+            throw new ConfigException($"{_cfg.ConfigPath}: {problem}");
+
         var backoff = new Backoff();
+        var attempt = 0;
         while (!ct.IsCancellationRequested)
         {
+            attempt++;
             var session = new Session();
             try
             {
-                await RunOnceAsync(session, ct);
+                await RunOnceAsync(session, attempt, ct);
+            }
+            catch (ConfigException)
+            {
+                throw;
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
@@ -65,53 +76,139 @@ internal sealed class HackChatBridge
             }
             catch (Exception ex)
             {
-                session.EndReason ??= ex.Message;
+                // DNS, TLS, a refused connection, a hung handshake, a join warn, a close during
+                // the join: all transient. None of them ends the process.
+                session.EndReason ??= Redact(ex.Message);
             }
 
             if (ct.IsCancellationRequested)
                 break;
 
             var uptime = session.Uptime;
-            var delay = backoff.NextDelaySeconds(session.Confirmed, uptime);
-            var reason = session.EndReason ?? "session ended";
-            LogEvent("err", new JsonObject
-            {
-                ["error"] = reason,
-                ["joined"] = session.Confirmed,
-                ["uptime_s"] = (long)uptime.TotalSeconds
-            });
-            Console.Error.WriteLine(
-                $"[chief] disconnect: {reason} (joined: {(session.Confirmed ? "yes" : "no")}, up {(long)uptime.TotalSeconds}s)");
-            WriteState(alive: false, connected: false, reconnecting: true);
-
-            Console.WriteLine($"[chief] reconnect in {delay}s…");
+            var baseDelay = backoff.NextDelaySeconds(session.Confirmed, uptime);
+            var delay = Backoff.WithJitter(baseDelay, SafeJitter());
+            var reason = Redact(session.EndReason ?? "session ended");
+            // Logging and state.json are how an operator sees the retry. A failure here (disk full,
+            // inbox path replaced, stderr closed) must not be the thing that kills the bridge.
             try
             {
-                await Task.Delay(TimeSpan.FromSeconds(delay), ct);
+                LogEvent("err", new JsonObject
+                {
+                    ["error"] = reason,
+                    ["joined"] = session.Confirmed,
+                    ["uptime_s"] = (long)uptime.TotalSeconds,
+                    ["attempt"] = attempt
+                });
             }
-            catch (OperationCanceledException)
+            catch (Exception ex)
+            {
+                TryStderr($"[chief] couldn't log disconnect: {Redact(ex.Message)}");
+            }
+
+            TryStderr(
+                $"[chief] disconnect: {reason} (joined: {(session.Confirmed ? "yes" : "no")}, up {(long)uptime.TotalSeconds}s, attempt {attempt})");
+            try
+            {
+                WriteState(alive: false, connected: false, reconnecting: true);
+            }
+            catch (Exception ex)
+            {
+                TryStderr($"[chief] couldn't write state.json: {Redact(ex.Message)}");
+            }
+
+            Console.WriteLine($"[chief] reconnect in {delay.TotalSeconds:0.#}s (attempt {attempt})…");
+            try
+            {
+                await _runtime.Delay(delay, ct);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
                 break;
             }
+            catch (Exception ex)
+            {
+                TryStderr($"[chief] delay failed: {Redact(ex.Message)}");
+            }
         }
 
-        WriteState(alive: false, connected: false, reconnecting: false);
+        try
+        {
+            WriteState(alive: false, connected: false, reconnecting: false);
+        }
+        catch (Exception ex)
+        {
+            TryStderr($"[chief] couldn't write state.json: {Redact(ex.Message)}");
+        }
+
         Console.WriteLine("[chief] stopped");
     }
 
-    private async Task RunOnceAsync(Session s, CancellationToken ct)
+    private double SafeJitter()
+    {
+        try
+        {
+            var unit = _runtime.JitterUnit();
+            if (double.IsNaN(unit) || unit < 0)
+                return 0;
+            return unit > 1 ? 1 : unit;
+        }
+        catch
+        {
+            return 0.5;
+        }
+    }
+
+    private string Redact(string? text)
+    {
+        if (string.IsNullOrEmpty(text))
+            return "session ended";
+        if (!string.IsNullOrEmpty(_cfg.Pass))
+            text = text.Replace(_cfg.Pass, LogRedaction.Redacted, StringComparison.Ordinal);
+        return text;
+    }
+
+    private static string FormatShort(TimeSpan t) =>
+        t.TotalSeconds >= 10 ? $"{t.TotalSeconds:0}s"
+        : t.TotalSeconds >= 1 ? $"{t.TotalSeconds:0.#}s"
+        : $"{t.TotalMilliseconds:0}ms";
+
+    private static void TryStderr(string line)
+    {
+        try
+        {
+            Console.Error.WriteLine(line);
+        }
+        catch
+        {
+            // stderr can be closed; the loop still has to keep trying
+        }
+    }
+
+    private async Task RunOnceAsync(Session s, int attempt, CancellationToken ct)
     {
         // Acks are best effort and belong to the moment: none carries over from an earlier session.
         while (_acks.TryDequeue(out _)) { }
 
-        using var ws = new ClientWebSocket();
-        ws.Options.SetRequestHeader("Origin", _cfg.Origin);
+        await using var ws = _socketFactory(_runtime.ConnectTimeout);
+        using (var connectCts = CancellationTokenSource.CreateLinkedTokenSource(ct))
+        {
+            if (_runtime.ConnectTimeout > TimeSpan.Zero && _runtime.ConnectTimeout != Timeout.InfiniteTimeSpan)
+                connectCts.CancelAfter(_runtime.ConnectTimeout);
 
-        Console.WriteLine($"[chief] connecting {_cfg.Url}…");
-        await ws.ConnectAsync(new Uri(_cfg.Url), ct);
+            Console.WriteLine($"[chief] connecting {RelayUrl.ForLog(_cfg.Url)} (attempt {attempt})…");
+            try
+            {
+                await ws.ConnectAsync(new Uri(_cfg.Url), connectCts.Token);
+            }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+            {
+                throw new TimeoutException($"connect not completed within {FormatShort(_runtime.ConnectTimeout)}");
+            }
+        }
+
         s.OpenedAt = DateTimeOffset.UtcNow;
 
-        // ClientWebSocket allows one send at a time; the outbox pump and the close share this lock.
+        // One send at a time; the outbox pump and the close share this lock.
         var sendLock = new SemaphoreSlim(1, 1);
         // The receive loop is stopped only by sessionCts, not by shutdown directly, so on shutdown
         // it can still read the server's reply to our close frame.
@@ -132,7 +229,7 @@ internal sealed class HackChatBridge
         var recvTask = ReceiveLoopAsync(ws, s, joinResult, sessionCts.Token);
         var outTask = Task.CompletedTask;
 
-        var joinTimeout = Task.Delay(JoinTimeout, pumpCts.Token)
+        var joinTimeout = Task.Delay(_runtime.JoinTimeout, pumpCts.Token)
             .ContinueWith(_ => { }, TaskScheduler.Default);
         var first = await Task.WhenAny(joinResult.Task, recvTask, joinTimeout);
 
@@ -150,7 +247,7 @@ internal sealed class HackChatBridge
         }
         else if (first == joinTimeout && !ct.IsCancellationRequested)
         {
-            s.EndReason = $"join not confirmed within {JoinTimeout.TotalSeconds:0}s";
+            s.EndReason = $"join not confirmed within {_runtime.JoinTimeout.TotalSeconds:0}s";
         }
 
         if (recvTask.IsCompleted)
@@ -161,8 +258,8 @@ internal sealed class HackChatBridge
         // End of session (drop, rejected join, or shutdown): stop the outbox pump, send a close frame if
         // the socket is still up, give the server a moment to answer it, then stop the receive loop.
         pumpCts.Cancel();
-        await TryCloseOutputAsync(ws, sendLock);
-        sessionCts.CancelAfter(CloseGrace);
+        await TryCloseOutputAsync(ws, sendLock, _runtime.CloseGrace);
+        sessionCts.CancelAfter(_runtime.CloseGrace);
         try
         {
             await Task.WhenAll(recvTask, outTask);
@@ -189,7 +286,7 @@ internal sealed class HackChatBridge
     }
 
     private async Task<string> ReceiveLoopAsync(
-        ClientWebSocket ws, Session s, TaskCompletionSource<string?> joinResult, CancellationToken ct)
+        IRelaySocket ws, Session s, TaskCompletionSource<string?> joinResult, CancellationToken ct)
     {
         var buffer = new byte[16 * 1024];
         var assembler = new MessageAssembler(MaxMessageBytes);
@@ -197,10 +294,10 @@ internal sealed class HackChatBridge
         while (true)
         {
             var result = await ws.ReceiveAsync(buffer.AsMemory(), ct);
-            if (result.MessageType == WebSocketMessageType.Close)
+            if (result.IsClose)
             {
-                var status = ws.CloseStatus?.ToString() ?? "no status";
-                var desc = string.IsNullOrEmpty(ws.CloseStatusDescription) ? "" : $" {ws.CloseStatusDescription}";
+                var status = result.CloseStatus ?? "no status";
+                var desc = string.IsNullOrEmpty(result.CloseDescription) ? "" : $" {result.CloseDescription}";
                 return $"server closed the connection ({status}{desc})";
             }
 
@@ -279,7 +376,7 @@ internal sealed class HackChatBridge
         WriteState(alive: true, connected: s.Confirmed, reconnecting: false);
     }
 
-    private async Task OutboxLoopAsync(ClientWebSocket ws, SemaphoreSlim sendLock, CancellationToken ct)
+    private async Task OutboxLoopAsync(IRelaySocket ws, SemaphoreSlim sendLock, CancellationToken ct)
     {
         while (true)
         {
@@ -316,7 +413,7 @@ internal sealed class HackChatBridge
                 _outbox.Commit(line);
             }
 
-            await _sendWake.WaitAsync(OutboxPoll, ct);
+            await _sendWake.WaitAsync(_runtime.OutboxPoll, ct);
         }
     }
 
@@ -336,13 +433,13 @@ internal sealed class HackChatBridge
     private ListenerView ReadListener() =>
         ListenerView.Classify(WatchStatus.TryRead(_watchStatus), DateTimeOffset.UtcNow, ProcessInfo.IsRunning);
 
-    private static async Task SendAsync(ClientWebSocket ws, SemaphoreSlim sendLock, JsonNode payload, CancellationToken ct)
+    private static async Task SendAsync(IRelaySocket ws, SemaphoreSlim sendLock, JsonNode payload, CancellationToken ct)
     {
         var bytes = Encoding.UTF8.GetBytes(payload.ToJsonString(JsonUtil.Opts));
         await sendLock.WaitAsync(ct);
         try
         {
-            await ws.SendAsync(bytes, WebSocketMessageType.Text, true, ct);
+            await ws.SendAsync(bytes, ct);
         }
         finally
         {
@@ -350,18 +447,18 @@ internal sealed class HackChatBridge
         }
     }
 
-    private static async Task TryCloseOutputAsync(ClientWebSocket ws, SemaphoreSlim sendLock)
+    private static async Task TryCloseOutputAsync(IRelaySocket ws, SemaphoreSlim sendLock, TimeSpan grace)
     {
         try
         {
-            if (!await sendLock.WaitAsync(CloseGrace))
+            if (!await sendLock.WaitAsync(grace))
                 return;
             try
             {
-                if (ws.State is WebSocketState.Open or WebSocketState.CloseReceived)
+                if (ws.CanCloseOutput)
                 {
-                    using var timeout = new CancellationTokenSource(CloseGrace);
-                    await ws.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "bye", timeout.Token);
+                    using var timeout = new CancellationTokenSource(grace);
+                    await ws.CloseOutputAsync(timeout.Token);
                 }
             }
             finally

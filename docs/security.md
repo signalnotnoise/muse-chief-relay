@@ -39,8 +39,9 @@ and derives the trip from the part after it. Beyond that frame, the client:
   failed to load) can't put them in a query string;
 - keeps it in one JavaScript variable inside the page script's closure (not on `window`) so an
   automatic rejoin after a dropped socket, a tab coming back into view or the network returning
-  gets the **same trip**. Disconnect, a permanently rejected join, or closing/reloading the tab
-  forgets it;
+  gets the **same trip**. Disconnect, a first join that is rejected for good (bad nick, or a
+  taken nick that is still taken after a few tries), or closing/reloading the tab forgets it. A drop
+  after a successful join does not: that rejoin keeps retrying, password included, until Disconnect.
 - treats a legacy `name#password` typed into the Nick box the same way: as soon as the `#` is typed
   or pasted, the rest moves into the masked Password field and focus follows it. A `name#password`
   that reaches Connect without an input event (e.g. autofill) is split at submit, and the Nick box
