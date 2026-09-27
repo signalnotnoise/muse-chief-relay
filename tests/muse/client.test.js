@@ -10,7 +10,7 @@ const published = path.join(__dirname, "../../docs/muse");
 
 test("the Muse page is styled with Tailwind", () => {
   const css = fs.readFileSync(path.join(srcDir, "styles.css"), "utf8");
-  const vite = fs.readFileSync(path.join(srcDir, "../vite.config.js"), "utf8");
+  const vite = fs.readFileSync(path.join(srcDir, "../vite.config.mjs"), "utf8");
   const app = fs.readFileSync(appVue, "utf8");
   assert.match(css, /@import\s+"tailwindcss"/);
   assert.match(vite, /@tailwindcss\/vite/);
@@ -68,7 +68,14 @@ test("the Pages build is the Vite output, not a second copy of the old client", 
   assert.match(text, /with a trip password/);
   assert.match(text, /\.overflow-y-auto/);
   assert.match(text, /\.min-h-0/);
+  assert.match(text, /Join a channel to see its room board/);
+  assert.match(text, /No board for this channel yet/);
+  const index = fs.readFileSync(path.join(published, "index.html"), "utf8");
+  assert.match(index, /src="\.\/assets\//);
+  assert.match(index, /href="\.\/assets\//);
+  assert.doesNotMatch(index, /src="\/assets\//);
   assert.equal(fs.existsSync(path.join(published, "app.js")), false);
+  assert.equal(fs.existsSync(path.join(published, "board.js")), false);
   assert.equal(fs.existsSync(path.join(published, "reconnect.js")), false);
   assert.doesNotMatch(text, /localStorage|sessionStorage/);
 });

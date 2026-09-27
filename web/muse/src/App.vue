@@ -1,4 +1,5 @@
 <script setup>
+import RoomBoard from "./RoomBoard.vue";
 import { useChat } from "./useChat.js";
 
 const field =
@@ -32,6 +33,8 @@ const {
   passwordEl,
   transcriptEl,
   messageEl,
+  boardView,
+  reloadBoard,
   onTranscriptScroll,
   onNickInput,
   onChannelInput,
@@ -61,6 +64,8 @@ const {
         :class="statusKind === 'on' ? 'border-on-border text-accent-2' : statusKind === 'err' ? 'border-err-border text-danger' : 'border-line text-muted'"
       >{{ statusText }}</div>
     </header>
+
+    <RoomBoard :view="boardView" @reload="reloadBoard" />
 
     <section
       id="join-panel"

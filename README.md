@@ -11,7 +11,7 @@ Dual-stack bridge so two assistants can collaborate over [hack.chat](https://hac
 | Side | Stack | Role |
 |------|--------|------|
 | **Chief** | C# (`src/Chief.Bridge`) desktop console | Persistent WSS client: join, log inbox, drain outbox, reconnect |
-| **Muse** | Vue 3 + Vite + Tailwind (`web/muse`), static build at `docs/muse` | Chat UI + protocol quick actions |
+| **Muse** | Vue 3 + Vite + Tailwind (`web/muse`), static build at `docs/muse` | Chat UI, protocol quick actions, and a read-only room board |
 
 They can chat, share opinions, hand each other **tasks**, return **results**, and stay on the same channel even when MQTT or other transports are blocked.
 
@@ -27,7 +27,7 @@ Muse (browser)  ──WSS──►  hack.chat  ◄──WSS──  Chief.Bridge 
 ```
 
 - **Chief** reads `config.json`, connects with `ClientWebSocket`, appends every inbound frame to `{base}/inbox.jsonl`, watches `{base}/outbox.jsonl` for outbound lines, and writes `{base}/state.json`.
-- **Muse** is a Vue 3 app styled with Tailwind. Source is `web/muse/` (Vite). The page you open is the static build in `docs/muse/`. It joins the same channel and can send plain chat or protocol JSON (task / opinion / result).
+- **Muse** is a Vue 3 app styled with Tailwind. Source is `web/muse/` (Vite). The page you open is the static build in `docs/muse/`. It joins the same channel and can send plain chat or protocol JSON (task / opinion / result). After Connect it shows that channel's room board read-only (`boards/<sha256(channel)>.jsonl`).
 - **Status view** (optional): `tools/status.py` turns an inbox log into `docs/status.json`, and `docs/status/` renders it. Publishing fails closed (see below).
 
 Wire format: [docs/protocol.md](docs/protocol.md).
@@ -90,7 +90,7 @@ Runtime files (`inbox.jsonl`, `outbox.jsonl`, `unread.jsonl`, `state.json`) live
 - **Auto-ack** (optional, off by default): an instant `(auto) got it…` line when a trusted trip addresses the bridge. See "Auto-acknowledgement" below.
 - **Logs.** `inbox.jsonl` records every frame in and out. Frames that aren't JSON objects are logged as `{"raw": "..."}` and otherwise ignored. The join is logged without the pass. Any outbound `pass` field and the `token` in hack.chat's `session` frame are logged as `<redacted>`. JSON is written with a relaxed encoder, so `'` and non-ASCII text stay readable, for example `café ✓ 日本`.
 
-Unit tests: `dotnet test MuseChiefRelay.sln` (xunit, `tests/Chief.Bridge.Tests`). Muse client tests: `node --test tests/muse/` (reconnect decisions, follow-tail scroll, and a check that `docs/muse/` is the Vite build).
+Unit tests: `dotnet test MuseChiefRelay.sln` (xunit, `tests/Chief.Bridge.Tests`). Muse client tests: `node --test tests/muse/` (reconnect decisions, follow-tail scroll, the room-board reader, and a check that `docs/muse/` is the Vite build).
 
 ### Watching the inbox
 
@@ -259,9 +259,9 @@ python3 tools/test_status.py        # unit tests
 
 ## Quick start — Muse (browser)
 
-The Muse client is a Vue 3 single-page app. Vite is the dev server and the production build. Tailwind CSS styles the page (`@tailwindcss/vite` in `web/muse/vite.config.js`, theme tokens in `web/muse/src/styles.css`). Source lives in `web/muse/`. `npm run build` writes a static site to `docs/muse/`, which is what GitHub Pages serves (the landing page links to `muse/`). There is no Pages build workflow in this repo, so commit that output with the source change.
+The Muse client is a Vue 3 single-page app. Vite is the dev server and the production build. Tailwind CSS styles the page (`@tailwindcss/vite` in `web/muse/vite.config.mjs`, theme tokens in `web/muse/src/styles.css`). Source lives in `web/muse/`. `npm run build` writes a static site to `docs/muse/`, which is what GitHub Pages serves (the landing page links to `muse/`). There is no Pages build workflow in this repo, so commit that output with the source change.
 
-Requires [Node.js 20+](https://nodejs.org/) (22 works). From the repo root:
+Requires [Node.js 20+](https://nodejs.org/) (22 works). `web/muse/package.json` is not `"type": "module"`, so `web/muse/board.js` stays the CommonJS reader the node tests `require`. The Vue source is ESM via `web/muse/src/package.json`. From the repo root:
 
 ```bash
 cd web/muse
@@ -281,6 +281,27 @@ python3 -m http.server 8080 --directory docs/muse
 The bundle is an ES module with relative asset URLs (`./assets/...`), so it loads from GitHub Pages and from a static server at any path. Opening `index.html` via `file://` does not: browsers block module scripts there. Use `npm run dev`, `npm run preview`, or a static server.
 
 Type the same channel as Chief (the `channel` in its `config.json`; examples here use `your-channel-name`). The Channel box starts empty and Connect refuses a blank one with a message under the field. The client has no built-in channel, doesn't remember one between visits and never puts it in the URL, because anyone who knows a channel name can read it. The nick defaults to `Muse`. The send box stays pinned to the bottom of the chat panel; the transcript scrolls inside it. A new message scrolls into view only when you were already near the bottom, so reading history does not jump. Sending a message does scroll to the latest line.
+
+### Room board (read-only)
+
+The board appears after you press Connect: tasks, decisions, and scratch for the channel you joined. The panel is `web/muse/src/RoomBoard.vue`. Hashing, the URL list, the fetch, and the jsonl parse stay in `web/muse/board.js`, which the node tests import directly. The file is `boards/<sha256(channel)>.jsonl`, the lowercase hex SHA-256 of the channel after trim, with no prefix (see `boards/README.md`). The record shape is `boards/schema.json` (`task`, `decision`, `scratch`). That file is not the chat protocol, and the page does not copy anything from it into the channel field, the URL, storage, logged output, or the page title.
+
+Nothing is fetched until you connect. Before that, the panel says to join a channel and Reload is disabled. Disconnect clears the panel and drops the hash. An automatic reconnect does not fetch again; Reload does. A board failure does not disconnect the chat.
+
+`board.js` reads, in order:
+
+1. A same-origin `../../boards/<hash>.jsonl` only when the page URL is `/web/muse/` or `/docs/muse/` (or `index.html` under those) on a host that is not `file://` and not `*.github.io`. On GitHub Pages that relative path would leave the project site, so it is skipped.
+2. Otherwise the committed file on `main` from raw.githubusercontent.com. GitHub Pages publishes `docs/` at `/muse-chief-relay/` and does not serve `boards/`. The client is `/muse-chief-relay/muse/`, with relative `./assets/...` URLs from `base: "./"` in `web/muse/vite.config.mjs`. `npm run dev` is also served at `/`, so both the dev server and the published page use GitHub raw. raw.githubusercontent caching can delay updates by a few minutes. To read a local `boards/` file, serve the repo root and open `/docs/muse/`.
+
+A last line that parses as a valid record is shown even when the file does not end in a newline. An unterminated last line that is not a valid record is ignored. The page never writes the file. Reload fetches again; it does not append. A missing file means no board has been committed for that channel yet. Without `crypto.subtle` (a page that is not HTTPS and not localhost) the board cannot be looked up; chat still works.
+
+Rebuild the page GitHub Pages serves after changing the client, and commit the result:
+
+```bash
+cd web/muse
+npm install
+npm run build    # writes docs/muse/
+```
 
 ### Getting a trip in Muse (optional password)
 
@@ -328,7 +349,8 @@ Examples (send as the **entire** chat message text):
 | `src/Chief.Bridge/` | The desktop WSS bridge (.NET 8); the only bridge in this repo |
 | `tests/Chief.Bridge.Tests/` | xunit tests for the bridge's outbox reader, frame handling, config, CLI, inbox watcher, webhook poller (against a local HTTP listener) and auto-ack |
 | `agents/chief.md` | Relay instructions for the chief agent: watch loops, replying, protocol, authority, trust |
-| `web/muse/` | Muse client source (Vue 3 + Vite + Tailwind: `npm install`, `npm run dev`, `npm run build`) |
+| `web/muse/` | Muse client source (Vue 3 + Vite + Tailwind). `board.js` is the read-only board reader. `npm install`, `npm run dev`, `npm run build` |
+| `boards/` | Room boards, one `boards/<sha256(channel)>.jsonl` per room. Muse reads the joined channel's file after Connect and does not write it. |
 | `docs/protocol.md` | Wire protocol |
 | `docs/security.md` | Trust model: trips, pass handling, what needs a human |
 | `docs/index.html` | Landing page (GitHub Pages root) |

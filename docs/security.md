@@ -68,10 +68,20 @@ Limits you should know about:
 ## Channel names
 
 The channel name is the only thing keeping a hack.chat channel private. The Muse client has no
-default channel and doesn't remember one: you type it each time, and it isn't put in the URL.
-Keep real channel names out of public pages, examples, issues and screenshots, and use a
-placeholder like `your-channel-name`. A name that has been published (including in git history or
-an old GitHub Pages build) should be treated as known; switching to a fresh name is the only fix.
+default channel and doesn't remember one: you type it each time, and it isn't put in the URL,
+`localStorage`, `sessionStorage`, the console, or the page title. Keep real channel names out of
+public pages, examples, issues and screenshots, and use a placeholder like `your-channel-name`.
+
+Board filenames are the SHA-256 of the channel, so the repo and Pages don't contain the name.
+A hash of a guessable name can be brute-forced, so pick a high-entropy channel. A name already
+published (git history, old PRs, old Pages builds) stays known, and rotating the channel is the
+only fix. The Vue client hashes the channel with Web Crypto after Connect and renders the board
+as text. A missing board, a failed fetch, or a page without `crypto.subtle` leaves the chat up.
+The channel and the hash are not written to the URL, storage, logged output, or the page title.
+
+## Knowledge graph
+
+Alex's private knowledge graph (Voizle) is not in this repo. Never copy it into docs/status.json, the status page, a room board, or chat, and never add a Voizle repo to publish_repos. The room board (committed, public), the status page (fail-closed) and the knowledge graph (private, local) are separate and don't feed each other.
 
 ## Publishing: why untagged means private
 

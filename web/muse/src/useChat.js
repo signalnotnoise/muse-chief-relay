@@ -1,5 +1,6 @@
 import { nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 import { onSocketClose, recordJoinWarn } from "./reconnect.js";
+import { createRoomBoard } from "./roomBoard.js";
 import { isNearBottom } from "./scroll.js";
 
 const WS_URL = "wss://hack.chat/chat-ws";
@@ -83,6 +84,27 @@ export function useChat() {
   const passwordEl = ref(null);
   const transcriptEl = ref(null);
   const messageEl = ref(null);
+
+  let room;
+  const boardView = ref(null);
+  function syncBoard() {
+    boardView.value = room.getState();
+  }
+  room = createRoomBoard({ onUpdate: syncBoard });
+  boardView.value = room.getState();
+
+  function startBoard(channel) {
+    Promise.resolve(room.startBoard(channel)).then(syncBoard, syncBoard);
+  }
+
+  function showBoardPlaceholder() {
+    room.showBoardPlaceholder();
+    syncBoard();
+  }
+
+  function reloadBoard() {
+    Promise.resolve(room.reloadBoard()).then(syncBoard, syncBoard);
+  }
 
   let ws = null;
   let myChannel = "";
@@ -335,9 +357,9 @@ export function useChat() {
     };
   }
 
-  function connect(nextChannel, rawNick, password) {
+  function connect(channel, rawNick, password) {
     const { name, secret } = splitNick(rawNick);
-    myChannel = nextChannel;
+    myChannel = channel;
     nick.value = name || DEFAULT_NICK;
     myPassword = password || secret;
     metaChannel.value = myChannel;
@@ -350,6 +372,9 @@ export function useChat() {
     hasJoinedOnce = false;
     followTail = true;
     openSocket();
+    // Board load is separate from the socket. A failure here must not stop the join,
+    // and an automatic reconnect (openSocket alone) must not fetch the board again.
+    startBoard(channel);
   }
 
   function reconnectNowIfNeeded() {
@@ -410,6 +435,7 @@ export function useChat() {
     forgetPassword();
     inChat.value = false;
     setStatus("disconnected", "off");
+    showBoardPlaceholder();
   }
 
   function onSend() {
@@ -511,6 +537,8 @@ export function useChat() {
     passwordEl,
     transcriptEl,
     messageEl,
+    boardView,
+    reloadBoard,
     onTranscriptScroll,
     onNickInput,
     onChannelInput,
