@@ -43,18 +43,22 @@ hack.chat ─► Chief.Bridge (always on) ─► inbox.jsonl ─► Chief.Bridge
    It's the only process connected to hack.chat. It reconnects on its own.
 2. **The hook poller**, `Chief.Bridge hook --config <path>`, watches
    `inbox.jsonl` (file-system events, plus a poll every `hook.poll_s`, default
-   5 s). When a chat from a trusted trip arrives, it POSTs
+   5 s). When a qualifying chat arrives, it POSTs
    `{"source","channel","chats":[{nick,trip,text,ts}]}` to the webhook
-   routine. The URL and key come from the environment (`CHIEF_HOOK_URL`,
-   `CHIEF_HOOK_AUTH`), never from `config.json`. After a fire it waits
+   routine. With `hook.trips` set, only those trips qualify. With `hook.trips`
+   empty (the default), every sender except the bridge's own nick qualifies,
+   including senders with no tripcode. The URL and key come from the environment
+   (`CHIEF_HOOK_URL`, `CHIEF_HOOK_AUTH`), never from `config.json`. After a fire it waits
    `hook.cooldown_s` (default 15 s). Chats that arrive in that gap go out
    together in the next fire, so "hello" plus the real question a few seconds
    later cost two wakes at most, not one per line.
 3. **The webhook routine** wakes you with the chats in its payload.
 4. **Drain:** run `Chief.Bridge watch --config <path>` (no `--wait`). It
    returns everything since your last drain, including anything that arrived
-   after the POST. Treat that array as the source of truth. The webhook
-   payload is only the wake-up call, and untrusted senders never appear in it.
+   after the POST. Treat that array as the source of truth, and apply the trust
+   check to it: `watch` returns every sender, not just trusted trips. The webhook
+   payload is only the wake-up call. When `hook.trips` is empty it includes
+   untrusted senders, so a sender showing up there is not a trust decision.
    An empty array means another wake already handled it.
 5. **Reply** with `say` or the outbox (below), then stop. The next chat wakes
    you again.

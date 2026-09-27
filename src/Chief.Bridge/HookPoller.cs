@@ -155,7 +155,7 @@ internal sealed class HookPoller : IDisposable
         if (now < _nextAllowed)
             return HookStep.Held;
 
-        var result = await FireAsync(chats, ct);
+        var result = await FireWhileHeartbeatingAsync(chats, ct);
         now = _clock();
         var nowS = now.ToUnixTimeSeconds();
         if (result.Ok)
@@ -207,6 +207,42 @@ internal sealed class HookPoller : IDisposable
         if (chats.Count > send.Count)
             o["omitted"] = chats.Count - send.Count;
         return o;
+    }
+
+    /// <summary>
+    /// How long to wait between heartbeats while <see cref="FireAsync"/> is still awaiting the webhook.
+    /// A request may run for the whole <c>timeout_s</c> (up to 300 s). The stale threshold is only
+    /// <c>max(15 s, 3 × poll_s + 5 s)</c>, so without this pulse <c>status</c> and auto-ack call a live
+    /// poller NOT RUNNING and a second process is willing to start. Tests replace the wait.
+    /// </summary>
+    internal Func<CancellationToken, Task> HeartbeatWait { get; set; } =
+        ct => Task.Delay(HeartbeatInterval, ct);
+
+    internal static readonly TimeSpan HeartbeatInterval = TimeSpan.FromSeconds(5);
+
+    /// <summary>POST, and keep the status heartbeat fresh for as long as the request is in flight.</summary>
+    private async Task<FireResult> FireWhileHeartbeatingAsync(IReadOnlyList<WatchedChat> chats, CancellationToken ct)
+    {
+        var firing = FireAsync(chats, ct);
+        while (!firing.IsCompleted)
+        {
+            Task pulse;
+            try
+            {
+                pulse = HeartbeatWait(ct);
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+
+            var done = await Task.WhenAny(firing, pulse).ConfigureAwait(false);
+            if (done == firing || ct.IsCancellationRequested || !pulse.IsCompletedSuccessfully)
+                break;
+            Heartbeat(force: true);
+        }
+
+        return await firing.ConfigureAwait(false);
     }
 
     public async Task<FireResult> FireAsync(IReadOnlyList<WatchedChat> chats, CancellationToken ct)
@@ -272,4 +308,40 @@ internal sealed record HookOptions(bool Test)
 
         return new HookOptions(test);
     }
+}
+
+/// <summary>
+/// Exclusive lock held for the life of one <c>hook</c> process, one per offset file
+/// (<c>&lt;state&gt;.lock</c>). The status file is only a report: two processes can both read "not running"
+/// before either writes it. The kernel drops this lock when the process exits, including a crash.
+/// </summary>
+internal sealed class HookInstanceLock : IDisposable
+{
+    private readonly FileStream _fs;
+
+    private HookInstanceLock(FileStream fs) => _fs = fs;
+
+    public static string PathFor(string statePath) => statePath + ".lock";
+
+    /// <summary>Null when another process (or this one) already holds the lock.</summary>
+    public static HookInstanceLock? TryAcquire(string path)
+    {
+        FileStream? fs = null;
+        try
+        {
+            var dir = Path.GetDirectoryName(Path.GetFullPath(path));
+            if (!string.IsNullOrEmpty(dir))
+                Directory.CreateDirectory(dir);
+            // FileShare.None is the lock. A second open fails until this stream is disposed.
+            fs = new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+            return new HookInstanceLock(fs);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            fs?.Dispose();
+            return null;
+        }
+    }
+
+    public void Dispose() => _fs.Dispose();
 }

@@ -119,17 +119,25 @@ internal static class Program
             return r.Ok ? 0 : HookOptions.ExitTestFailed;
         }
 
-        var view = cfg.ReadHook(DateTimeOffset.UtcNow);
-        if (view.State is HookState.Running or HookState.Failing && view.Status!.Pid != Environment.ProcessId)
+        // The status file is a report, not a lock: two processes can both observe "not running"
+        // and then both POST. The lock is held until this process exits, crash included.
+        var statePath = cfg.Hook.StatePath(cfg.BaseDir);
+        var gate = HookInstanceLock.TryAcquire(HookInstanceLock.PathFor(statePath));
+        if (gate is null)
         {
-            // Two pollers on one offset file would both fire for every chat.
-            Console.Error.WriteLine($"[chief] hook: another poller (pid {view.Status.Pid}) is already running on {poller.StatusPath}; not starting");
+            var other = cfg.ReadHook(DateTimeOffset.UtcNow).Status;
+            var who = other is { } s && s.Pid != Environment.ProcessId ? $" (status last wrote pid {s.Pid})" : "";
+            Console.Error.WriteLine($"[chief] hook: another poller already holds {HookInstanceLock.PathFor(statePath)}{who}; not starting");
             return HookOptions.ExitAlreadyRunning;
         }
 
-        using var cts = new CancellationTokenSource();
-        using var signals = new ShutdownSignals(cts, sig => Console.WriteLine($"[chief] hook: {sig} received, stopping…"));
-        await poller.RunAsync(cts.Token);
+        using (gate)
+        {
+            using var cts = new CancellationTokenSource();
+            using var signals = new ShutdownSignals(cts, sig => Console.WriteLine($"[chief] hook: {sig} received, stopping…"));
+            await poller.RunAsync(cts.Token);
+        }
+
         return 0;
     }
 

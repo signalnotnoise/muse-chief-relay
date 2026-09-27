@@ -20,7 +20,9 @@ Merged work, newest first. Times are ET.
     offset moves only after a 2xx (the Python one saved it first, so a crash or restart lost held chats);
     exponential retry backoff capped by `max_retry_s`; handles a truncated or rotated inbox and half-written
     lines through the same reader as `watch`; clean SIGTERM (status `stopped`, exit 0); refuses to start
-    (exit 4) while another poller is live on the same offset; `--test` sends one fake chat.
+    (exit 4) while another poller holds the exclusive lock on the same offset (`<state>.lock`, released on
+    exit or crash; the status file is not the lock); heartbeats during an in-flight webhook request so a slow
+    POST (up to `timeout_s`) is not reported as NOT RUNNING; `--test` sends one fake chat.
   - **Hook status** `<base>/.hook.offset.status` (heartbeat every 5 s, last fire time, HTTP result, count,
     pending, failures, next retry). `status` (and so `hc status`) prints
     `hook: running | FAILING | NOT RUNNING | unknown | not configured` and `hook last fire: …`, plus

@@ -520,6 +520,66 @@ public class HookPollerTests
         p.Dispose();
         r.AssertNoSecrets();
     }
+
+    [Fact]
+    public async Task Heartbeat_is_refreshed_while_the_webhook_request_is_still_in_flight()
+    {
+        using var r = new Rig(h => { h.PollSeconds = 0.1; h.TimeoutSeconds = 300; });
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource<HttpResponseMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var p = new HookPoller(r.Cfg, r.Secrets, new SignalThenHoldHandler(entered, release.Task),
+            () => DateTimeOffset.UtcNow, r.Log)
+        {
+            // Production waits 5 s, under the 15 s stale line. Shorter here so the test doesn't.
+            HeartbeatWait = ct => Task.Delay(TimeSpan.FromMilliseconds(200), ct)
+        };
+
+        Assert.Equal(HookStep.Idle, await p.StepAsync(default));
+        r.Add(Chat("Alex", "still waiting", Alex));
+        var step = p.StepAsync(default);
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        HookStatus? status = null;
+        for (var i = 0; i < 40 && status is null; i++)
+        {
+            await Task.Delay(50);
+            status = HookStatus.TryRead(p.StatusPath);
+        }
+
+        try
+        {
+            Assert.False(step.IsCompleted);
+            Assert.NotNull(status);
+            var age = DateTimeOffset.UtcNow.ToUnixTimeSeconds() - status!.HeartbeatAt;
+            Assert.InRange(age, 0, 3);
+            var view = HookView.Classify(true, status, DateTimeOffset.UtcNow, _ => true);
+            Assert.Equal(HookState.Running, view.State);
+        }
+        finally
+        {
+            release.TrySetResult(new HttpResponseMessage(HttpStatusCode.OK));
+            await step.WaitAsync(TimeSpan.FromSeconds(5));
+            p.Dispose();
+        }
+    }
+
+    private sealed class SignalThenHoldHandler : HttpMessageHandler
+    {
+        private readonly TaskCompletionSource _entered;
+        private readonly Task<HttpResponseMessage> _response;
+
+        public SignalThenHoldHandler(TaskCompletionSource entered, Task<HttpResponseMessage> response)
+        {
+            _entered = entered;
+            _response = response;
+        }
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            _entered.TrySetResult();
+            return await _response.WaitAsync(cancellationToken);
+        }
+    }
 }
 
 public class HookViewTests
@@ -617,27 +677,91 @@ public class HookCliTests
     }
 
     [Fact]
-    public async Task A_second_poller_on_the_same_state_refuses_to_start()
+    public void The_offset_lock_is_exclusive_until_released()
+    {
+        using var dir = new TempDir();
+        var path = HookInstanceLock.PathFor(dir.File(".hook.offset"));
+        var first = HookInstanceLock.TryAcquire(path);
+        Assert.NotNull(first);
+        Assert.Null(HookInstanceLock.TryAcquire(path));
+        first!.Dispose();
+        using var second = HookInstanceLock.TryAcquire(path);
+        Assert.NotNull(second);
+    }
+
+    [Fact]
+    public async Task A_held_lock_refuses_a_second_hook_even_when_status_is_missing()
     {
         using var server = new LocalHook();
         var id = Guid.NewGuid().ToString("N");
         var (dir, cfg) = Deployment("CRT_URL_" + id, "");
         using var _ = dir;
         Environment.SetEnvironmentVariable("CRT_URL_" + id, server.Url);
-        using var other = Process.Start(new ProcessStartInfo("sleep", "30") { UseShellExecute = false })!;
+        using var gate = HookInstanceLock.TryAcquire(HookInstanceLock.PathFor(dir.File(".hook.offset")));
+        Assert.NotNull(gate);
         try
         {
-            var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-            new HookStatusWriter(dir.File(".hook.offset.status")).Write(new HookStatus
-            {
-                Pid = other.Id, State = "running", StartedAt = now, HeartbeatAt = now, PollSeconds = 5, CooldownSeconds = 15
-            });
+            Assert.False(File.Exists(dir.File(".hook.offset.status")));
             Assert.Equal(HookOptions.ExitAlreadyRunning, await Program.Main(["hook", "--config", cfg]));
         }
         finally
         {
-            other.Kill();
             Environment.SetEnvironmentVariable("CRT_URL_" + id, null);
+        }
+    }
+
+    [Fact]
+    public async Task A_live_status_file_without_the_lock_does_not_block_another_poller()
+    {
+        using var server = new LocalHook();
+        var id = Guid.NewGuid().ToString("N");
+        var (dir, cfg) = Deployment("CRT_URL_" + id, "");
+        using var _ = dir;
+        using var other = Process.Start(new ProcessStartInfo("sleep", "60") { UseShellExecute = false })!;
+        var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        new HookStatusWriter(dir.File(".hook.offset.status")).Write(new HookStatus
+        {
+            Pid = other.Id, State = "running", StartedAt = now, HeartbeatAt = now, PollSeconds = 5, CooldownSeconds = 15
+        });
+
+        var dll = typeof(Program).Assembly.Location;
+        var psi = new ProcessStartInfo("dotnet", $"\"{dll}\" hook --config \"{cfg}\"")
+        {
+            UseShellExecute = false
+        };
+        psi.Environment["CRT_URL_" + id] = server.Url;
+        using var child = Process.Start(psi)!;
+        try
+        {
+            var sw = Stopwatch.StartNew();
+            HookStatus? s = null;
+            while (sw.Elapsed < TimeSpan.FromSeconds(10))
+            {
+                s = HookStatus.TryRead(dir.File(".hook.offset.status"));
+                if (s?.Pid == child.Id && s.State == "running")
+                    break;
+                if (child.HasExited)
+                    break;
+                await Task.Delay(50);
+            }
+
+            Assert.False(child.HasExited, child.HasExited ? $"hook exited {child.ExitCode} because of the status file" : "");
+            Assert.Equal(child.Id, s?.Pid);
+        }
+        finally
+        {
+            try
+            {
+                if (!child.HasExited)
+                    child.Kill(entireProcessTree: true);
+                child.WaitForExit(2000);
+            }
+            catch (InvalidOperationException)
+            {
+                // already gone
+            }
+
+            try { other.Kill(); } catch (InvalidOperationException) { }
         }
     }
 
