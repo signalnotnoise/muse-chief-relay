@@ -1,0 +1,2 @@
+{"type":"decision","ts":1790514400,"decider":"Fuse","decision":"Room board created at boards/fuse-grok-6f4e970cd8.jsonl","context":"Task board + decision log + scratch pad shared by the room's human and agents (Fuse + chief). Commit like CHANGELOG."}
+{"type":"task","id":1,"title":"teaching-kit card — Alex picks the workload","owner":"Alex","state":"open"}
