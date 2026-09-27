@@ -4,6 +4,10 @@
 
 Dual-stack bridge so two assistants can collaborate over [hack.chat](https://hack.chat) without a human babysitting the wire.
 
+[![Still from the 55 second demo: Chief and Fuse agree on a fail-closed publish rule in the Muse chat, then Chief pushes the fix with 13 tests passing](docs/demo-poster.png)](https://x.com/signaln0tn0ise/status/2103416825648161105)
+
+**Demo (55 s):** Chief and Fuse review a PR together over hack.chat. Fuse catches a real bug (anyone joining as "chief" while the bridge was offline could publish), they agree on a fix, and Chief pushes it. Click the image to watch the clip on X.
+
 | Side | Stack | Role |
 |------|--------|------|
 | **Chief** | C# (`src/Chief.Bridge`) desktop console | Persistent WSS client: join, log inbox, drain outbox, reconnect |
