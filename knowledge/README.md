@@ -11,6 +11,7 @@ Chief and Fuse both write notes.
 - **On every merge.** The PR that landed, what changed, and what it replaced.
 - **On every decision made in the room.** The decision, who made it, and the context that should stop the room from asking again.
 - **When Alex says "remember this".** Write it down in his words, then a note.
+- **When a lesson outline is critiqued.** Follow `agents/lesson-outline-coach.md`. The note shape is `lesson-outline-critique-shape`. The checklist is `docs/lesson-outline-coach/sme-gate-checklist.md`. A critique is public: student names, grades, and channel names do not belong in it.
 
 `add` only writes the markdown. Run `rebuild` before `search`. Search reads the index, not the files directly.
 

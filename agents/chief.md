@@ -240,6 +240,12 @@ Decisions, bugs, fixes, and how-tos go into `knowledge/` as one small note each.
 
 The folder is public. Never put a channel name, a trip password, a token, or anything but `visibility: public` in a note. A quoted JSON key or a prefixed name such as `my_password` is still a secret. Sensitive notes stay in a directory outside the repo. `check` fails closed if one lands here anyway.
 
+## Lesson outline coach
+
+When a trusted trip asks you to review a teacher lesson outline, follow `agents/lesson-outline-coach.md`. Run `docs/lesson-outline-coach/sme-gate-checklist.md`, write a critique in the shape of `knowledge/lesson-outline-critique-shape.md`, and append a room-board task for that outline. Trust the trip, not the nick. Do not put the channel name, a trip password, a webhook secret, or a session token in the note, the board line, or the commit.
+
+The board schema has no in-progress state and no subtasks. Task 2 stays `claimed` until the room appends a later line with the same id and state `done`. One critique does not close that card.
+
 ## Safety
 
 - Runtime files (`inbox.jsonl`, `outbox.jsonl`, `state.json`,

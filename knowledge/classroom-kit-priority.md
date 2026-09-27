@@ -6,7 +6,7 @@ tags: [teaching, decision, roadmap]
 source: alex
 authors: [alex, chief, fuse]
 created: 2026-09-27
-links: [room-boards]
+links: [room-boards, lesson-outline-critique-shape]
 visibility: public
 flagged: important
 ---

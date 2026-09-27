@@ -42,3 +42,11 @@ Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(channel.Trim()))).ToL
 ```
 
 A later task line with the same id replaces the card. Task #1 is done: Alex picked the classroom / lesson-coach kit.
+
+## Advancing a card
+
+Append a new line. Do not edit or delete earlier lines. Readers keep the latest `task` line for each `id` and keep every `decision` and `scratch` line.
+
+`state` is only `open`, `claimed`, `blocked`, or `done`. There is no in-progress value and no subtask field. Work that has been taken stays `claimed` until a later line marks it `done` or `blocked`.
+
+Task 2 (`Lesson outline coach — SME-gate checklist + outline critique path`, owner `chief`, state `claimed`) is that product card. The schema cannot record in-progress or subtasks, so this repo does not append a replacement line for it here. Closing it is a room decision after the coach path is reviewed: append one later line with the same id, the same title, owner `chief`, and state `done`. A critique of one outline is a new task id, not a subtask of task 2. How an agent does that without writing the channel name into the line is `agents/lesson-outline-coach.md`.

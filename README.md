@@ -354,6 +354,23 @@ dotnet run --project src/Chief.Knowledge -- search "reconnect" --tag bridge
 
 Write a note on every merge, on every decision made in the room, and whenever Alex says "remember this". Both chief and Fuse write them. The folder is public: `check` fails closed on a private note or an obvious secret, including a JSON key or a prefixed name such as `my_password`, and a channel name does not belong in the repo. How to write one, and where sensitive notes go instead, is [knowledge/README.md](knowledge/README.md).
 
+## Lesson outline coach
+
+The first teaching-kit card. A teacher drops a lesson outline; the agent runs an SME-gate checklist a department chair would recognize, writes a critique note, and appends a room-board task. Alex made this kit build priority #1. Medical stays parked. 3D asset-QA stays a promo angle. See [knowledge/classroom-kit-priority.md](knowledge/classroom-kit-priority.md).
+
+| Step | Where |
+|---|---|
+| Playbook (trust, privacy, board update) | [agents/lesson-outline-coach.md](agents/lesson-outline-coach.md) |
+| Checklist | [docs/lesson-outline-coach/sme-gate-checklist.md](docs/lesson-outline-coach/sme-gate-checklist.md) |
+| Note template | [docs/lesson-outline-coach/critique-note.md](docs/lesson-outline-coach/critique-note.md) |
+| Indexed shape | [knowledge/lesson-outline-critique-shape.md](knowledge/lesson-outline-critique-shape.md) |
+
+The twelve gates are objectives, audience, prerequisites, assessment alignment, learning sequence, timing, materials, accessibility, differentiation, checks for understanding, closure, and risks and assumptions. Marks are `met`, `partial`, and `missing`. The verdict is `ready` (every gate met), `revise`, or `blocked`. There is no score and no validator command. The agent critiques the outline the teacher wrote. It does not author a replacement lesson.
+
+Critique notes use ordinary `chief-knowledge` front matter (`visibility: public`). They do not contain student names, grades, disability details, a channel name, a trip password, a webhook secret, or a session token. Trust the trip that asked, not the nick.
+
+Board task 2 is that product card, owner `chief`, state `claimed`. `boards/schema.json` has no in-progress state and no subtasks, so this change does not rewrite the hashed board file. `claimed` is the working state. Closing the card means appending a later line with the same id and state `done`, which waits until the room accepts the path. Each outline gets its own next task id. The playbook has the exact line to append, and the rule for leaving the board alone when you have no local channel config.
+
 ## Layout
 
 | Path | Role |
@@ -364,6 +381,8 @@ Write a note on every merge, on every decision made in the room, and whenever Al
 | `tests/Chief.Bridge.Tests/` | xunit tests for the bridge's outbox reader, frame handling, config, CLI, inbox watcher, webhook poller (against a local HTTP listener) and auto-ack |
 | `tests/Chief.Knowledge.Tests/` | xunit tests for note validation, the privacy guard, FTS, hybrid ranking, and supersedes |
 | `agents/chief.md` | Relay instructions for the chief agent: watch loops, replying, protocol, authority, trust |
+| `agents/lesson-outline-coach.md` | Playbook for the Lesson outline coach: checklist, critique note, board task |
+| `docs/lesson-outline-coach/` | SME-gate checklist and the critique-note template |
 | `web/muse/` | Muse client source (Vue 3 + Vite + Tailwind). `board.js` is the read-only board reader. `npm install`, `npm run dev`, `npm run build` |
 | `boards/` | Room boards, one `boards/<sha256(channel)>.jsonl` per room. Muse reads the joined channel's file after Connect and does not write it. |
 | `docs/protocol.md` | Wire protocol |
