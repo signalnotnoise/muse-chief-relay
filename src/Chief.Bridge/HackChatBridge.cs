@@ -20,7 +20,6 @@ internal sealed class HackChatBridge
     private readonly OutboxReader _outbox;
     private readonly object _fileLock = new();
     private readonly AutoAcker _acker;
-    private readonly string _watchStatus;
     // Auto-acks waiting to go out. Filled by the receive loop, drained by the send loop ahead of the outbox,
     // which _sendWake wakes early so an ack doesn't wait out the outbox poll.
     private readonly ConcurrentQueue<JsonObject> _acks = new();
@@ -37,7 +36,6 @@ internal sealed class HackChatBridge
         // for the whole process, across reconnects.
         _outbox = OutboxReader.AtEnd(Path.Combine(cfg.BaseDir, "outbox.jsonl"));
         _acker = new AutoAcker(cfg.AutoAck, cfg.Nick);
-        _watchStatus = WatchStatus.PathFor(cfg.AutoAckWatchState());
     }
 
     private sealed class Session
@@ -219,11 +217,11 @@ internal sealed class HackChatBridge
     private void HandleFrame(string raw, Session s, TaskCompletionSource<string?> joinResult)
     {
         var frame = InboundFrame.Parse(raw);
-        // Decide on an auto-ack before the chat reaches inbox.jsonl, so the listener state it reports is the one
-        // from before this very message woke the watcher.
+        // Decide on an auto-ack before the chat reaches inbox.jsonl, so the hook state it reports is the one from
+        // before this very message reached the poller.
         var ack = frame is { Cmd: "chat", Object: { } chatObj } && s.Confirmed
             ? _acker.Consider(Json.Str(chatObj, "nick"), Json.Str(chatObj, "trip"), Json.Str(chatObj, "text"),
-                DateTimeOffset.UtcNow, ReadListener)
+                DateTimeOffset.UtcNow, () => _cfg.ReadHook(DateTimeOffset.UtcNow))
             : null;
         LogEvent("in", frame.LogNode);
         if (frame.Object is not { } obj)
@@ -332,9 +330,6 @@ internal sealed class HackChatBridge
             // already signalled
         }
     }
-
-    private ListenerView ReadListener() =>
-        ListenerView.Classify(WatchStatus.TryRead(_watchStatus), DateTimeOffset.UtcNow, ProcessInfo.IsRunning);
 
     private static async Task SendAsync(ClientWebSocket ws, SemaphoreSlim sendLock, JsonNode payload, CancellationToken ct)
     {

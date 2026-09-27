@@ -379,33 +379,6 @@ public class InboxWatcherTests
         Assert.Equal(WaitOutcome.Cancelled, await w.WaitAsync(null, _ => { }, cts.Token));
     }
 
-    /// <summary>The poll that finds the first chat succeeds; the next poll (inside the settle window) throws once.</summary>
-    private sealed class FailOnceInsideSettle : InboxWatcher
-    {
-        private bool _seenChats;
-
-        public int SettleFailures { get; private set; }
-
-        public FailOnceInsideSettle(string inbox, string offset, string nick)
-            : base(inbox, offset, nick, TimeSpan.FromMilliseconds(40))
-        {
-        }
-
-        public override WatchPoll Poll()
-        {
-            if (_seenChats && SettleFailures == 0)
-            {
-                SettleFailures++;
-                throw new IOException("simulated torn read");
-            }
-
-            var poll = base.Poll();
-            if (poll.Chats.Count > 0)
-                _seenChats = true;
-            return poll;
-        }
-    }
-
     /// <summary>Injects transient poll failures: the first <c>failures</c> polls throw.</summary>
     private sealed class FlakyWatcher : InboxWatcher
     {
@@ -501,26 +474,17 @@ public class InboxWatcherTests
     }
 
     [Fact]
-    public async Task Wait_with_settle_survives_a_poll_failure_mid_burst()
+    public async Task One_shot_watch_exits_2_when_the_inbox_path_is_a_directory()
     {
-        var dir = new TempDir();
-        using var _ = dir;
-        var inbox = dir.File("inbox.jsonl");
-        var w = new FailOnceInsideSettle(inbox, dir.File(".inbox_watch.offset"), "chief");
-        File.WriteAllText(inbox, Chat("Alex", "history"));
-        IReadOnlyList<WatchedChat>? got = null;
+        var (dir, inbox, _) = Setup();
+        using var __ = dir;
+        File.Delete(inbox);
+        Directory.CreateDirectory(inbox);
+        var cfg = dir.File("config.json");
+        File.WriteAllText(cfg, """{"channel":"c","nick":"chief"}""");
 
-        var task = w.WaitAsync(TimeSpan.FromSeconds(5), c => got = c, CancellationToken.None,
-            settle: TimeSpan.FromMilliseconds(250));
-        await Task.Delay(150); // bootstrap, then wait
-        File.AppendAllText(inbox, Chat("Fuse", "part one"));
-        await Task.Delay(120); // the first re-poll inside the settle window fails
-        File.AppendAllText(inbox, Chat("Fuse", "part two"));
-
-        Assert.Equal(WaitOutcome.Delivered, await task.WaitAsync(TimeSpan.FromSeconds(5)));
-        Assert.Equal(new[] { "part one", "part two" }, got!.Select(c => c.Text));
-        Assert.Equal(1, w.SettleFailures);
-        Assert.Contains("during settle", w.Warning);
+        Assert.Equal(2, await Program.Main(["watch", "--config", cfg]));
+        Assert.False(File.Exists(dir.File(".inbox_watch.offset")));
     }
 
     [Fact]

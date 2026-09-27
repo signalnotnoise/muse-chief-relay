@@ -19,6 +19,9 @@ internal sealed class RelayConfig
     // Optional instant acknowledgement from the bridge when a trusted trip addresses it. Off by default.
     [JsonPropertyName("auto_ack")] public AutoAckConfig AutoAck { get; set; } = new();
 
+    // Optional webhook poller settings for `Chief.Bridge hook`. Null: not configured.
+    public HookConfig? Hook { get; set; }
+
     [JsonIgnore] public string BaseDir { get; set; } = ".";
     [JsonIgnore] public string ConfigPath { get; set; } = "";
     [JsonIgnore] public string Source { get; set; } = "";
@@ -101,6 +104,7 @@ internal sealed class RelayConfig
 
         cfg.AutoAck ??= new AutoAckConfig();
         cfg.AutoAck.Validate(path);
+        cfg.Hook?.Validate(path);
 
         var baseRaw = string.IsNullOrWhiteSpace(cfg.Base) ? "." : cfg.Base;
         var configDir = Path.GetDirectoryName(path) ?? cwd;
@@ -110,11 +114,10 @@ internal sealed class RelayConfig
         return cfg;
     }
 
-    /// <summary>Offset file whose <c>.status</c> the auto-ack checks: <c>auto_ack.watch_state</c> (relative to
-    /// the base dir) or the <c>watch</c> default, <c>&lt;base&gt;/.inbox_watch.offset</c>.</summary>
-    public string AutoAckWatchState()
-    {
-        var raw = string.IsNullOrWhiteSpace(AutoAck.WatchState) ? ".inbox_watch.offset" : AutoAck.WatchState;
-        return Path.GetFullPath(raw, BaseDir);
-    }
+    /// <summary>The hook poller's status file (<c>&lt;hook.state&gt;.status</c>), or null without a hook block.</summary>
+    public string? HookStatusPath() => Hook is null ? null : HookStatus.PathFor(Hook.StatePath(BaseDir));
+
+    /// <summary>What <c>status</c> and the auto-ack know about the hook poller right now.</summary>
+    public HookView ReadHook(DateTimeOffset now) =>
+        HookView.Classify(Hook is not null, HookStatusPath() is { } p ? HookStatus.TryRead(p) : null, now, ProcessInfo.IsRunning);
 }

@@ -5,6 +5,7 @@ outbox.jsonl
 unread.jsonl
 state.json
 .inbox_watch.offset*
+.hook.offset*
 bridge.pid
 bridge.stdout
 bridge.stderr

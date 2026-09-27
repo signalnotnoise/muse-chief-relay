@@ -75,8 +75,8 @@ public class AutoAckerTests
         return c;
     }
 
-    private static ListenerView View(ListenerState s) => new(s, s.ToString(), null);
-    private static readonly Func<ListenerView> Armed = () => View(ListenerState.Armed);
+    private static HookView View(HookState s) => new(s, s.ToString(), null);
+    private static readonly Func<HookView> Armed = () => View(HookState.Running);
 
     [Fact]
     public void Trusted_human_mention_is_acked_with_the_default_text()
@@ -93,7 +93,7 @@ public class AutoAckerTests
         var a = new AutoAcker(Cfg(), "chief");
         var d = a.Consider("Alex", Alex, """{"type":"task","id":"ten5fp3","to":"chief","body":"what are you doing"}""", T0, Armed);
         Assert.True(d.Send);
-        Assert.Equal("(auto) got task ten5fp3, thinking… full reply in about a minute", d.Text);
+        Assert.Equal("(auto) got task ten5fp3, thinking…", d.Text);
     }
 
     [Theory]
@@ -161,13 +161,14 @@ public class AutoAckerTests
     }
 
     [Theory]
-    [InlineData("Armed", false)]
-    [InlineData("Waking", false)]
+    [InlineData("Running", false)]
+    [InlineData("NotConfigured", false)]
     [InlineData("Unknown", false)]
-    [InlineData("NotArmed", true)]
-    public void Offline_text_only_when_no_listener_is_armed(string stateName, bool offline)
+    [InlineData("NotRunning", true)]
+    [InlineData("Failing", true)]
+    public void Offline_text_only_when_the_hook_is_not_running_or_failing(string stateName, bool offline)
     {
-        var state = Enum.Parse<ListenerState>(stateName);
+        var state = Enum.Parse<HookState>(stateName);
         var d = new AutoAcker(Cfg(), "chief").Consider("Alex", Alex, "chief?", T0, () => View(state));
         Assert.True(d.Send);
         Assert.Equal(offline, d.Text == new AutoAckConfig().OfflineText);
@@ -200,7 +201,7 @@ public class AutoAckConfigTests
     {
         var c = Load("""{"channel":"c","nick":"chief"}""");
         Assert.False(c.AutoAck.Enabled);
-        Assert.Equal(Path.Combine(c.BaseDir, ".inbox_watch.offset"), c.AutoAckWatchState());
+        Assert.Null(c.HookStatusPath());
     }
 
     [Fact]
@@ -209,7 +210,7 @@ public class AutoAckConfigTests
         var c = Load("""
             {"channel":"c","nick":"chief","auto_ack":{"enabled":true,"mention_trips":[" !/Ab12+ ",""],
              "task_trips":["Xy34Zw","Xy34Zw"],"cooldown_s":90,"max_per_hour":5,"text":"on it","task_text":"t {id}",
-             "offline_text":"off","watch_state":"w/offset"}}
+             "offline_text":"off"}}
             """);
         var a = c.AutoAck;
         Assert.True(a.Enabled);
@@ -218,7 +219,6 @@ public class AutoAckConfigTests
         Assert.Equal(90, a.CooldownSeconds);
         Assert.Equal(5, a.MaxPerHour);
         Assert.Equal(("on it", "t {id}", "off"), (a.Text, a.TaskText, a.OfflineText));
-        Assert.Equal(Path.Combine(c.BaseDir, "w", "offset"), c.AutoAckWatchState());
     }
 
     [Theory]

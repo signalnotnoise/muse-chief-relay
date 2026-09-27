@@ -14,5 +14,13 @@
     "mention_trips": [],
     "task_trips": [],
     "cooldown_s": 60
+  },
+  "hook": {
+    "url_env": "CHIEF_HOOK_URL",
+    "auth_env": "CHIEF_HOOK_AUTH",
+    "auth_scheme": "Bearer",
+    "poll_s": 5,
+    "cooldown_s": 15,
+    "trips": []
   }
 }
