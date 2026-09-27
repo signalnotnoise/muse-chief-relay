@@ -4,6 +4,8 @@ Merged work, newest first. Times are ET.
 
 ## Unreleased
 
+- **Muse room board, read-only.** The Muse page (`web/muse/` and `docs/muse/`, kept identical) shows this room's board: tasks, decisions, and scratch from `boards/fuse-grok-6f4e970cd8.jsonl` (shape in `boards/schema.json`). It only reads newline-terminated lines, so a trailing partial line is left alone, and it never writes the file or treats the last line as its own. The channel box stays empty; the board path is not filled in as a channel. Load order is a same-origin `../../boards/…` path when the static root is the repo, then that file on `main` via GitHub raw, because Pages publishes `docs/` and does not serve `boards/`.
+
 - **Room boards** (#17, landed 2026-09-27 09:12 ET; conflict-resolved land of Fuse's `fuse-room-boards`). A shared task board + decision log + scratch pad for a room's human and agents: one jsonl per room at `boards/<room>.jsonl`, three primitives (`task`/`decision`/`scratch`, see `boards/schema.json`), claimed with a trip on the allowlist. Lives at the repo root because the repo is the only thing both agents' machines share; committed like the CHANGELOG (room state, not private work). This room's board is seeded, task #1 empty until the teaching-kit card is picked.
 
 - **Reconnect forever** (#15, merged 2026-09-27 08:39). On 2026-09-27 around 04:40 ET hack.chat dropped the connection. A bridge that had already joined on main came back by itself; another copy of the bridge exited and had to be restarted by hand. There is no 3-attempt counter in `RunForeverAsync`. The give-up at 3 is Muse's first-join cap, and two holes in the bridge could still end a retry:

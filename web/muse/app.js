@@ -22,6 +22,11 @@
     taskForm: document.getElementById("task-form"),
     opinionForm: document.getElementById("opinion-form"),
     resultForm: document.getElementById("result-form"),
+    boardStatus: document.getElementById("board-status"),
+    boardReload: document.getElementById("board-reload"),
+    boardBody: document.getElementById("board-body"),
+    boardVia: document.getElementById("board-via"),
+    boardFile: document.getElementById("board-file"),
   };
 
   let ws = null;
@@ -478,4 +483,120 @@
     };
     if (sendChatText(JSON.stringify(payload))) el.resultForm.reset();
   });
+
+  // Room board. Read-only: fetch and render, never write, and never copy the
+  // board path into the channel field. parseBoard ignores a trailing partial line.
+  let boardLoadGen = 0;
+
+  function boardNode(tag, cls, text) {
+    const n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text != null) n.textContent = String(text);
+    return n;
+  }
+
+  function formatBoardTs(ts) {
+    const d = new Date(Number(ts) * 1000);
+    if (!Number.isFinite(d.getTime())) return String(ts);
+    return d.toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
+  }
+
+  function setBoardStatus(text, kind) {
+    if (!el.boardStatus) return;
+    el.boardStatus.textContent = text;
+    el.boardStatus.className = "board-status" + (kind ? " " + kind : "");
+  }
+
+  function taskCard(t) {
+    const card = boardNode("article", "board-card");
+    const top = boardNode("div", "board-card-top");
+    top.append(boardNode("span", "board-id", "#" + t.id), boardNode("span", "st " + t.state, t.state));
+    card.appendChild(top);
+    card.appendChild(boardNode("div", "title", t.title || "(untitled)"));
+    const bits = ["owner " + (t.owner || "—")];
+    if (t.blocked_on) bits.push("blocked on " + t.blocked_on);
+    if (t.handoff_to) bits.push("handoff to " + t.handoff_to);
+    card.appendChild(boardNode("div", "board-sub", bits.join(" · ")));
+    return card;
+  }
+
+  function noteCard(who, when, body, extra) {
+    const card = boardNode("article", "board-card");
+    card.appendChild(boardNode("div", "board-sub", who + " · " + when));
+    card.appendChild(boardNode("div", "title", body));
+    if (extra) card.appendChild(boardNode("div", "board-sub", extra));
+    return card;
+  }
+
+  function boardColumn(title, cards) {
+    const col = boardNode("div", "board-col");
+    col.appendChild(boardNode("h3", null, title));
+    if (!cards.length) col.appendChild(boardNode("p", "board-empty", "None yet."));
+    for (const c of cards) col.appendChild(c);
+    return col;
+  }
+
+  function renderBoard(parsed) {
+    const tasks = parsed.tasks.slice().sort((a, b) => a.id - b.id);
+    const cols = boardNode("div", "board-cols");
+    cols.append(
+      boardColumn("Tasks", tasks.map(taskCard)),
+      boardColumn("Decisions", parsed.decisions.map((d) => noteCard(d.decider, formatBoardTs(d.ts), d.decision, d.context))),
+      boardColumn("Scratch", parsed.scratch.map((s) => noteCard(s.author, formatBoardTs(s.ts), s.text)))
+    );
+    el.boardBody.replaceChildren(cols);
+    if (parsed.skipped) {
+      const n = parsed.skipped;
+      el.boardBody.appendChild(boardNode(
+        "p",
+        "board-empty",
+        n + (n === 1 ? " line skipped" : " lines skipped") + " (not a complete task, decision, or scratch)."
+      ));
+    }
+  }
+
+  async function loadBoard(cacheBust) {
+    if (!globalThis.MuseBoard || !el.boardBody) return;
+    const gen = ++boardLoadGen;
+    setBoardStatus("loading", "");
+    if (el.boardVia) el.boardVia.textContent = "";
+    const sources = MuseBoard.boardSources(document.baseURI, cacheBust || 0);
+    let lastErr = "no source";
+    for (const url of sources) {
+      try {
+        const res = await fetch(url, { cache: "no-store", credentials: "omit" });
+        if (gen !== boardLoadGen) return;
+        if (!res.ok) {
+          lastErr = "HTTP " + res.status;
+          continue;
+        }
+        const ctype = (res.headers.get("content-type") || "").toLowerCase();
+        if (ctype.includes("text/html")) {
+          lastErr = "not a board file";
+          continue;
+        }
+        const text = await res.text();
+        if (gen !== boardLoadGen) return;
+        if (text.trimStart().startsWith("<")) {
+          lastErr = "not a board file";
+          continue;
+        }
+        renderBoard(MuseBoard.parseBoard(text));
+        const viaRaw = url.indexOf("raw.githubusercontent.com") !== -1;
+        if (el.boardVia) el.boardVia.textContent = viaRaw ? " · GitHub raw on main" : " · this repo";
+        setBoardStatus("read-only", "ok");
+        return;
+      } catch (err) {
+        if (gen !== boardLoadGen) return;
+        lastErr = err && err.message ? err.message : "failed";
+      }
+    }
+    if (gen !== boardLoadGen) return;
+    setBoardStatus("unavailable", "err");
+    el.boardBody.replaceChildren(boardNode("p", "board-empty", "Couldn't read the room board (" + lastErr + ")."));
+  }
+
+  if (el.boardFile && globalThis.MuseBoard) el.boardFile.textContent = MuseBoard.BOARD_FILE;
+  if (el.boardReload) el.boardReload.addEventListener("click", () => { loadBoard(Date.now()); });
+  loadBoard(0);
 })();

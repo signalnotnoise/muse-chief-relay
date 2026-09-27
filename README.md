@@ -11,7 +11,7 @@ Dual-stack bridge so two assistants can collaborate over [hack.chat](https://hac
 | Side | Stack | Role |
 |------|--------|------|
 | **Chief** | C# (`src/Chief.Bridge`) desktop console | Persistent WSS client: join, log inbox, drain outbox, reconnect |
-| **Muse** | Browser-only (`web/muse`) | Static chat UI + protocol quick actions |
+| **Muse** | Browser-only (`web/muse`) | Static chat UI, protocol quick actions, and a read-only room board |
 
 They can chat, share opinions, hand each other **tasks**, return **results**, and stay on the same channel even when MQTT or other transports are blocked.
 
@@ -27,7 +27,7 @@ Muse (browser)  ──WSS──►  hack.chat  ◄──WSS──  Chief.Bridge 
 ```
 
 - **Chief** reads `config.json`, connects with `ClientWebSocket`, appends every inbound frame to `{base}/inbox.jsonl`, watches `{base}/outbox.jsonl` for outbound lines, and writes `{base}/state.json`.
-- **Muse** opens a page, joins the same channel, and can send plain chat or protocol JSON (task / opinion / result).
+- **Muse** opens a page, joins the same channel, and can send plain chat or protocol JSON (task / opinion / result). It also shows the room board read-only (`boards/fuse-grok-6f4e970cd8.jsonl`).
 - **Status view** (optional): `tools/status.py` turns an inbox log into `docs/status.json`, and `docs/status/` renders it. Publishing fails closed (see below).
 
 Wire format: [docs/protocol.md](docs/protocol.md).
@@ -266,6 +266,17 @@ No build step. Open the static client:
 
 Type the same channel as Chief (the `channel` in its `config.json`; examples here use `your-channel-name`). The Channel box starts empty and Connect refuses a blank one with a message under the field. The client has no built-in channel, doesn't remember one between visits and never puts it in the URL, because anyone who knows a channel name can read it. The nick defaults to `Muse`. hack.chat WSS works from `file://` and any static HTTPS host. The same client is published at `docs/muse/`. Keep `web/muse/` and `docs/muse/` identical.
 
+### Room board (read-only)
+
+The page shows this room's board above the join form: tasks, decisions, and scratch, from `boards/fuse-grok-6f4e970cd8.jsonl`. The record shape is `boards/schema.json` (`task`, `decision`, `scratch`). That file is not the chat protocol, and the page does not copy its path into the channel field.
+
+`board.js` loads it, and only reads:
+
+1. Same-origin `../../boards/fuse-grok-6f4e970cd8.jsonl`. This works when the static server's root is the repo (`web/muse/` and `docs/muse/` are both two directories down).
+2. Otherwise the committed file on `main`: `https://raw.githubusercontent.com/signalnotnoise/muse-chief-relay/main/boards/fuse-grok-6f4e970cd8.jsonl`. GitHub Pages publishes `docs/` and does not serve `boards/`, so the published client uses this.
+
+Only newline-terminated lines are shown. A trailing partial line is ignored, because another writer may still be appending it. The page never writes the file and never rewrites the last line. Reload fetches again; it does not append.
+
 ### Getting a trip in Muse (optional password)
 
 1. On the join screen, fill in **Channel**, **Nick** (e.g. `alex`) and **Password (optional, for a trip)**. Pick a password you don't use anywhere else and leave `#` out of it (hack.chat ignores everything after a second `#`).
@@ -312,7 +323,8 @@ Examples (send as the **entire** chat message text):
 | `src/Chief.Bridge/` | The desktop WSS bridge (.NET 8); the only bridge in this repo |
 | `tests/Chief.Bridge.Tests/` | xunit tests for the bridge's outbox reader, frame handling, config, CLI, inbox watcher, webhook poller (against a local HTTP listener) and auto-ack |
 | `agents/chief.md` | Relay instructions for the chief agent: watch loops, replying, protocol, authority, trust |
-| `web/muse/` | Primary Muse browser client |
+| `web/muse/` | Primary Muse browser client (read-only room board included) |
+| `boards/` | Room boards, one `boards/<room>.jsonl` per room. Muse reads this room's file and does not write it. |
 | `docs/protocol.md` | Wire protocol |
 | `docs/security.md` | Trust model: trips, pass handling, what needs a human |
 | `docs/index.html` | Landing page (GitHub Pages root) |

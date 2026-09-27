@@ -70,6 +70,8 @@ default channel and doesn't remember one: you type it each time, and it isn't pu
 Keep real channel names out of public pages, examples, issues and screenshots, and use a
 placeholder like `your-channel-name`. A name that has been published (including in git history or
 an old GitHub Pages build) should be treated as known; switching to a fresh name is the only fix.
+The Muse room-board panel reads a committed `boards/<room>.jsonl` file. It does not fill the
+channel field, and it never writes that file.
 
 ## Publishing: why untagged means private
 

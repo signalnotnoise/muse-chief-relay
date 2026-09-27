@@ -16,6 +16,16 @@
       <div id="status" class="status off">disconnected</div>
     </header>
 
+    <section id="room-board" class="panel board" aria-label="Room board" aria-readonly="true">
+      <div class="board-head">
+        <h2>Room board</h2>
+        <span id="board-status" class="board-status">loading</span>
+        <button id="board-reload" type="button" class="ghost">Reload</button>
+      </div>
+      <p class="hint board-note">Read-only <code id="board-file">boards/fuse-grok-6f4e970cd8.jsonl</code><span id="board-via"></span>. Complete lines only. This page never writes the file.</p>
+      <div id="board-body" class="board-body" aria-live="polite"></div>
+    </section>
+
     <section id="join-panel" class="panel join">
       <h1>Join channel</h1>
       <form id="join-form">
@@ -93,6 +103,7 @@
     </section>
   </div>
   <script src="reconnect.js"></script>
+  <script src="board.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
