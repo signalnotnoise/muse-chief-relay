@@ -97,6 +97,33 @@ receipt line, never an action:
   only with a task, never with plain chat, so two bots can't ping-pong through it.
 - It is not an approval or a protocol `ack`. It says the message arrived. It doesn't say it will be done.
 
+## Wake-up webhook secret
+
+`Chief.Bridge hook` POSTs new chats to a webhook that wakes the agent. Anyone holding its URL and key
+can wake the agent with text of their choice, so both are secrets:
+
+- **Environment only.** The URL and key are read from environment variables (`CHIEF_HOOK_URL`,
+  `CHIEF_HOOK_AUTH` by default). `config.json` holds only the variable *names* (`hook.url_env`,
+  `hook.auth_env`), so the config file, the repo and `config.example.json` never contain them. The
+  repo code reads no other file for them; where the operator stores them and how they get into the
+  poller's environment is outside the repo.
+- **Never written anywhere.** Not to stdout or stderr, `inbox.jsonl`, the offset file, or the
+  `.hook.offset.status` file that `status` reads. Log lines give the HTTP status or the error *kind*
+  only (`timeout`, `error ConnectionError`), never an exception message, because those can include the
+  host. A missing or malformed variable is reported by name, never by value. The secrets object's
+  `ToString()` is `<redacted>`. Tests check that the test URL and key appear in no output, log or status
+  file.
+- **Encrypted in transit.** The URL must be `https://`. Plain `http://` is refused unless the host is
+  a loopback address (for local testing). Redirects aren't followed, so the key is never re-sent to a
+  host other than the configured one. A key with control characters is rejected, so it can't inject
+  headers.
+- **Filter what wakes the agent.** Set `hook.trips` to the trusted trips. With an empty list every
+  sender, including untripped impostors, can trigger a wake and has their text forwarded in the
+  payload. The wake itself grants nothing: the agent still applies its own trust rules to what `watch`
+  returns.
+- **If the key leaks,** rotate it at the webhook, update the poller's environment, and restart the
+  poller. Nothing in the repo needs to change.
+
 ## What needs a human
 
 The bridge enforces none of this. It's operator policy. In this deployment the assistants may chat,

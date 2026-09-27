@@ -1,7 +1,7 @@
 namespace Chief.Bridge;
 
 /// <summary>
-/// Command line: <c>[--config path] [say|status|watch|help] [args…]</c>. <c>--config path</c> and
+/// Command line: <c>[--config path] [say|status|watch|hook|help] [args…]</c>. <c>--config path</c> and
 /// <c>--config=path</c> are accepted anywhere before <c>--</c>. For the bridge run, a single bare
 /// argument is still taken as the config path (the original interface).
 /// </summary>
@@ -47,7 +47,7 @@ internal sealed record CliArgs(string Command, string? ConfigPath, IReadOnlyList
             rest.Add(a);
         }
 
-        if (rest.Count > 0 && rest[0] is "say" or "status" or "watch")
+        if (rest.Count > 0 && rest[0] is "say" or "status" or "watch" or "hook")
             return new CliArgs(rest[0], config, rest.Skip(1).ToList());
         if (rest.Count > 0 && rest[0] is "help" or "-h" or "--help")
             return new CliArgs("help", config, rest.Skip(1).ToList());

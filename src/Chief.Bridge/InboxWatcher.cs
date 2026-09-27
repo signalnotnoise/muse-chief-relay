@@ -35,16 +35,6 @@ internal sealed record WatchPoll(
     bool Reset,
     bool Dirty);
 
-/// <summary>Reported to <see cref="InboxWatcher.WaitAsync"/>'s <c>onTick</c> on every loop.</summary>
-internal enum WatchPhase
-{
-    /// <summary>Nothing new yet.</summary>
-    Waiting,
-
-    /// <summary>At least one chat arrived; waiting out <c>--settle</c> so a burst comes back as one wake.</summary>
-    Settling
-}
-
 internal enum WaitOutcome
 {
     Delivered,
@@ -59,15 +49,20 @@ internal enum WaitOutcome
 /// <item>The offset is in bytes, and only complete, newline-terminated lines are consumed: a line the
 /// bridge is still writing is left for the next poll.</item>
 /// <item>First run (no offset file): record the end of the last complete line and report nothing, so
-/// history never floods the first poll. If the inbox doesn't exist yet, record 0.</item>
+/// history never floods the first poll. If the inbox doesn't exist yet, record 0. A path that exists but
+/// isn't a readable file (a directory, or no permission) throws, so a one-shot <c>watch</c> exits 2
+/// instead of treating it as an empty inbox.</item>
 /// <item>Truncated inbox (shorter than the offset) or rotated inbox (its first bytes changed): start again
 /// from 0 and report what the new file holds.</item>
 /// <item>Frames that aren't inbound chats, the bridge's own nick, blank and malformed lines are skipped
 /// (and consumed).</item>
 /// <item>The offset file is written atomically (temp file, then rename). One watcher per offset file.</item>
+/// <item>A poll that hits transient filesystem trouble (a torn read, a locked file) doesn't stop a
+/// <c>--wait</c>: the failure is recorded as a warning and the next loop retries, so the listener
+/// stays up instead of dying quietly.</item>
 /// </list>
 /// </summary>
-internal sealed class InboxWatcher
+internal class InboxWatcher
 {
     public const int HeadBytes = 256;
     public static readonly TimeSpan DefaultPollInterval = TimeSpan.FromSeconds(1);
@@ -90,12 +85,15 @@ internal sealed class InboxWatcher
     /// <see cref="WaitAsync"/> still sees it.</summary>
     public string? Warning { get; private set; }
 
-    public WatchPoll Poll()
+    public virtual WatchPoll Poll()
     {
         var saved = ReadOffset(out var warning);
         Warning ??= warning;
 
-        if (!File.Exists(_inbox))
+        // File.Exists is false for a directory and for a file this process can't stat, so it cannot
+        // tell "not created yet" from "here, but not a readable inbox". Only a real absence is empty.
+        var fs = OpenInboxIfPresent();
+        if (fs is null)
         {
             // Nothing to read. On a first run, record 0 so everything in the inbox once it appears is new.
             return saved is null
@@ -103,38 +101,84 @@ internal sealed class InboxWatcher
                 : new WatchPoll(Array.Empty<WatchedChat>(), saved, false, false, false);
         }
 
-        using var fs = new FileStream(_inbox, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-        var length = fs.Length;
-
-        if (saved is null)
+        using (fs)
         {
-            var end = LastLineEnd(fs, length);
-            return new WatchPoll(Array.Empty<WatchedChat>(), new WatchOffset(end, Head(fs, end)), true, false, true);
+            var length = fs.Length;
+
+            if (saved is null)
+            {
+                var end = LastLineEnd(fs, length);
+                return new WatchPoll(Array.Empty<WatchedChat>(), new WatchOffset(end, Head(fs, end)), true, false, true);
+            }
+
+            var start = saved.Offset;
+            var reset = false;
+            if (length < start)
+            {
+                start = 0; // truncated
+                reset = true;
+            }
+            else if (saved.Head is not null && Head(fs, start) != saved.Head)
+            {
+                start = 0; // replaced by a different file
+                reset = true;
+            }
+
+            var chats = new List<WatchedChat>();
+            var next = ReadCompleteLines(fs, start, length, line =>
+            {
+                if (ParseLine(line, _ownNick) is { } chat)
+                    chats.Add(chat);
+            });
+
+            var nextOffset = new WatchOffset(next, Head(fs, next));
+            var dirty = reset || nextOffset != saved;
+            return new WatchPoll(chats, nextOffset, false, reset, dirty);
+        }
+    }
+
+    /// <summary>
+    /// The inbox opened for reading, or null when it is not there yet. Throws <see cref="IOException"/>
+    /// or <see cref="UnauthorizedAccessException"/> when the path exists but isn't a readable file.
+    /// </summary>
+    private FileStream? OpenInboxIfPresent()
+    {
+        try
+        {
+            if ((File.GetAttributes(_inbox) & FileAttributes.Directory) != 0)
+                throw new IOException($"inbox path is a directory ({_inbox})");
+        }
+        catch (FileNotFoundException)
+        {
+            return null;
+        }
+        catch (DirectoryNotFoundException)
+        {
+            return null;
         }
 
-        var start = saved.Offset;
-        var reset = false;
-        if (length < start)
-        {
-            start = 0; // truncated
-            reset = true;
-        }
-        else if (saved.Head is not null && Head(fs, start) != saved.Head)
-        {
-            start = 0; // replaced by a different file
-            reset = true;
-        }
+        return new FileStream(_inbox, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+    }
 
-        var chats = new List<WatchedChat>();
-        var next = ReadCompleteLines(fs, start, length, line =>
+    /// <summary>
+    /// One poll that never throws on filesystem trouble: returns false with a message instead, so a
+    /// long-running <c>watch --wait</c> survives a transient read failure and retries on the next loop
+    /// rather than dying unnoticed. Tests override <see cref="Poll"/> to inject failures.
+    /// </summary>
+    internal bool TryPoll(out WatchPoll? poll, out string? error)
+    {
+        try
         {
-            if (ParseLine(line, _ownNick) is { } chat)
-                chats.Add(chat);
-        });
-
-        var nextOffset = new WatchOffset(next, Head(fs, next));
-        var dirty = reset || nextOffset != saved;
-        return new WatchPoll(chats, nextOffset, false, reset, dirty);
+            poll = Poll();
+            error = null;
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            poll = null;
+            error = ex.Message;
+            return false;
+        }
     }
 
     public void Commit(WatchPoll poll)
@@ -148,41 +192,39 @@ internal sealed class InboxWatcher
     /// the offset (deliver first, save second: a crash in between repeats a message rather than losing it).
     /// Lines that don't qualify are consumed as they go by. Wakes on file-system events, with a poll every
     /// <c>pollInterval</c> as the fallback.
-    /// <para>
-    /// With <paramref name="settle"/> &gt; 0, the first chat doesn't return at once: the watcher keeps
-    /// collecting until <paramref name="settle"/> passes with no further qualifying chat, or
-    /// <see cref="SettleCapFactor"/> × <paramref name="settle"/> after the first one, whichever comes first, and
-    /// returns them all in one delivery. Once a chat is in hand it is always delivered: neither the timeout nor
-    /// cancellation during the settle window drops it.
-    /// </para>
-    /// <paramref name="onTick"/> is called on every loop (at least every <c>pollInterval</c>), for heartbeats.
     /// </summary>
     public async Task<WaitOutcome> WaitAsync(
-        TimeSpan? timeout, Action<IReadOnlyList<WatchedChat>> deliver, CancellationToken ct,
-        TimeSpan? settle = null, Action<WatchPhase>? onTick = null)
+        TimeSpan? timeout, Action<IReadOnlyList<WatchedChat>> deliver, CancellationToken ct)
     {
         var now = DateTime.UtcNow;
         // A timeout that reaches past DateTime.MaxValue is as good as none (and would overflow the addition).
         var deadline = timeout is { } t && t < DateTime.MaxValue - now ? now + t : (DateTime?)null;
         using var changed = new SemaphoreSlim(0, 1);
-        using var fsw = TryWatchDirectory(changed);
+        using var fsw = WatchFile(_inbox, changed);
 
         while (true)
         {
-            var poll = Poll();
-            if (poll.Chats.Count > 0)
+            // A failed poll is transient trouble (a torn read, a locked file), not a reason to stop
+            // listening: warn once and retry on the next loop. A listener that dies quietly is how
+            // messages pile up unnoticed.
+            var poll = TryPoll(out var p, out var error) ? p : null;
+            if (poll is null)
             {
-                if (settle is { } st && st > TimeSpan.Zero)
-                    poll = await SettleAsync(poll, st, changed, onTick, ct);
+                Warning ??= $"inbox poll failed ({error}); retrying";
+            }
+            else if (poll.Chats.Count > 0)
+            {
                 deliver(poll.Chats);
                 Commit(poll);
                 return WaitOutcome.Delivered;
             }
+            else
+            {
+                Commit(poll);
+            }
 
-            Commit(poll);
             if (ct.IsCancellationRequested)
                 return WaitOutcome.Cancelled;
-            onTick?.Invoke(WatchPhase.Waiting);
 
             var wait = _pollInterval;
             if (deadline is { } d)
@@ -202,43 +244,6 @@ internal sealed class InboxWatcher
             {
                 return WaitOutcome.Cancelled;
             }
-        }
-    }
-
-    /// <summary>The settle window never runs longer than this many times <c>--settle</c> after the first chat.</summary>
-    public const int SettleCapFactor = 4;
-
-    /// <summary>Re-polls (nothing is committed in between, so each poll covers everything since the saved offset)
-    /// until the burst goes quiet for <paramref name="settle"/> or the cap is reached. Returns the latest poll.</summary>
-    private async Task<WatchPoll> SettleAsync(
-        WatchPoll first, TimeSpan settle, SemaphoreSlim changed, Action<WatchPhase>? onTick, CancellationToken ct)
-    {
-        var latest = first;
-        var clock = System.Diagnostics.Stopwatch.StartNew();
-        var cap = TimeSpan.FromTicks(settle.Ticks * SettleCapFactor);
-        var lastNew = TimeSpan.Zero;
-
-        while (true)
-        {
-            onTick?.Invoke(WatchPhase.Settling);
-            var elapsed = clock.Elapsed;
-            var wait = new[] { _pollInterval, lastNew + settle - elapsed, cap - elapsed }.Min();
-            if (wait <= TimeSpan.Zero)
-                return latest;
-
-            try
-            {
-                await changed.WaitAsync(wait, ct);
-            }
-            catch (OperationCanceledException)
-            {
-                return latest; // stopping: deliver what we already have
-            }
-
-            var p = Poll();
-            if (p.Chats.Count > latest.Chats.Count)
-                lastNew = clock.Elapsed;
-            latest = p;
         }
     }
 
@@ -377,15 +382,18 @@ internal sealed class InboxWatcher
         File.Move(tmp, _offsetPath, overwrite: true);
     }
 
-    private FileSystemWatcher? TryWatchDirectory(SemaphoreSlim changed)
+    /// <summary>Releases <paramref name="changed"/> (at most once until it is taken) whenever
+    /// <paramref name="file"/> changes. Null when file-system events aren't available (e.g. inotify limits);
+    /// callers poll anyway, so this only makes them react sooner.</summary>
+    internal static FileSystemWatcher? WatchFile(string file, SemaphoreSlim changed)
     {
         try
         {
-            var dir = Path.GetDirectoryName(Path.GetFullPath(_inbox));
+            var dir = Path.GetDirectoryName(Path.GetFullPath(file));
             if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir))
                 return null;
 
-            var fsw = new FileSystemWatcher(dir, Path.GetFileName(_inbox))
+            var fsw = new FileSystemWatcher(dir, Path.GetFileName(file))
             {
                 NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.Size | NotifyFilters.FileName
             };
@@ -419,11 +427,8 @@ internal sealed class InboxWatcher
 }
 
 /// <summary>Options for <c>watch</c>, after the global <c>--config</c> has been taken out.</summary>
-internal sealed record WatchOptions(string? Nick, string? StatePath, bool Wait, TimeSpan? Timeout, TimeSpan? Settle = null)
+internal sealed record WatchOptions(string? Nick, string? StatePath, bool Wait, TimeSpan? Timeout)
 {
-    /// <summary>Largest accepted <c>--settle</c>, in seconds. A longer window only delays every wake.</summary>
-    public const double MaxSettleSeconds = 60;
-
     public const int ExitTimeout = 3;
 
     /// <summary>Largest accepted <c>--timeout</c>: whole seconds of <see cref="TimeSpan.MaxValue"/> (about 29,000 years).</summary>
@@ -433,7 +438,7 @@ internal sealed record WatchOptions(string? Nick, string? StatePath, bool Wait, 
     {
         string? nick = null, state = null;
         var wait = false;
-        TimeSpan? timeout = null, settle = null;
+        TimeSpan? timeout = null;
 
         for (var i = 0; i < args.Count; i++)
         {
@@ -465,16 +470,6 @@ internal sealed record WatchOptions(string? Nick, string? StatePath, bool Wait, 
                         $"--timeout needs a number of seconds from 0 to {MaxTimeoutSeconds:0}, got '{v}'");
                 timeout = TimeSpan.FromSeconds(secs);
             }
-            else if (a == "--settle" || a.StartsWith("--settle=", StringComparison.Ordinal))
-            {
-                var v = Value("--settle");
-                if (!double.TryParse(v, System.Globalization.NumberStyles.Float,
-                        System.Globalization.CultureInfo.InvariantCulture, out var secs)
-                    || !double.IsFinite(secs) || secs < 0 || secs > MaxSettleSeconds)
-                    throw new ArgumentException(
-                        $"--settle needs a number of seconds from 0 to {MaxSettleSeconds:0}, got '{v}'");
-                settle = TimeSpan.FromSeconds(secs);
-            }
             else
                 throw new ArgumentException($"watch: unknown argument '{a}'");
         }
@@ -485,9 +480,7 @@ internal sealed record WatchOptions(string? Nick, string? StatePath, bool Wait, 
             throw new ArgumentException("--state needs a value");
         if (timeout is not null && !wait)
             throw new ArgumentException("--timeout only applies with --wait");
-        if (settle is not null && !wait)
-            throw new ArgumentException("--settle only applies with --wait");
 
-        return new WatchOptions(nick, state, wait, timeout, settle);
+        return new WatchOptions(nick, state, wait, timeout);
     }
 }

@@ -46,6 +46,9 @@
   const BACKOFF_MAX_MS = 30000;
   let wantConnected = false;
   let retryAttempt = 0;
+  // Join warnings only. Socket closes use retryAttempt for backoff and must not
+  // spend the first-join cap.
+  let firstJoinWarns = 0;
   let retryTimer = null;
   let hasJoinedOnce = false;
   let awaitingJoin = false;
@@ -306,6 +309,7 @@
         // Join confirmed, so reset the backoff.
         awaitingJoin = false;
         retryAttempt = 0;
+        firstJoinWarns = 0;
         joinedNow = true;
       }
       handleMessage(data);
@@ -322,7 +326,9 @@
       if (awaitingJoin && data && data.cmd === "warn") {
         // Join rejected. Without this we'd sit "connected" but not in the channel.
         awaitingJoin = false;
-        if (MuseReconnect.onJoinWarn(data.text || "", hasJoinedOnce, retryAttempt) === "retry") {
+        const warned = MuseReconnect.recordJoinWarn(data.text || "", hasJoinedOnce, firstJoinWarns);
+        firstJoinWarns = warned.firstJoinWarns;
+        if (warned.decision === "retry") {
           dropSocket();
           scheduleReconnect();
         } else {
@@ -365,6 +371,7 @@
     el.metaTrip.textContent = "—"; // until hack.chat confirms the join
     wantConnected = true;
     retryAttempt = 0;
+    firstJoinWarns = 0;
     hasJoinedOnce = false;
     openSocket();
   }

@@ -4,12 +4,63 @@ Merged work, newest first. Times are ET.
 
 ## Unreleased
 
-- **Reconnect forever.** On 2026-09-27 around 04:40 ET hack.chat dropped the connection. A bridge that had already joined on main came back by itself; another copy of the bridge exited and had to be restarted by hand. There is no 3-attempt counter in `RunForeverAsync`. The give-up at 3 is Muse's first-join cap, and two holes in the bridge could still end a retry:
-  - **Muse** (`docs/muse/` and `web/muse/`, kept identical). `FIRST_JOIN_MAX_RETRIES = 3` stops a *first* join after three "nick taken" or rate-limit warnings, and a warning that doesn't match `/taken|too fast|rate|wait/i` stops even after a successful join (`Channel is full` was a stop; `Nickname taken` was not). A dropped established session now keeps retrying on every join warning. A first join still stops on bad input (an invalid nick stops immediately; a taken nick or a rate limit stops after 3 retries). A socket close keeps retrying until Disconnect, including before the first join. The decision is in `reconnect.js` so the page and the tests share it.
-  - **Chief.Bridge.** Thrown failures (DNS, refused, TLS, nick taken, rate limit, close during join) were already retried with no cap. A connect that never completed was not: `ConnectAsync` was only bound to the shutdown token, so a hung handshake stalled the loop for good. Logging the failure and writing `state.json` sat *outside* the session `try`, and `Main` does not catch those exceptions, so a disk error on the first retry killed the process. Both are transient now. Each attempt uses its own HTTP handler (the default `ClientWebSocket` reuses one static handler, and that handler gives a single handshake only three internal connection retries). The wait is still 1 s doubling to 30 s, multiplied by a random factor in [0.8, 1.2] and still capped at 30 s. Logs include the attempt number and never the trip password.
+- **Reconnect forever** (open, #15). On 2026-09-27 around 04:40 ET hack.chat dropped the connection. A bridge that had already joined on main came back by itself; another copy of the bridge exited and had to be restarted by hand. There is no 3-attempt counter in `RunForeverAsync`. The give-up at 3 is Muse's first-join cap, and two holes in the bridge could still end a retry:
+  - **Muse** (`docs/muse/` and `web/muse/`, kept identical). `FIRST_JOIN_MAX_RETRIES = 3` stops a *first* join after three "nick taken" or rate-limit warnings, and a warning that doesn't match `/taken|too fast|rate|wait/i` stops even after a successful join (`Channel is full` was a stop; `Nickname taken` was not). A dropped established session now keeps retrying on every join warning. A first join still stops on bad input (an invalid nick stops immediately; a taken nick or a rate limit stops after 3 join warnings). Those 3 count join warnings only: a socket close uses the backoff counter and does not spend them, including before the first join. The decision is in `reconnect.js` so the page and the tests share it.
+  - **Chief.Bridge.** Thrown failures (DNS, refused, TLS, nick taken, rate limit, close during join) were already retried with no cap. A connect that never completed was not: `ConnectAsync` was only bound to the shutdown token, so a hung handshake stalled the loop for good. Logging the failure and writing `state.json` sat *outside* the session `try`, and `Main` does not catch those exceptions, so a disk error on the first retry killed the process. The reconnect line on stdout was the same kind of hole: a closed pipe throws `IOException` and used to leave the loop. All of those are transient now. Each attempt uses its own HTTP handler (the default `ClientWebSocket` reuses one static handler, and that handler gives a single handshake only three internal connection retries). The wait is still 1 s doubling to 30 s, multiplied by a random factor in [0.8, 1.2] and still capped at 30 s. Logs include the attempt number and never the trip password.
   - **Permanent, fail fast (exit 2):** config missing or not JSON, empty `channel` or `nick`, invalid `auto_ack`, or a `url` that is not absolute `ws://` or `wss://`. Retrying those cannot succeed. A server `warn` is not in this list. SIGINT / SIGTERM is still a clean exit 0.
-  - Tests: a fake socket that fails six different ways (DNS, refused, TLS, nick taken, close during join, rate limit) then joins; a hung connect abandoned four times then joined; a log/state write that throws does not exit the process; a bad URL fails before any connect; a localhost WebSocket that rejects five handshakes then sends `onlineSet`. 10 new tests (177 total). `node --test tests/muse/reconnect.test.js` covers the client decision. Removing the connect timeout or the log `try` makes the matching test fail.
-- **#12 Chief responsiveness: bridge auto-ack, `watch --settle`, listener status** (open). chief only acts
+  - Tests: a fake socket that fails six different ways (DNS, refused, TLS, nick taken, close during join, rate limit) then joins; a hung connect abandoned four times then joined; a log/state write that throws does not exit the process; a closed stdout on the reconnect line does not exit the process; a bad URL fails before any connect; a localhost WebSocket that rejects five handshakes then sends `onlineSet`. 11 new tests (205 total). `node --test tests/muse/reconnect.test.js` covers the client decision, including that socket closes do not spend the first-join warn budget. Removing the connect timeout, the log `try`, or the stdout wrapper makes the matching test fail.
+- **Tool packaging + `watch` hardening** (open, #14). `Chief.Bridge` is installable as a .NET tool:
+  `dotnet pack` produces `Chief.Bridge.0.1.0.nupkg`, and `dotnet tool install --global Chief.Bridge`
+  puts a `chief-bridge` command on the PATH. `watch --wait` retries a transient inbox read (a torn read,
+  a locked file) instead of exiting. A one-shot `watch` that can't read the inbox exits 2. A missing inbox
+  is still an empty first poll; a path that exists but isn't a readable file (for example `inbox.jsonl` is a
+  directory) is that exit 2.
+- **#13 Chief replies like Fuse: webhook hook poller replaces the wake-on-exit listener** (open). Fuse replies
+  in 10–20 s because a 5 s poll script wakes a fresh worker for every inbound chat. chief took about a minute, and
+  sometimes never woke: it relied on a background `watch --wait` exiting to wake it, and on 2026-09-27 at
+  05:05 that watcher did exit 0 with Alex's "hello", but the wake never reached chief. So the wake now comes
+  from a webhook, like Fuse's loop: bridge → `hook` poller → webhook routine → chief drains with `watch` →
+  reply via the outbox.
+  - **`Chief.Bridge hook`**, a C# port of the local `hookpoll.py` stopgap. It watches `inbox.jsonl`
+    (file-system events plus a `poll_s` poll, default 5 s) and POSTs `{"source","channel","chats":[…]}` to
+    the webhook with `Authorization: Bearer <key>`. The first chat after a quiet spell fires at once; later
+    ones are batched by `cooldown_s` (default 15). Optional `trips` filter; the bridge's own nick is always
+    skipped. The URL and key come **only** from environment variables (`url_env`/`auth_env`, default
+    `CHIEF_HOOK_URL`/`CHIEF_HOOK_AUTH`) and are never logged, written to status, or put in the config.
+    https is required except to loopback, redirects aren't followed. Improvements over `hookpoll.py`: the
+    offset moves only after a 2xx (the Python one saved it first, so a crash or restart lost held chats);
+    exponential retry backoff capped by `max_retry_s`; handles a truncated or rotated inbox and half-written
+    lines through the same reader as `watch`; clean SIGTERM (status `stopped`, exit 0); refuses to start
+    (exit 4) while another poller holds the exclusive lock on the same offset (`<state>.lock`, released on
+    exit or crash; the status file is not the lock); heartbeats during an in-flight webhook request so a slow
+    POST (up to `timeout_s`) is not reported as NOT RUNNING; `--test` sends one fake chat.
+  - **Hook status** `<base>/.hook.offset.status` (heartbeat every 5 s, last fire time, HTTP result, count,
+    pending, failures, next retry). `status` (and so `hc status`) prints
+    `hook: running | FAILING | NOT RUNNING | unknown | not configured` and `hook last fire: …`, plus
+    `undrained: N chat(s) not yet read by watch` (read-only) and whether auto-ack is on. New
+    `status --state <file>` for a non-default watch offset. Unknown arguments to `status` are now a usage
+    error.
+  - **Auto-acknowledgement** (`auto_ack`, off by default, from #12) is kept. When a
+    trusted trip addresses the bridge, the bridge itself posts `(auto) got it, thinking…` (or
+    `(auto) got task <id>, thinking…`) in well under a second. `mention_trips` (people) trigger it with a
+    mention or a task, `task_trips` (agents such as Fuse) only with a task, so there's no bot loop. Global
+    `cooldown_s` (default 60, minimum 10) and `max_per_hour` (default 20). When the hook poller is NOT
+    RUNNING or FAILING it sends `offline_text` instead (`…chief's wake-up hook isn't working right now, so
+    the reply may be late`), keyed on the hook poller rather than #12's watch listener. The default texts
+    drop "full reply in about a minute". `auto_ack.watch_state` is gone (an old config that still has it
+    loads fine; the field is ignored).
+  - **Removed** from #12, because they only served the wake-on-exit listener the hook replaces:
+    `watch --settle` (the hook's cooldown batches bursts now), the watch status file with
+    `listener: armed | waking | NOT ARMED` in `status`, the "another watcher is armed" warning, the
+    `re-arm now` stderr line on timeout, and `auto_ack.watch_state`. `watch` itself is back to how it was
+    before #12; chief now uses it without `--wait` to drain.
+  - Docs: README (Webhook poller section, auto-ack table), `agents/chief.md` (the new loop and why
+    `watch --wait` was dropped, checking the wake-up path), `docs/protocol.md` (local webhook payload,
+    `(auto)` lines), `docs/security.md` (webhook secret handling), `config.example.json` (`hook` block).
+    `.hook.offset*` is gitignored.
+  - 185 tests (167 after #12): 50 new for the hook, against a local HTTP listener; the watch-status and
+    `--settle` tests went with those features.
+- **#12 Chief responsiveness: bridge auto-ack, `watch --settle`, listener status** (merged 2026-09-27 05:25). chief only acts
   when a background `watch --wait` exits and wakes it, so every reply costs a full wake (about a minute),
   and a missed re-arm goes unnoticed. On 2026-09-27 a listener exited and wasn't re-armed, and Alex's
   hello and a task sat for several minutes until he asked. This doesn't make chief think faster. It makes
@@ -41,6 +92,8 @@ Merged work, newest first. Times are ET.
     (`(auto)` lines are receipts, not protocol acks), `docs/security.md` (how auto-ack uses trips; also fixes
     the garbled "Fuse is alex confirmed…" sentence), `config.example.json` (disabled `auto_ack` block).
   - 85 new tests (167 total).
+  - Superseded in part by #13: `--settle`, the watch status file and the listener status were removed
+    again, and the auto-ack offline check now looks at the hook poller.
 - **#11 Muse: masked password field for trips, and no default channel** (merged 2026-09-27 04:37). Both `docs/muse/` and
   `web/muse/` (kept identical).
   - New optional **Password (optional, for a trip)** field (`type="password"`,

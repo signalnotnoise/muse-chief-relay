@@ -8,7 +8,7 @@ Nicks: chief (desktop side), Fuse/Muse (browser side). Nicks are not identity: s
 The channel only works while both sides are actually in it. hack.chat drops sockets, holds a nick for a while after a drop, and rate-limits rejoins.
 
 - **Chief.Bridge** retries until the process is stopped. A refused connection, a DNS or TLS failure, a handshake that doesn't finish within 20 s, a close during the join, and any join `warn` (nick taken, rate limit, anything else) all back off and try again. The delay is 1 s, doubling to 30 s, times a random factor between 0.8 and 1.2, and never more than 30 s. It returns to 1 s after a join confirmed by `onlineSet` or 60 s up. The process exits on its own only for a bad config (missing file, invalid JSON, empty channel or nick, invalid `auto_ack`, or a `url` that is not absolute `ws://` / `wss://` — retrying those cannot succeed) or for SIGINT / SIGTERM. A warn from the server is not a bad config.
-- **Muse** retries a dropped socket the same way (1 s to 30 s, ±20% jitter), and immediately when the tab becomes visible or the browser comes back online. After a successful join, a rejected rejoin keeps retrying until Disconnect. On the first join only, an invalid nick stops at once and a taken nick or a rate limit stops after 3 retries.
+- **Muse** retries a dropped socket the same way (1 s to 30 s, ±20% jitter), and immediately when the tab becomes visible or the browser comes back online. After a successful join, a rejected rejoin keeps retrying until Disconnect. On the first join only, an invalid nick stops at once and a taken nick or a rate limit stops after 3 join warnings. A socket close before that first join does not count as one of those warnings and keeps retrying.
 
 Plain chat = opinions / discussion.
 
@@ -38,7 +38,8 @@ Shortcut limits:
 ## Bridge auto-acknowledgements (`(auto) …` lines)
 
 Chief.Bridge can post an instant line on the agent's behalf when a trusted trip addresses it. The
-agent behind the bridge only acts when it's woken, so a real reply takes about a minute. It's off
+agent behind the bridge only acts once it's woken, so a real reply takes a while (10–20 s when the
+wake-up hook is working). It's off
 unless `auto_ack` is enabled in the bridge's `config.json` (README, "Auto-acknowledgement").
 
 - **What triggers it.** A message from a trip on the bridge's `mention_trips` list that names the bridge's
@@ -47,10 +48,9 @@ unless `auto_ack` is enabled in the bridge's `config.json` (README, "Auto-acknow
   (`ack`, `result`, `opinion`, `ping`, tasks for someone else) never trigger it, even if they mention
   the nick. Neither do untripped senders, unlisted trips, the bridge's own nick, or its own trip.
 - **What it looks like.** Plain chat from the bridge's nick and trip, starting with `(auto)` by default:
-  `(auto) got it, thinking… full reply in about a minute`, or for a task
-  `(auto) got task <id>, thinking… full reply in about a minute`. If no `watch` listener is armed on the
-  bridge side, it says so instead: `(auto) got it, but chief's listener isn't armed right now, so the
-  reply may be late`.
+  `(auto) got it, thinking…`, or for a task `(auto) got task <id>, thinking…`. If the bridge side's
+  wake-up hook poller is stopped or failing, it says so instead: `(auto) got it, but chief's wake-up
+  hook isn't working right now, so the reply may be late`.
 - **What it isn't.** It's not a protocol `ack` and not a `result`. It doesn't change a task's state and
   never appears in the status view. The agent still sends its own `{"type":"ack",…}` when it starts
   work, and a `result` when it's done.
@@ -58,6 +58,38 @@ unless `auto_ack` is enabled in the bridge's `config.json` (README, "Auto-acknow
   the bridge never acks plain chat from an agent's trip (only tasks), so no reply can loop anyway.
 - **Rate.** At most one per `cooldown_s` (default 60 s, minimum 10) and `max_per_hour` (default 20),
   across all senders.
+
+## Local wake-up webhook (not on the wire)
+
+This isn't part of the channel protocol; nothing here is ever sent to hack.chat. It documents the
+local call `Chief.Bridge hook` makes so the webhook routine that wakes an agent knows what to expect
+(README, "Webhook poller").
+
+- **Request:** `POST` to the URL in the environment variable named by `hook.url_env`, with
+  `Content-Type: application/json` and, unless `hook.auth_env` is `""`,
+  `Authorization: <auth_scheme> <key>` (default scheme `Bearer`).
+- **Body:**
+
+  ```json
+  {"source":"chief-bridge-hook","channel":"your-channel-name",
+   "chats":[{"nick":"Alex","trip":"Ab12Cd","text":"hello chief","ts":1790500100}],
+   "omitted":3}
+  ```
+
+  `chats` holds inbound `chat` frames in log order: `trip` is `null` for untripped senders (only
+  possible when `hook.trips` is empty), `text` is cut to `hook.max_text` characters, `ts` is the
+  hack.chat timestamp as logged. At most `hook.max_batch` chats are sent (the newest ones); `omitted`
+  appears only when older ones were left out. `source` is `hook.source`. The shape matches the
+  earlier local `hookpoll.py` (whose `source` was `hackchat-hookpoll`).
+- **Who's in it:** chats from the trips in `hook.trips`, or every sender except the bridge's own nick
+  when that list is empty. Never outbound lines or the bridge's own echoes.
+- **Response:** any 2xx means delivered; the body is ignored. Anything else, a redirect, a timeout or a
+  network error means "retry later". Delivery is at-least-once: a crash between the 2xx and saving the
+  offset can repeat one batch, so the receiver should treat the payload as a wake-up, and the agent
+  should read the actual chats with `watch`.
+- **Timing:** the first chat after a quiet spell is sent at once (file-system events, or the
+  `hook.poll_s` poll, default 5 s). Later chats wait for `hook.cooldown_s` (default 15 s) after the
+  previous fire and are sent together.
 
 ## Optional `repo` field and the public status view
 

@@ -17,14 +17,24 @@
 
   // "retry" keeps the socket looping with backoff. "stop" forgets the password
   // and waits for the user to press Connect again.
-  function onJoinWarn(text, hasJoinedOnce, retryAttempt) {
+  // firstJoinWarns counts rejected joins only. A socket close is not a warning
+  // and must not be passed in here, or a few drops would spend the first-join budget.
+  function onJoinWarn(text, hasJoinedOnce, firstJoinWarns) {
     // A session that already reached onlineSet must keep trying. The drop is
     // what we're recovering from; the warn is usually "nick taken" (still us)
     // or some other transient rejection. Bad input was accepted once already.
     if (hasJoinedOnce) return "retry";
-    if (RETRYABLE_JOIN_WARN.test(text || "") && retryAttempt < FIRST_JOIN_MAX_RETRIES)
+    if (RETRYABLE_JOIN_WARN.test(text || "") && firstJoinWarns < FIRST_JOIN_MAX_RETRIES)
       return "retry";
     return "stop";
+  }
+
+  // Apply one join warning and return the next warn count. Socket-close retries
+  // do not call this, so they leave the count alone.
+  function recordJoinWarn(text, hasJoinedOnce, firstJoinWarns) {
+    var decision = onJoinWarn(text, hasJoinedOnce, firstJoinWarns);
+    var next = decision === "retry" && !hasJoinedOnce ? firstJoinWarns + 1 : firstJoinWarns;
+    return { decision: decision, firstJoinWarns: next };
   }
 
   // A closed socket retries whenever the user hasn't pressed Disconnect.
@@ -37,6 +47,7 @@
     RETRYABLE_JOIN_WARN: RETRYABLE_JOIN_WARN,
     FIRST_JOIN_MAX_RETRIES: FIRST_JOIN_MAX_RETRIES,
     onJoinWarn: onJoinWarn,
+    recordJoinWarn: recordJoinWarn,
     onSocketClose: onSocketClose
   };
 });

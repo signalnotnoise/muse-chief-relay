@@ -30,20 +30,16 @@ internal sealed class AutoAckConfig
     /// <summary>At most this many acks in any rolling hour.</summary>
     [JsonPropertyName("max_per_hour")] public int MaxPerHour { get; set; } = 20;
 
-    /// <summary>Sent when the listener is armed, waking, or unknown. <c>{from}</c> is the sender's nick.</summary>
-    public string Text { get; set; } = "(auto) got it, thinking… full reply in about a minute";
+    /// <summary>Sent normally. <c>{from}</c> is the sender's nick.</summary>
+    public string Text { get; set; } = "(auto) got it, thinking…";
 
     /// <summary>Sent for a task. <c>{id}</c> is the task id (or "?"), <c>{from}</c> the sender's nick.</summary>
-    [JsonPropertyName("task_text")] public string TaskText { get; set; } = "(auto) got task {id}, thinking… full reply in about a minute";
+    [JsonPropertyName("task_text")] public string TaskText { get; set; } = "(auto) got task {id}, thinking…";
 
-    /// <summary>Sent instead when the status file says no watcher is armed, so the ack never promises a reply
-    /// that nothing is going to produce.</summary>
+    /// <summary>Sent instead when the hook poller's status says it is not running or its fires are failing, so the
+    /// ack never promises a reply that nothing is going to wake chief for.</summary>
     [JsonPropertyName("offline_text")] public string OfflineText { get; set; } =
-        "(auto) got it, but chief's listener isn't armed right now, so the reply may be late";
-
-    /// <summary>Offset file of the watcher to check (its status file is this plus <c>.status</c>). Relative paths
-    /// are resolved against the bridge's base dir. Default: <c>&lt;base&gt;/.inbox_watch.offset</c>.</summary>
-    [JsonPropertyName("watch_state")] public string? WatchState { get; set; }
+        "(auto) got it, but chief's wake-up hook isn't working right now, so the reply may be late";
 
     /// <summary>Normalise trips (trim, drop a leading '!') and reject a config that could spam.</summary>
     public void Validate(string configPath)
@@ -162,7 +158,7 @@ internal sealed class AutoAcker
     /// <summary>The bridge's own trip, learned from <c>onlineSet</c>. Messages carrying it are never acked.</summary>
     public string? OwnTrip { get; set; }
 
-    public AckDecision Consider(string? nick, string? trip, string? text, DateTimeOffset now, Func<ListenerView> listener)
+    public AckDecision Consider(string? nick, string? trip, string? text, DateTimeOffset now, Func<HookView> hook)
     {
         if (!_cfg.Enabled)
             return new AckDecision(false, "disabled");
@@ -190,8 +186,8 @@ internal sealed class AutoAcker
         if (_recent.Count >= _cfg.MaxPerHour)
             return new AckDecision(false, "hourly cap", Trigger: trigger);
 
-        var view = listener();
-        var template = view.State == ListenerState.NotArmed ? _cfg.OfflineText
+        var view = hook();
+        var template = view.State is HookState.NotRunning or HookState.Failing ? _cfg.OfflineText
             : trigger.IsTask ? _cfg.TaskText
             : _cfg.Text;
         var textOut = template
@@ -200,7 +196,7 @@ internal sealed class AutoAcker
 
         _last = now;
         _recent.Enqueue(now);
-        return new AckDecision(true, $"{(trigger.IsTask ? "task" : "mention")}; listener {view.State.ToString().ToLowerInvariant()}", textOut, trigger);
+        return new AckDecision(true, $"{(trigger.IsTask ? "task" : "mention")}; hook {view.State.ToString().ToLowerInvariant()}", textOut, trigger);
     }
 
     /// <summary>Chat-supplied values go back into the channel: keep them short and on one line.</summary>

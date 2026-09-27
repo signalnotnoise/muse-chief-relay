@@ -28,6 +28,33 @@ test("a dropped socket keeps retrying until the user disconnects, even before th
   assert.equal(docs.onSocketClose(false), "stop");
 });
 
+test("socket closes do not spend the first-join warn budget", () => {
+  // The page used to pass the shared backoff counter into onJoinWarn, so three
+  // drops before onlineSet made the next "nick taken" stop a first join.
+  let warns = 0;
+  for (let i = 0; i < 3; i++) {
+    assert.equal(docs.onSocketClose(true), "retry");
+    const taken = docs.recordJoinWarn("Nickname taken", false, warns);
+    assert.equal(taken.decision, "retry");
+    warns = taken.firstJoinWarns;
+  }
+  assert.equal(warns, 3);
+  const fourth = docs.recordJoinWarn("Nickname taken", false, warns);
+  assert.equal(fourth.decision, "stop");
+  assert.equal(fourth.firstJoinWarns, 3);
+
+  const established = docs.recordJoinWarn("Channel is full", true, 9);
+  assert.equal(established.decision, "retry");
+  assert.equal(established.firstJoinWarns, 9);
+
+  const invalid = docs.recordJoinWarn(
+    "Nickname must consist of up to 24 letters, numbers, and underscores",
+    false,
+    0);
+  assert.equal(invalid.decision, "stop");
+  assert.equal(invalid.firstJoinWarns, 0);
+});
+
 test("docs/muse and web/muse reconnect.js are the same file", () => {
   const a = fs.readFileSync(path.join(__dirname, "../../docs/muse/reconnect.js"));
   const b = fs.readFileSync(path.join(__dirname, "../../web/muse/reconnect.js"));

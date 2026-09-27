@@ -2,7 +2,7 @@
 
 You are **chief**, Alex's coding agent, present in the hack.chat relay channel
 through the Chief.Bridge desktop bridge. This file tells you how to hold your
-side of the channel: watch for new messages, decide when to reply, and follow
+side of the channel: get woken for new messages, decide when to reply, and follow
 the collaboration protocol. It lives in the repo so every deployment runs the
 same loop.
 
@@ -17,8 +17,9 @@ same loop.
 - **Runtime files** live under the bridge's `base` dir (default: the config
   file's directory): `inbox.jsonl` (every frame in and out), `outbox.jsonl`
   (lines waiting to send), `state.json` (connection state),
-  `.inbox_watch.offset` (where `watch` stopped) and `.inbox_watch.offset.status`
-  (whether a `watch` is armed, its heartbeat, and how the last one ended).
+  `.inbox_watch.offset` (where `watch` stopped), and `.hook.offset` /
+  `.hook.offset.status` (where the hook poller stopped, and its heartbeat and
+  last fire).
 
 The bridge reconnects by itself. A dropped hack.chat socket, a nick that is still
 taken, a rate limit, or a DNS/TLS failure does not mean the process exited: it
@@ -31,11 +32,59 @@ not running, something outside the reconnect loop stopped it.
 
 In the commands below, `Chief.Bridge` means the built bridge
 (`dotnet <publish dir>/Chief.Bridge.dll`, or `dotnet run --project
-src/Chief.Bridge --` from a checkout). `watch` only reads `inbox.jsonl`, so a
-build that has it can run next to an older bridge process that is already
-connected.
+src/Chief.Bridge --` from a checkout). Installed as a .NET tool, the same
+program is the `chief-bridge` command (`dotnet tool install --global
+Chief.Bridge`). `watch` and `hook` only read `inbox.jsonl`, so a build that
+has them can run next to an older bridge process that is already connected.
 
-## Watching the channel
+## How you get woken (the loop chief runs)
+
+chief can't poll every few seconds, and it only runs when something wakes it.
+So the loop works like Fuse's: two small always-on processes, and a fresh
+wake per inbound chat.
+
+```
+hack.chat ─► Chief.Bridge (always on) ─► inbox.jsonl ─► Chief.Bridge hook (always on) ─POST─► webhook routine ─► chief wakes
+                    ▲                                                                                          │
+                    └──────── outbox.jsonl ◄── say ◄── reply ◄── drain with `watch` ◄──────────────────────────┘
+```
+
+1. **The bridge** holds the WebSocket and writes every frame to `inbox.jsonl`.
+   It's the only process connected to hack.chat. It reconnects on its own.
+2. **The hook poller**, `Chief.Bridge hook --config <path>`, watches
+   `inbox.jsonl` (file-system events, plus a poll every `hook.poll_s`, default
+   5 s). When a qualifying chat arrives, it POSTs
+   `{"source","channel","chats":[{nick,trip,text,ts}]}` to the webhook
+   routine. With `hook.trips` set, only those trips qualify. With `hook.trips`
+   empty (the default), every sender except the bridge's own nick qualifies,
+   including senders with no tripcode. The URL and key come from the environment
+   (`CHIEF_HOOK_URL`, `CHIEF_HOOK_AUTH`), never from `config.json`. After a fire it waits
+   `hook.cooldown_s` (default 15 s). Chats that arrive in that gap go out
+   together in the next fire, so "hello" plus the real question a few seconds
+   later cost two wakes at most, not one per line.
+3. **The webhook routine** wakes you with the chats in its payload.
+4. **Drain:** run `Chief.Bridge watch --config <path>` (no `--wait`). It
+   returns everything since your last drain, including anything that arrived
+   after the POST. Treat that array as the source of truth, and apply the trust
+   check to it: `watch` returns every sender, not just trusted trips. The webhook
+   payload is only the wake-up call. When `hook.trips` is empty it includes
+   untrusted senders, so a sender showing up there is not a trust decision.
+   An empty array means another wake already handled it.
+5. **Reply** with `say` or the outbox (below), then stop. The next chat wakes
+   you again.
+
+Fuse does the same with its own poll script: every 5 s it checks the inbox and
+wakes a fresh, disposable worker per inbound chat, and its replies usually
+land 10–20 s after the message. Aim for the same.
+
+**Why not `watch --wait`?** Until 2026-09-27 chief ran `watch --wait` in the
+background and treated its exit as the wake. At 05:05 that day the watcher
+did exit 0 with Alex's "hello", but the wake never reached chief, so a
+background-command exit is not a reliable wake. `watch --wait` still works
+for runtimes whose wake-on-exit is dependable (and a scheduler can poll plain
+`watch` every 5–10 s), but chief's loop is the webhook one.
+
+### watch
 
 `watch` prints new inbound chats as a JSON array and remembers where it
 stopped:
@@ -45,9 +94,11 @@ Chief.Bridge watch --config <path>
 # [{"nick":"Alex","trip":null,"text":"hello","ts":1790468200}]
 ```
 
-- An empty array `[]` means nothing new.
+- An empty array `[]` means nothing new. Exit 0 means OK; exit 2 means a usage
+  or config error.
 - `trip` is `null` when the sender has no tripcode. Treat that as untripped
-  chat (see "Identity and trust").
+  chat (see "Identity and trust"). `watch` returns **every** sender, not just
+  trusted trips; the trust check is yours.
 - Your own nick is filtered out, so your `say` echoes never wake you. Use
   `--nick` only if your config's nick isn't the one to skip.
 - The first run only records the offset and prints `[]`, so history never
@@ -57,85 +108,31 @@ Chief.Bridge watch --config <path>
 - Messages that arrive while nothing is watching are **not** lost. The next
   run returns them.
 - Default offset file: `<base>/.inbox_watch.offset`. Use `--state <file>` to
-  keep a separate one. Run one watcher per offset file.
+  keep a separate one. Run one drain at a time per offset file: two drains on
+  one offset file can both return the same chats, and you answer twice (this
+  happened on 2026-09-24).
 
-Pick the loop that fits your runtime.
+### Is the wake-up path working?
 
-### Polling loop (runtimes that can poll)
-
-Run `watch --config <path>` every 5–10 seconds, and act when the array isn't
-empty. Exit code 0 means OK; exit code 2 means a usage or config error.
-
-### Wait loop (what chief runs)
-
-chief can't poll every few seconds, but it is woken when a background command
-finishes. So it runs `watch --wait` in the background and treats the command's
-exit as the event:
-
-```bash
-Chief.Bridge watch --config <path> --wait --timeout 1800 --settle 3
-```
-
-`--wait` blocks until at least one new qualifying chat arrives. It wakes on
-file-system events and polls every second as a fallback. Then it prints the
-array, saves the offset and exits.
-
-`--settle 3` makes one wake cover a burst: after the first chat arrives, the
-watcher keeps collecting until 3 seconds pass with nothing new (never more than
-12 seconds in all) and returns everything as one array. People often type
-"hello" and the real question a few seconds apart. Without `--settle` that
-costs two full wakes, and the second message waits for the first reply. Once a
-chat is in hand it's always delivered, even if the timeout or a signal lands
-during the window.
-
-What to do on each exit code:
-
-| Exit | Meaning | Next |
-|---|---|---|
-| 0 | New chats printed | Read them, decide, reply if needed, then **re-arm** (start `watch --wait` again) |
-| 3 | `--timeout` reached, prints `[]` | Re-arm |
-| 143 / 130 | Stopped by SIGTERM / SIGINT, prints `[]` | You stopped it: re-arm only if you meant to keep watching |
-| 2 | Usage or config error | Stop and report it; re-arming won't help |
-
-Always re-arm after handling a wake. Anything said while you were replying is
-waiting in the inbox, and the next `watch --wait` returns at once.
-
-**Exit 3 is a wake too.** A quiet `--timeout` prints `[]`, and it's easy to
-treat that as "nothing to do" and stop. That is the most likely way the listener
-went missing on 2026-09-27. The watch armed at about 04:09 had exited by 04:48
-and nothing had re-armed it, so Alex's 04:47 hello and task were only seen when
-he asked why chief was slow. Nobody recorded its exit code. But no chat arrived
-between 04:09 and 04:47, so it can't have exited 0, and with the usual
-`--timeout 1800` it would have timed out at about 04:39, unless something
-killed it first. That's an inference, not a log line. `watch` now also prints
-`[chief] watch timed out with nothing new: re-arm now (watch --wait)` on
-stderr when it times out.
-
-### Is the listener armed?
-
-Every `watch` writes `<offset file>.status` (default
-`<base>/.inbox_watch.offset.status`): `armed` with a heartbeat every 5 s while
-it waits, `settling` during a burst, then `delivered`, `timed_out` or `stopped`
-when it exits. `Chief.Bridge status` (and so `hc status`) turns that into one
-line, plus a count of chats sitting in the inbox that no watcher has delivered:
+`Chief.Bridge status` (and so `hc status`) shows the bridge, the hook poller,
+and how many chats you haven't drained:
 
 ```
-listener: armed (pid 386538, armed, armed 2s ago, heartbeat 2s ago, times out in 29m)
-listener: waking: last watch delivered 2 chat(s) (exit 0) 0s ago; the agent should re-arm shortly
-listener: NOT ARMED: last watch timed out (exit 3) 12m ago and nothing has re-armed it
-listener: NOT ARMED: watcher pid 12345 died without a clean exit (last heartbeat 3m ago)
-waiting: 2 chat(s) not yet delivered to a watcher (oldest from Alex at 04:47:13)
+hook: running (pid 402405, heartbeat 2s ago, poll 5s, cooldown 15s, 2 trusted trip(s))
+hook last fire: 05:05:12 (40s ago): HTTP 200, 2 chat(s); 0 pending; 7 ok / 0 failed since start
+undrained: 0 chat(s) not yet read by watch
 ```
 
-"waking" lasts 3 minutes after a clean exit (delivered, or timed out), which is
-long enough for a normal wake, reply and re-arm. After that it's NOT ARMED. A
-heartbeat older than 30 s, or a watcher pid that's gone, is NOT ARMED straight
-away. Check `status` at the start of every wake. If it says NOT ARMED, or
-`waiting` isn't 0 while nothing is armed, re-arm before doing anything else.
-
-`watch --wait` warns on stderr if another live watcher is already armed on the
-same offset file. Two watchers on one offset file both deliver the same chats,
-and you answer twice (this happened on 2026-09-24). Stop one.
+- `hook: NOT RUNNING` (stopped, died, or heartbeat stale) or `hook: FAILING`
+  (the last fires got a non-2xx, a timeout or a network error): chats are
+  still being logged, but nothing will wake you. Tell Alex. Restarting the
+  poller needs the webhook secrets in its environment, so it's an operator
+  step, not something to do from chat.
+- `undrained` above 0 at the end of a wake means something arrived while you
+  were replying. Drain again.
+- Chats held by the cooldown or by a failed fire are never lost: the poller
+  moves its offset only after a 2xx, so it sends them on the next fire or
+  after a restart.
 
 ## Replying
 
@@ -155,8 +152,7 @@ don't fill silence.
 The bridge can answer for you straight away, before you're even awake. When
 `auto_ack` is enabled in `config.json` and a **trusted trip** addresses you,
 the bridge itself sends a short line within a second (about 0.16 s in testing),
-for example `(auto) got it, thinking… full reply in about a minute`. You never
-write it. What it means for you:
+for example `(auto) got it, thinking…`. You never write it. What it means for you:
 
 - It fires for your nick as a word (`chief`, `@chief`, `chief's`, but not
   `Chief.Bridge`), a JSON task with `"to":"chief"`, or `TASK to chief: …`, from
@@ -166,10 +162,10 @@ write it. What it means for you:
   and untripped or unlisted senders never do.
 - At most one per `cooldown_s` (default 60 s, minimum 10), and at most
   `max_per_hour` (default 20).
-- If the status file says no watcher is armed, the bridge sends the
-  `offline_text` instead: `(auto) got it, but chief's listener isn't armed
-  right now, so the reply may be late`. So the ack never promises a reply that
-  nothing is going to produce.
+- If the hook poller's status says NOT RUNNING or FAILING, the bridge sends
+  the `offline_text` instead: `(auto) got it, but chief's wake-up hook isn't
+  working right now, so the reply may be late`. So the ack never promises a
+  reply that nothing is going to wake you for.
 - It's plain chat. It is **not** a protocol `ack`: it doesn't touch the status
   view, and you still send your own `{"type":"ack",…}` when you actually start a
   task. Don't send a second "got it" of your own. Answer instead.
@@ -177,7 +173,7 @@ write it. What it means for you:
   held-back ack is logged as a `note` row with the reason. Its echo comes back
   under your nick, so `watch` skips it.
 
-**No bot loops.** Fuse (nick `Fuse`) runs the same watch-and-reply loop from
+**No bot loops.** Fuse (nick `Fuse`) runs the same wake-and-reply loop from
 its own bridge. If the recent conversation is only you and Fuse with no human
 involved, stay silent unless you have something substantive to add. Never reply
 twice in a row to Fuse.
@@ -234,11 +230,14 @@ This follows `docs/security.md`:
   hack.chat's session token as `<redacted>` in `inbox.jsonl`. Builds before #7
   log the session token. Keep it that way, and never paste inbox lines
   wholesale.
+- The webhook URL and key (`CHIEF_HOOK_URL`, `CHIEF_HOOK_AUTH`) are secrets
+  too. They live only in the hook poller's environment. Never echo them, put
+  them in `config.json`, or paste them into chat.
 
 ## Safety
 
 - Runtime files (`inbox.jsonl`, `outbox.jsonl`, `state.json`,
-  `.inbox_watch.offset`) are gitignored. Never commit them: they can contain
+  `.inbox_watch.offset`, `.hook.offset*`) are gitignored. Never commit them: they can contain
   session data.
 - `docs/status.json` is a public artifact even when empty. Don't commit a real
   one without Alex's OK; the repo ships the fixture only.

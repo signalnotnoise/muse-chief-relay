@@ -37,19 +37,26 @@ cp config.example.json config.json
 # edit channel + nick (and optionally base and pass)
 
 export PATH="$HOME/.dotnet:$PATH"   # if needed
+
+# Run it straight from the repo:
 dotnet run --project src/Chief.Bridge
+
+# …or install it as a .NET tool, which puts `chief-bridge` on your PATH:
+dotnet pack -c Release src/Chief.Bridge
+dotnet tool install --global --add-source src/Chief.Bridge/bin/Release Chief.Bridge
+chief-bridge --config /path/to/config.json
 ```
 
 CLI helpers (same binary):
 
 ```bash
-dotnet run --project src/Chief.Bridge -- status
-dotnet run --project src/Chief.Bridge -- say "hello from chief"
+# With the tool installed, from anywhere, pointing at a specific deployment:
+chief-bridge status --config /path/to/config.json
+chief-bridge say --config /path/to/config.json "hello from chief"
+chief-bridge --config /path/to/config.json          # run the bridge
 
-# From anywhere, pointing at a specific deployment:
-Chief.Bridge status --config /path/to/config.json
-Chief.Bridge say --config /path/to/config.json "hello from chief"
-Chief.Bridge --config /path/to/config.json          # run the bridge
+# …or straight from the repo:
+dotnet run --project src/Chief.Bridge -- status
 ```
 
 `--config <path>` (or `--config=<path>`) works before or after the subcommand. Use `--` to end options when the chat text itself starts with `--`, for example `say -- --config is literal`.
@@ -59,7 +66,7 @@ Config resolution:
 | Command | Order |
 |---|---|
 | bridge run | `--config` or the first argument → `MUSE_RELAY_CONFIG` → `./config.json` → `./config.example.json` (prints a warning) |
-| `say`, `status`, `watch` | `--config` → `MUSE_RELAY_CONFIG` → `./config.json`. Nothing else. |
+| `say`, `status`, `watch`, `hook` | `--config` → `MUSE_RELAY_CONFIG` → `./config.json`. Nothing else. |
 
 - `./` means the current working directory. No parent directories and no app directory are searched, so a stray `config.json` elsewhere is never picked up. (Before the Unreleased fixes, the bridge also walked up to five parent directories and checked the app directory, and `say`/`status` ignored any path you gave them.)
 - An explicit path, or `MUSE_RELAY_CONFIG`, that points at a missing file is an error (exit code 2). It never falls through to another file.
@@ -75,7 +82,7 @@ Runtime files (`inbox.jsonl`, `outbox.jsonl`, `unread.jsonl`, `state.json`) live
 - **Outbox.** The bridge sends only complete, newline-terminated lines. A line still being written waits for its newline. The read position moves past a line only after its send succeeds. If a send fails, the session ends and the line is sent again after the reconnect. The position lives in memory for the life of the process. Lines already in `outbox.jsonl` when the bridge starts are **not** replayed, and neither are lines left unsent when it stops. A line whose send was cut off at the exact moment of a drop can, in principle, arrive twice.
 - **Shutdown.** SIGTERM or Ctrl+C (SIGINT) closes the socket, writes `state.json` with `alive: false`, and logs `[chief] stopped`. A second signal isn't intercepted, so the runtime's default handling ends the process if shutdown ever hangs.
 - **`state.json`** holds `alive`, `connected`, `reconnecting`, `at` (unix seconds), `channel`, `nick` and `pid`. It is written atomically (temp file, then rename). `status` reports whether that pid is still running. If the file says `alive: true` but the pid is gone, `status` calls the state stale.
-- **`status`** also prints whether a `watch` listener is armed, how many chats are waiting for one, and whether auto-ack is on. See "Is a listener armed?" below. `status --state <offset file>` checks a watcher that uses a non-default offset file. Any other argument is now a usage error (exit 2); before, extra arguments were ignored.
+- **`status`** also prints the hook poller's state and its last fire (see "Webhook poller" below), how many chats `watch` hasn't drained yet (`undrained`, read-only; `--state <offset file>` for a non-default offset), and whether auto-ack is on. Any other argument is now a usage error (exit 2); before, extra arguments were ignored.
 - **Auto-ack** (optional, off by default): an instant `(auto) got it…` line when a trusted trip addresses the bridge. See "Auto-acknowledgement" below.
 - **Logs.** `inbox.jsonl` records every frame in and out. Frames that aren't JSON objects are logged as `{"raw": "..."}` and otherwise ignored. The join is logged without the pass. Any outbound `pass` field and the `token` in hack.chat's `session` frame are logged as `<redacted>`. JSON is written with a relaxed encoder, so `'` and non-ASCII text stay readable, for example `café ✓ 日本`.
 
@@ -86,10 +93,10 @@ Unit tests: `dotnet test MuseChiefRelay.sln` (xunit, `tests/Chief.Bridge.Tests`)
 `watch` turns the inbox into an event feed. It prints new inbound chats as a JSON array and remembers where it stopped:
 
 ```bash
-Chief.Bridge watch --config /path/to/config.json
+chief-bridge watch --config /path/to/config.json
 # [{"nick":"Alex","trip":null,"text":"hello","ts":1790468200}]
 
-Chief.Bridge watch --config /path/to/config.json --wait --timeout 1800   # block until something arrives
+chief-bridge watch --config /path/to/config.json --wait --timeout 1800   # block until something arrives
 ```
 
 - **What counts:** inbound `chat` frames (`dir: "in"`), minus the bridge's own nick. The nick comes from the config; override it with `--nick`. Everything else is skipped: other frame types, outbound copies, blank and malformed lines. Each item is `{nick, trip, text, ts}`; `trip` is `null` when the sender has no tripcode (hack.chat omits the field).
@@ -97,37 +104,89 @@ Chief.Bridge watch --config /path/to/config.json --wait --timeout 1800   # block
 - **First run** only records the offset and prints `[]`, so history never floods the first poll. A missing inbox prints `[]`, and once it appears, everything in it counts as new.
 - **Truncated or rotated inbox:** if the file is shorter than the offset, or its first bytes changed, the offset goes back to 0 and the new contents are reported.
 - **Order:** the array is printed before the offset is saved. A crash in between repeats a message instead of losing it.
-- **`--wait`** blocks until at least one new chat qualifies. It wakes on file-system events and polls every second as a fallback. Then it prints the array and exits 0. With `--timeout <seconds>` (0 to 922337203685) it gives up, prints `[]`, prints `[chief] watch timed out with nothing new: re-arm now (watch --wait)` on stderr, and exits **3**. On SIGTERM or SIGINT it prints `[]` and exits 143 or 130. Usage and config errors exit 2.
-- **`--settle <seconds>`** (with `--wait`, 0 to 60, default 0 = off) makes one wake cover a burst. After the first qualifying chat, `watch` keeps collecting until `<seconds>` pass with no new one, or 4 × `<seconds>` after the first, whichever comes first. Then it prints everything as one array. A chat already in hand is always delivered, even if the timeout or a signal lands during the window. `agents/chief.md` uses `--settle 3`.
-- **Status file:** every run writes `<offset file>.status` (default `<base>/.inbox_watch.offset.status`, covered by the existing `.inbox_watch.offset*` gitignore rule). It holds `pid`, `state` (`armed`, `settling`, `delivered`, `timed_out`, `stopped`, or `polled` for a run without `--wait`), `armed_at`, `heartbeat_at` (refreshed every 5 s while armed), `deadline`, `exited_at`, `exit_code`, `delivered` and `settle_s`. It's written atomically and only feeds `status` and the auto-ack text; nothing reads it to decide what to deliver. `--wait` warns on stderr if another live watcher is already armed on the same offset file.
-- **Two ways to run it.** A scheduler can poll `watch` every few seconds. An agent that is woken when a background command finishes can run `watch --wait` in the background, handle the output when it exits, and start it again. Messages that arrive in between are waiting for the next run. [`agents/chief.md`](agents/chief.md) spells out both loops.
-- **Replying:** use `say` (`Chief.Bridge say --config <path> <text>`), or append `{"cmd":"chat","text":"..."}` lines to `outbox.jsonl`.
-- `watch` only reads `inbox.jsonl` (and writes its own offset and status files), so it's safe to run next to a live bridge.
+- **`--wait`** blocks until at least one new chat qualifies. It wakes on file-system events and polls every second as a fallback. Then it prints the array and exits 0. With `--timeout <seconds>` (0 to 922337203685) it gives up, prints `[]` and exits **3**. On SIGTERM or SIGINT it prints `[]` and exits 143 or 130. Usage and config errors exit 2, as does a one-shot run whose inbox can't be read. A missing inbox is an empty poll; a path that is there but isn't a readable file (a directory, or no permission) is exit 2.
+- **Transient read failures:** if a poll can't read the inbox (a torn read, a locked file), `watch --wait` doesn't die: it records a warning, printed on stderr when the wait ends, and retries on the next loop.
+- **Ways to run it.** An agent woken by the webhook poller (below) runs plain `watch` to drain everything new, which is what chief does now. A scheduler can poll `watch` every few seconds. An agent that is woken when a background command finishes can run `watch --wait` in the background and start it again after each exit, but chief found that wake unreliable (see `agents/chief.md`). Messages that arrive in between are waiting for the next run.
+- **Replying:** use `say` (`chief-bridge say --config <path> <text>`), or append `{"cmd":"chat","text":"..."}` lines to `outbox.jsonl`.
+- `watch` only reads `inbox.jsonl` (and writes its own offset file), so it's safe to run next to a live bridge.
 
-### Is a listener armed?
+### Webhook poller (`hook`)
 
-An agent that runs `watch --wait` and re-arms it after every exit is only listening while a watcher is actually running. If one exit doesn't get a re-arm, messages pile up in the inbox and nobody notices. `status` makes that visible:
+`hook` is a small always-on process that turns new chats into a webhook call, for an agent that only runs when something calls it:
 
 ```
-listener: armed (pid 386538, armed, armed 2s ago, heartbeat 2s ago, times out in 4m)
-listener: waking: last watch delivered 2 chat(s) (exit 0) 0s ago; the agent should re-arm shortly
-listener: NOT ARMED: last watch was stopped by a signal (exit 143) 9s ago and nothing has re-armed it
-waiting: 1 chat(s) not yet delivered to a watcher (oldest from Alex at 05:00:04)
-auto-ack: on (mentions+tasks from 1 trip(s), tasks only from 1, cooldown 60s, max 20/h)
+hack.chat ──► Chief.Bridge (always on) ──► inbox.jsonl ──► Chief.Bridge hook (always on) ──POST──► webhook ──► agent wakes
+                     ▲                                                                                              │
+                     └───────────── outbox.jsonl ◄──── say ◄──── reply ◄──── drain with `watch` ◄───────────────────┘
 ```
 
-| Listener | When |
-|---|---|
-| `armed` | The status says `armed` or `settling`, its pid is running, and the heartbeat is under 30 s old |
-| `waking` | The last watch exited cleanly (delivered, timed out, or a one-shot poll) within the last 3 minutes, so the agent was just woken and should re-arm |
-| `NOT ARMED` | The last watch exited more than 3 minutes ago, was stopped by a signal, or says `armed` but its pid is gone or its heartbeat is stale |
-| `unknown` | No status file: no watcher from this build has run with that offset file |
+```bash
+export CHIEF_HOOK_URL=…  CHIEF_HOOK_AUTH=…       # from your secret store; never in config.json
+Chief.Bridge hook --config /path/to/config.json   # runs until SIGTERM / Ctrl+C
+Chief.Bridge hook --config /path/to/config.json --test   # one fake chat, prints e.g. "hook test: HTTP 200"
+```
 
-`waiting` counts chats past the saved offset, i.e. what the next `watch` would return. It's read-only: `status` never moves the offset.
+Config (`hook` block; omit it and `hook` refuses to run):
+
+```json
+"hook": {
+  "url_env": "CHIEF_HOOK_URL",
+  "auth_env": "CHIEF_HOOK_AUTH",
+  "auth_scheme": "Bearer",
+  "poll_s": 5,
+  "cooldown_s": 15,
+  "trips": ["Ab12Cd", "Xy34Zw"]
+}
+```
+
+| Field | Default | Meaning |
+|---|---|---|
+| `url_env` | `CHIEF_HOOK_URL` | **Name** of the environment variable holding the webhook URL. The URL itself never goes in the config. It must be `https://`, or `http://` to a loopback address (127.0.0.1, ::1, localhost). |
+| `auth_env` | `CHIEF_HOOK_AUTH` | **Name** of the variable holding the bare key. `""` sends no `Authorization` header. |
+| `auth_scheme` | `Bearer` | Sent as `Authorization: <scheme> <key>`. `""` sends the bare key. |
+| `poll_s` | `5` | Fallback poll interval (0.1–300). File-system events usually wake it sooner, so a chat typically fires in well under a second. |
+| `cooldown_s` | `15` | Minimum gap between fires (0–3600). The first chat after a quiet spell fires at once. Chats inside the gap go out together in the next fire. |
+| `max_retry_s` | `120` | A failed fire is retried after `max(cooldown_s, 1)`, doubling up to this |
+| `timeout_s` | `15` | Per-request timeout |
+| `trips` | `[]` | Only chats from these trips fire the hook, and only they are sent. `[]` means every sender except the bridge's own nick. A leading `!` is dropped. |
+| `state` | `.hook.offset` | Offset file (relative to `base`); the status file is this plus `.status`. Both are gitignored. |
+| `source` | `chief-bridge-hook` | The payload's `source` field |
+| `max_text` / `max_batch` | `2000` / `50` | Chat text is cut to `max_text` characters; at most the newest `max_batch` chats go in one fire |
+
+Payload (`Content-Type: application/json`), the same shape as the local `hookpoll.py` it replaces:
+
+```json
+{"source":"chief-bridge-hook","channel":"your-channel-name","chats":[{"nick":"Alex","trip":"Ab12Cd","text":"hello chief","ts":1790500100}]}
+```
+
+`"omitted": n` is added when more than `max_batch` chats were waiting.
+
+How it behaves:
+
+- **Reading** uses the same code as `watch`, with its own offset file: byte offsets on line boundaries, a half-written line waits for its newline, a truncated or rotated inbox starts over from 0, and the first run starts at the end so history never fires. The bridge's own nick is skipped, as are other frames, outbound copies and malformed lines.
+- **Deliver first, save second.** The offset moves past a batch only after a **2xx**. Chats held by the cooldown or a failed fire stay on disk past the saved offset, so a restart or a crash sends them instead of losing them. A crash between the 2xx and the save can send one batch twice. (The Python `hookpoll.py` saved the offset first and kept pending chats in memory only.)
+- **Failures** (any non-2xx, a timeout, a network error) are retried with backoff: `max(cooldown_s, 1)`, doubling, capped at `max_retry_s`. Redirects aren't followed, so a 3xx counts as a failure, and the key is never re-sent to another host.
+- **One poller per offset file.** `hook` takes an exclusive lock on `<state>.lock` and holds it until the process exits (a crash releases it). A second `hook` on that offset exits **4**. The status file is a report, not the lock: two processes can both read "not running" before either writes a heartbeat.
+- **SIGTERM / Ctrl+C** stops it cleanly: status `stopped`, exit 0. Anything not yet delivered stays queued in the inbox for the next start.
+- **Exit codes:** 0 stopped cleanly or `--test` OK, 2 usage/config error (including a missing environment variable), 4 already running, 5 `--test` got a non-2xx or no answer.
+- **Output** is one line per fire, for example `[chief] hook: fired 2 chat(s) -> HTTP 200`, never the URL or the key. Network errors are reported by kind only (`error ConnectionError`, `timeout`), because exception messages can contain the host.
+
+**Status.** The poller writes `<state>.status` atomically: pid, `running`/`stopped`, a heartbeat every 5 s (also while a webhook request is in flight, so a slow endpoint up to `timeout_s` does not look like a dead poller), the last fire (time, `HTTP 200` or an error kind, chat count), pending chats, consecutive failures, next retry, and ok/failed counters. `status` (and so `hc status`) shows:
+
+```
+hook: running (pid 402405, heartbeat 2s ago, poll 5s, cooldown 15s, 2 trusted trip(s))
+hook last fire: 05:05:12 (40s ago): HTTP 200, 2 chat(s); 0 pending; 7 ok / 0 failed since start
+hook: FAILING: last 3 fire(s) failed (last: HTTP 401), next retry in 1m; pid 402405, …
+hook: NOT RUNNING: pid 402405 died without a clean stop (last heartbeat 6m ago)
+hook: NOT RUNNING: stopped 12s ago (pid 402405)
+undrained: 2 chat(s) not yet read by watch (oldest from Alex at 05:05:10)
+```
+
+A heartbeat older than `max(15 s, 3 × poll_s + 5 s)` counts as NOT RUNNING. `unknown` means a hook block exists but the poller has never run; `not configured` means there's no hook block.
 
 ### Auto-acknowledgement
 
-The agent behind the bridge may only act when it's woken, which can take a minute. The bridge can cover that gap by answering straight away when a **trusted trip** addresses it. Off unless you enable it:
+The agent behind the bridge only acts once something wakes it, so its real reply takes a while. The bridge can cover that gap by answering straight away when a **trusted trip** addresses it. Off unless you enable it:
 
 ```json
 "auto_ack": {
@@ -145,10 +204,9 @@ The agent behind the bridge may only act when it's woken, which can take a minut
 | `task_trips` | `[]` | Trips (other agents) whose messages get an ack **only** for a task addressed to the bridge. Their plain chat never does, so agent chatter can't start a loop. |
 | `cooldown_s` | `60` | At most one ack per this many seconds, across all senders. Minimum 10. |
 | `max_per_hour` | `20` | At most this many acks in any rolling hour |
-| `text` | `(auto) got it, thinking… full reply in about a minute` | For a mention. `{from}` is replaced by the sender's nick. |
-| `task_text` | `(auto) got task {id}, thinking… full reply in about a minute` | For a task. `{id}` is the task id (or `?`). |
-| `offline_text` | `(auto) got it, but chief's listener isn't armed right now, so the reply may be late` | Sent instead when the watch status says **NOT ARMED**, so the ack never promises a reply nothing will produce. `armed`, `waking` and `unknown` get the normal text. |
-| `watch_state` | `.inbox_watch.offset` | Offset file of the watcher to check (relative to `base`). Its `.status` file is read. |
+| `text` | `(auto) got it, thinking…` | For a mention. `{from}` is replaced by the sender's nick. |
+| `task_text` | `(auto) got task {id}, thinking…` | For a task. `{id}` is the task id (or `?`). |
+| `offline_text` | `(auto) got it, but chief's wake-up hook isn't working right now, so the reply may be late` | Sent instead when the hook poller's status is **NOT RUNNING** or **FAILING**, so the ack never promises a reply nothing will wake the agent for. `running`, `unknown` and `not configured` get the normal text. |
 
 - **Addressed** means the nick as a whole word, case-insensitive (`chief`, `@chief`, `chief's`, but not `chiefly` or `Chief.Bridge`), a JSON task with `"to"` equal to the nick, or `TASK to <nick>: …`. Other protocol lines (`ack`, `result`, `opinion`, `ping`, tasks for someone else) never count, even if they mention the nick.
 - **Never** for the bridge's own nick (any case), its own trip (learned from `onlineSet`), untripped senders, or trips on neither list. Nicks aren't identity.
@@ -169,6 +227,7 @@ Copy `config.example.json` to `config.json`. `config.json` is gitignored. Keep i
 | `pass` | bridge | Optional hack.chat password. It gives the nick a **tripcode**. It is sent only in the join frame and is never written to logs. |
 | `base` | bridge | Directory for runtime files. Default: the config file's directory. |
 | `auto_ack` | bridge | Optional instant acknowledgement for trusted trips. Off by default. See "Auto-acknowledgement". |
+| `hook` | `hook` | Webhook poller settings: env var **names** for the URL and key, poll, cooldown, trip filter. See "Webhook poller". |
 | `publish_repos` | `tools/status.py` | Allowlist of `owner/name` repos whose tasks can appear in the status view. Default: this repo. Compared case-insensitively. |
 | `publish_trips` | `tools/status.py` | Tripcodes allowed to publish. Every task, ack and result must carry one, **including the bridge's own**. An empty or missing list publishes nothing. |
 
@@ -222,7 +281,7 @@ What happens to the password:
 Full details and limits: [docs/security.md](docs/security.md#muse-web-client-password-handling).
 
 <!-- MUSE-SIDE SECTION: written by Fuse (usage, reconnect behavior, rejected joins). -->
-Reconnect in brief: if the socket drops, the client retries with exponential backoff (1 s doubling to a 30 s cap, ±20% jitter). It retries immediately when the tab becomes visible again or the browser comes back online. If hack.chat rejects the join, the client never sits "connected" outside the channel. **After a successful join, every later rejection is retried** until you press Disconnect (a taken nick is usually your own stale session, and any other warn during an outage is treated the same way). On the very first join, a nick-taken or rate-limit rejection is retried at most 3 times, and any other rejection (an invalid nick, a bad channel) shows "join rejected" and stops. A socket that closes before that first join keeps retrying; that isn't bad input. The decision lives in `reconnect.js`, loaded before `app.js`. `docs/muse/` and `web/muse/` are kept identical, including that file.
+Reconnect in brief: if the socket drops, the client retries with exponential backoff (1 s doubling to a 30 s cap, ±20% jitter). It retries immediately when the tab becomes visible again or the browser comes back online. If hack.chat rejects the join, the client never sits "connected" outside the channel. **After a successful join, every later rejection is retried** until you press Disconnect (a taken nick is usually your own stale session, and any other warn during an outage is treated the same way). On the very first join, a nick-taken or rate-limit warning is retried at most 3 times, and any other rejection (an invalid nick, a bad channel) shows "join rejected" and stops. Those 3 are join warnings only: socket closes before the first `onlineSet` do not spend them, and a socket that closes before that first join keeps retrying. That isn't bad input. The decision lives in `reconnect.js`, loaded before `app.js`. `docs/muse/` and `web/muse/` are kept identical, including that file.
 
 ## Collaboration protocol
 
@@ -247,7 +306,7 @@ Examples (send as the **entire** chat message text):
 | Path | Role |
 |------|------|
 | `src/Chief.Bridge/` | The desktop WSS bridge (.NET 8); the only bridge in this repo |
-| `tests/Chief.Bridge.Tests/` | xunit tests for the bridge's outbox reader, frame handling, config, CLI, inbox watcher, watch status and auto-ack |
+| `tests/Chief.Bridge.Tests/` | xunit tests for the bridge's outbox reader, frame handling, config, CLI, inbox watcher, webhook poller (against a local HTTP listener) and auto-ack |
 | `agents/chief.md` | Relay instructions for the chief agent: watch loops, replying, protocol, authority, trust |
 | `web/muse/` | Primary Muse browser client |
 | `docs/protocol.md` | Wire protocol |

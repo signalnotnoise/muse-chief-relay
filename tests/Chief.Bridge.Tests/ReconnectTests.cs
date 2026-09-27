@@ -99,6 +99,28 @@ public class ReconnectTests
         Assert.Equal(4, fx.Script.Created);
     }
 
+    [Fact]
+    public async Task A_closed_stdout_does_not_exit_the_retry_loop()
+    {
+        await using var fx = new RelayFixture
+        {
+            // The reconnect line is written after the session catch. A closed pipe used to
+            // throw here and leave RunForeverAsync, which Main does not catch.
+            Stdout = _ => throw new IOException("stdout closed")
+        };
+        fx.Script.Enqueue(
+            Attempt.ConnectThrows(new IOException("connection refused")),
+            Attempt.ConnectThrows(new IOException("connection refused")),
+            Attempt.ConnectThrows(new IOException("connection refused")),
+            Attempt.ConnectThrows(new IOException("connection refused")));
+        fx.CancelAfterCreates = 4;
+
+        var ex = await Record.ExceptionAsync(() => fx.RunToCompletion());
+
+        Assert.Null(ex);
+        Assert.Equal(4, fx.Script.Created);
+    }
+
     [Theory]
     [InlineData("ftp://example.com/chat")]
     [InlineData("http://hack.chat/chat-ws")]
@@ -163,6 +185,7 @@ internal sealed class RelayFixture : IAsyncDisposable
     public bool UseRealSocket { get; init; }
     public TimeSpan ConnectTimeout { get; init; } = TimeSpan.FromSeconds(2);
     public int CancelAfterCreates { get; set; }
+    public Action<string>? Stdout { get; set; }
 
     private readonly string _pass;
 
@@ -222,7 +245,8 @@ internal sealed class RelayFixture : IAsyncDisposable
             ConnectTimeout = ConnectTimeout,
             JoinTimeout = TimeSpan.FromSeconds(2),
             CloseGrace = TimeSpan.FromMilliseconds(30),
-            OutboxPoll = TimeSpan.FromMilliseconds(20)
+            OutboxPoll = TimeSpan.FromMilliseconds(20),
+            Stdout = Stdout
         };
 
         var bridge = new HackChatBridge(cfg, runtime);

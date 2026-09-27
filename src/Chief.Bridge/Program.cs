@@ -29,6 +29,7 @@ internal static class Program
                 "say" => await CmdSayAsync(cli),
                 "status" => CmdStatus(cli),
                 "watch" => await CmdWatchAsync(cli),
+                "hook" => await CmdHookAsync(cli),
                 "help" => CmdHelp(),
                 _ => await RunAsync(cli)
             };
@@ -62,62 +63,87 @@ internal static class Program
         var nick = opts.Nick ?? cfg.Nick;
         var statePath = Path.GetFullPath(opts.StatePath ?? Path.Combine(cfg.BaseDir, ".inbox_watch.offset"));
         var watcher = new InboxWatcher(Path.Combine(cfg.BaseDir, "inbox.jsonl"), statePath, nick);
-        // <offset file>.status: armed / heartbeat / how the last run ended, for `status` and the auto-ack.
-        var status = new WatchStatusWriter(WatchStatus.PathFor(statePath));
-        var delivered = 0;
 
         void Print(IReadOnlyList<WatchedChat> chats)
         {
             Console.Out.WriteLine(WatchedChat.ToJsonArray(chats));
             Console.Out.Flush();
-            delivered = chats.Count;
         }
 
         if (!opts.Wait)
         {
-            var poll = watcher.Poll();
+            // A torn read here used to crash with a stack trace; report it as a clean error instead.
+            if (!watcher.TryPoll(out var poll, out var error) || poll is null)
+            {
+                Console.Error.WriteLine($"[chief] watch: cannot read the inbox ({error})");
+                return 2;
+            }
             if (watcher.Warning is { } w)
                 Console.Error.WriteLine($"[chief] warning: {w}");
             Print(poll.Chats); // printed before the offset is saved: a crash repeats, never loses
             watcher.Commit(poll);
-            status.Polled(poll.Chats.Count);
             return 0;
         }
 
         using var cts = new CancellationTokenSource();
         using var signals = new ShutdownSignals(cts, null);
-        if (WatchStatus.TryRead(status.Path) is { State: WatchStatus.Armed or WatchStatus.Settling } other
-            && other.Pid != Environment.ProcessId && ProcessInfo.IsRunning(other.Pid))
-        {
-            // Two watchers on one offset file both deliver the same chats, so the agent answers twice.
-            Console.Error.WriteLine(
-                $"[chief] warning: another watcher (pid {other.Pid}) is already armed on {statePath}; run one watcher per offset file");
-        }
-
-        status.Armed(opts.Timeout, opts.Settle?.TotalSeconds ?? 0);
-        var outcome = await watcher.WaitAsync(opts.Timeout, Print, cts.Token, opts.Settle, status.Tick);
+        var outcome = await watcher.WaitAsync(opts.Timeout, Print, cts.Token);
         if (watcher.Warning is { } warn)
             Console.Error.WriteLine($"[chief] warning: {warn}");
 
         switch (outcome)
         {
             case WaitOutcome.Delivered:
-                status.Exited(WatchStatus.DeliveredState, 0, delivered);
                 return 0;
             case WaitOutcome.TimedOut:
                 Print(Array.Empty<WatchedChat>());
-                status.Exited(WatchStatus.TimedOut, WatchOptions.ExitTimeout, 0);
-                // Exit 3 is a wake like any other. Not re-arming after a quiet timeout is how a listener goes
-                // missing without anyone noticing.
-                Console.Error.WriteLine("[chief] watch timed out with nothing new: re-arm now (watch --wait)");
                 return WatchOptions.ExitTimeout;
             default:
                 // Stopped by a signal: nothing new was delivered and the offset file is consistent.
                 Print(Array.Empty<WatchedChat>());
-                var code = 128 + (signals.Received == PosixSignal.SIGINT ? 2 : 15);
-                status.Exited(WatchStatus.Stopped, code, 0);
-                return code;
+                return 128 + (signals.Received == PosixSignal.SIGINT ? 2 : 15);
         }
+    }
+
+    private static async Task<int> CmdHookAsync(CliArgs cli)
+    {
+        var opts = HookOptions.Parse(cli.Rest);
+        var cfg = RelayConfig.Load(cli.ConfigPath, allowExampleFallback: false);
+        if (cfg.Hook is null)
+            throw new ConfigException($"{cfg.ConfigPath}: no \"hook\" block; see README, \"Webhook poller\"");
+        var secrets = HookSecrets.FromEnvironment(cfg.Hook);
+        using var poller = new HookPoller(cfg, secrets);
+
+        if (opts.Test)
+        {
+            // Wakes whatever is behind the webhook, with an obviously fake chat.
+            var r = await poller.FireAsync(
+                [new WatchedChat("Chief.Bridge", null, "(hook connectivity test, ignore)", JsonValue.Create(DateTimeOffset.UtcNow.ToUnixTimeSeconds()))],
+                CancellationToken.None);
+            Console.WriteLine($"[chief] hook test: {r.Result}");
+            return r.Ok ? 0 : HookOptions.ExitTestFailed;
+        }
+
+        // The status file is a report, not a lock: two processes can both observe "not running"
+        // and then both POST. The lock is held until this process exits, crash included.
+        var statePath = cfg.Hook.StatePath(cfg.BaseDir);
+        var gate = HookInstanceLock.TryAcquire(HookInstanceLock.PathFor(statePath));
+        if (gate is null)
+        {
+            var other = cfg.ReadHook(DateTimeOffset.UtcNow).Status;
+            var who = other is { } s && s.Pid != Environment.ProcessId ? $" (status last wrote pid {s.Pid})" : "";
+            Console.Error.WriteLine($"[chief] hook: another poller already holds {HookInstanceLock.PathFor(statePath)}{who}; not starting");
+            return HookOptions.ExitAlreadyRunning;
+        }
+
+        using (gate)
+        {
+            using var cts = new CancellationTokenSource();
+            using var signals = new ShutdownSignals(cts, sig => Console.WriteLine($"[chief] hook: {sig} received, stopping…"));
+            await poller.RunAsync(cts.Token);
+        }
+
+        return 0;
     }
 
     private static int CmdHelp()
@@ -131,24 +157,30 @@ internal static class Program
                                                 with jitter). A bad config exits 2; it is not retried.
               say [--config <path>] <text>      Append one chat line to {base}/outbox.jsonl and exit
               status [--config <path>] [--state <file>]
-                                                Print channel/nick, the bridge state from state.json, whether a
-                                                watch listener is armed (from <state>.status; default
-                                                {base}/.inbox_watch.offset), chats waiting for it, and auto-ack
-              watch [--config <path>] [--nick <nick>] [--state <file>] [--wait [--timeout <s>] [--settle <s>]]
+                                                Print channel/nick, the bridge state from state.json, the hook
+                                                poller (running, last fire and its HTTP result), chats not yet
+                                                drained by watch (offset --state, default
+                                                {base}/.inbox_watch.offset), and whether auto-ack is on
+              watch [--config <path>] [--nick <nick>] [--state <file>] [--wait [--timeout <s>]]
                                                 Print new inbound chats from {base}/inbox.jsonl as a JSON array
                                                 of {nick,trip,text,ts}, skipping the bridge's own nick. The offset
                                                 is kept in --state (default {base}/.inbox_watch.offset); the first
                                                 run only records it and prints []. --wait blocks until at least one
-                                                new chat arrives; --settle keeps collecting until the burst has been
-                                                quiet for <s> seconds (0-60, at most 4x<s> in all) and returns it as
-                                                one array. Writes <state>.status (armed, heartbeat, how it ended) for
-                                                `status`. Exit codes: 0 printed, 2 usage/config error, 3 --timeout
-                                                reached (prints []), 130/143 stopped by SIGINT/SIGTERM (prints []).
+                                                new chat arrives. Exit codes: 0 printed, 2 usage/config error (also an
+                                                unreadable inbox), 3 --timeout reached (prints []), 130/143 stopped
+                                                by SIGINT/SIGTERM (prints []).
+              hook [--config <path>] [--test]    Poll {base}/inbox.jsonl and POST new inbound chats to a webhook
+                                                (config "hook" block; URL and key from the environment variables it
+                                                names). Runs until SIGTERM / Ctrl+C. Batches by cooldown, retries
+                                                failures, keeps its own offset and a status file for `status`.
+                                                --test sends one fake chat and prints the HTTP result. Exit codes:
+                                                0 stopped cleanly or test OK, 2 usage/config error, 4 another hook
+                                                poller is already running, 5 test failed.
               help                              This text
 
             Config for the bridge run: --config or the first argument, then MUSE_RELAY_CONFIG, then
             ./config.json, then ./config.example.json (with a warning).
-            Config for say/status/watch: --config, then MUSE_RELAY_CONFIG, then ./config.json. No other fallback.
+            Config for say/status/watch/hook: --config, then MUSE_RELAY_CONFIG, then ./config.json. No other fallback.
             An explicit path that doesn't exist is an error; it never falls through to another file.
             Use -- to end options, e.g. say -- --config is literal text.
             """);
@@ -196,21 +228,25 @@ internal static class Program
         var statePath = Path.Combine(cfg.BaseDir, "state.json");
         Console.WriteLine($"state: {statePath}");
         PrintBridgeState(statePath);
-        PrintListener(cfg, Path.GetFullPath(watchState ?? Path.Combine(cfg.BaseDir, ".inbox_watch.offset")));
-        PrintAutoAck(cfg.AutoAck);
+        var now = DateTimeOffset.UtcNow;
+        var hook = cfg.ReadHook(now);
+        Console.WriteLine($"hook: {hook.Detail}");
+        if (HookView.LastFireLine(hook.Status, now) is { } last)
+            Console.WriteLine(last);
+        PrintUndrained(cfg, Path.GetFullPath(watchState ?? Path.Combine(cfg.BaseDir, ".inbox_watch.offset")));
+        var ack = cfg.AutoAck;
+        Console.WriteLine(ack.Enabled
+            ? $"auto-ack: on (mentions+tasks from {ack.MentionTrips.Count} trip(s), tasks only from {ack.TaskTrips.Count}, cooldown {ack.CooldownSeconds:0.#}s, max {ack.MaxPerHour}/h)"
+            : "auto-ack: off");
         return 0;
     }
 
-    private static void PrintListener(RelayConfig cfg, string offsetPath)
+    /// <summary>What the next <c>watch</c> would return: chats past the saved offset. Read-only.</summary>
+    private static void PrintUndrained(RelayConfig cfg, string offsetPath)
     {
-        var view = ListenerView.Classify(WatchStatus.TryRead(WatchStatus.PathFor(offsetPath)), DateTimeOffset.UtcNow, ProcessInfo.IsRunning);
-        Console.WriteLine($"listener: {view.Detail}");
-
-        // What is sitting in the inbox past the saved offset, i.e. what the next watch would return. Read-only:
-        // nothing is committed, and without an offset file there is nothing to compare against.
         if (!File.Exists(offsetPath))
         {
-            Console.WriteLine("waiting: unknown (no offset file yet)");
+            Console.WriteLine($"undrained: unknown (no watch offset file {offsetPath} yet)");
             return;
         }
 
@@ -219,28 +255,20 @@ internal static class Program
             var poll = new InboxWatcher(Path.Combine(cfg.BaseDir, "inbox.jsonl"), offsetPath, cfg.Nick).Poll();
             if (poll.Chats.Count == 0)
             {
-                Console.WriteLine("waiting: 0 chats");
+                Console.WriteLine("undrained: 0 chats");
+                return;
             }
-            else
-            {
-                var first = poll.Chats[0];
-                var when = first.Ts is JsonValue v && v.TryGetValue<long>(out var ts)
-                    ? $" at {DateTimeOffset.FromUnixTimeSeconds(ts).ToLocalTime():HH:mm:ss}"
-                    : "";
-                Console.WriteLine($"waiting: {poll.Chats.Count} chat(s) not yet delivered to a watcher (oldest from {first.Nick}{when})");
-            }
+
+            var first = poll.Chats[0];
+            var when = first.Ts is JsonValue v && v.TryGetValue<long>(out var ts)
+                ? $" at {DateTimeOffset.FromUnixTimeSeconds(ts).ToLocalTime():HH:mm:ss}"
+                : "";
+            Console.WriteLine($"undrained: {poll.Chats.Count} chat(s) not yet read by watch (oldest from {first.Nick}{when})");
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            Console.WriteLine($"waiting: (unreadable: {ex.Message})");
+            Console.WriteLine($"undrained: (unreadable: {ex.GetType().Name})");
         }
-    }
-
-    private static void PrintAutoAck(AutoAckConfig a)
-    {
-        Console.WriteLine(a.Enabled
-            ? $"auto-ack: on (mentions+tasks from {a.MentionTrips.Count} trip(s), tasks only from {a.TaskTrips.Count}, cooldown {a.CooldownSeconds:0.#}s, max {a.MaxPerHour}/h)"
-            : "auto-ack: off");
     }
 
     private static void PrintBridgeState(string statePath)

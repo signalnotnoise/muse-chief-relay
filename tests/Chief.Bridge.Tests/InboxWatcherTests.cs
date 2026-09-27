@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Runtime.Versioning;
 using System.Text.Json.Nodes;
 
 namespace Chief.Bridge.Tests;
@@ -376,6 +377,129 @@ public class InboxWatcherTests
         using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(300));
 
         Assert.Equal(WaitOutcome.Cancelled, await w.WaitAsync(null, _ => { }, cts.Token));
+    }
+
+    /// <summary>Injects transient poll failures: the first <c>failures</c> polls throw.</summary>
+    private sealed class FlakyWatcher : InboxWatcher
+    {
+        private int _failuresLeft;
+
+        public FlakyWatcher(string inbox, string offset, string nick, int failures)
+            : base(inbox, offset, nick, TimeSpan.FromMilliseconds(50)) =>
+            _failuresLeft = failures;
+
+        public override WatchPoll Poll() =>
+            _failuresLeft-- > 0 ? throw new IOException("simulated torn read") : base.Poll();
+    }
+
+    [Fact]
+    public void TryPoll_reports_failure_instead_of_throwing()
+    {
+        var dir = new TempDir();
+        using var _ = dir;
+        var w = new FlakyWatcher(dir.File("inbox.jsonl"), dir.File(".inbox_watch.offset"), "chief", failures: 1);
+
+        Assert.False(w.TryPoll(out var poll, out var error));
+        Assert.Null(poll);
+        Assert.Contains("simulated torn read", error);
+
+        Assert.True(w.TryPoll(out poll, out error));
+        Assert.NotNull(poll);
+        Assert.Null(error);
+    }
+
+    [Fact]
+    public async Task Wait_survives_transient_poll_failures_then_delivers()
+    {
+        var dir = new TempDir();
+        using var _ = dir;
+        var inbox = dir.File("inbox.jsonl");
+        var w = new FlakyWatcher(inbox, dir.File(".inbox_watch.offset"), "chief", failures: 3);
+        File.WriteAllText(inbox, Chat("Alex", "history"));
+        IReadOnlyList<WatchedChat>? got = null;
+
+        var task = w.WaitAsync(TimeSpan.FromSeconds(10), c => got = c, CancellationToken.None);
+        await Task.Delay(500); // several polls fail, then the watcher bootstraps and keeps waiting
+        Assert.False(task.IsCompleted);
+        File.AppendAllText(inbox, Chat("Fuse", "wake up"));
+
+        Assert.Equal(WaitOutcome.Delivered, await task);
+        Assert.Equal(new[] { "wake up" }, got!.Select(c => c.Text));
+        Assert.Contains("inbox poll failed", w.Warning);
+        Assert.Empty(PollCommit(w)); // offset advanced past the delivered chat
+    }
+
+    [Fact]
+    public void A_missing_inbox_is_an_empty_bootstrap_and_a_directory_is_not()
+    {
+        var (dir, inbox, w) = Setup();
+        using var _ = dir;
+
+        var missing = w.Poll();
+        Assert.True(missing.Bootstrapped);
+        Assert.Empty(missing.Chats);
+
+        Directory.CreateDirectory(inbox);
+        var ex = Assert.Throws<IOException>(() => w.Poll());
+        Assert.Contains("directory", ex.Message);
+        Assert.False(w.TryPoll(out var poll, out var error));
+        Assert.Null(poll);
+        Assert.Contains("directory", error);
+    }
+
+    [Fact]
+    public void An_unreadable_inbox_is_not_treated_as_missing()
+    {
+        if (OperatingSystem.IsLinux())
+            UnreadableInboxIsNotMissing();
+    }
+
+    [SupportedOSPlatform("linux")]
+    private static void UnreadableInboxIsNotMissing()
+    {
+        var (dir, inbox, w) = Setup();
+        using var _ = dir;
+        File.WriteAllText(inbox, Chat("Alex", "secret"));
+        File.SetUnixFileMode(inbox, UnixFileMode.None);
+        try
+        {
+            Assert.False(w.TryPoll(out var poll, out var error));
+            Assert.Null(poll);
+            Assert.False(string.IsNullOrEmpty(error));
+        }
+        finally
+        {
+            File.SetUnixFileMode(inbox, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+        }
+    }
+
+    [Fact]
+    public async Task One_shot_watch_exits_2_when_the_inbox_path_is_a_directory()
+    {
+        var (dir, inbox, _) = Setup();
+        using var __ = dir;
+        File.Delete(inbox);
+        Directory.CreateDirectory(inbox);
+        var cfg = dir.File("config.json");
+        File.WriteAllText(cfg, """{"channel":"c","nick":"chief"}""");
+
+        Assert.Equal(2, await Program.Main(["watch", "--config", cfg]));
+        Assert.False(File.Exists(dir.File(".inbox_watch.offset")));
+    }
+
+    [Fact]
+    public async Task Wait_times_out_when_every_poll_fails()
+    {
+        var dir = new TempDir();
+        using var _ = dir;
+        var w = new FlakyWatcher(dir.File("inbox.jsonl"), dir.File(".inbox_watch.offset"), "chief",
+            failures: int.MaxValue);
+
+        var outcome = await w.WaitAsync(TimeSpan.FromMilliseconds(400), _ => Assert.Fail("must not deliver"),
+            CancellationToken.None);
+
+        Assert.Equal(WaitOutcome.TimedOut, outcome);
+        Assert.Contains("inbox poll failed", w.Warning);
     }
 }
 

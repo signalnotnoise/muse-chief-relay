@@ -43,6 +43,9 @@ internal sealed class BridgeRuntime
     public Func<TimeSpan, CancellationToken, Task> Delay { get; init; } =
         static (delay, ct) => Task.Delay(delay, ct);
 
+    /// <summary>Where operator lines go. Null writes to stdout. A throw here is ignored.</summary>
+    public Action<string>? Stdout { get; init; }
+
     public static BridgeRuntime For(RelayConfig cfg) => new()
     {
         SocketFactory = timeout => new ClientRelaySocket(cfg.Origin, timeout)
