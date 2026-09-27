@@ -112,6 +112,12 @@ button {
   font-weight: 600;
 }
 button:hover { filter: brightness(1.08); }
+button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+button:disabled:hover { filter: none; }
+.board-status:empty { display: none; }
 button.ghost {
   background: transparent;
   border-color: var(--border);

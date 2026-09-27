@@ -26,7 +26,6 @@
     boardReload: document.getElementById("board-reload"),
     boardBody: document.getElementById("board-body"),
     boardVia: document.getElementById("board-via"),
-    boardFile: document.getElementById("board-file"),
   };
 
   let ws = null;
@@ -379,6 +378,9 @@
     firstJoinWarns = 0;
     hasJoinedOnce = false;
     openSocket();
+    // Board load is separate from the socket. A failure here must not stop the join,
+    // and an automatic reconnect (openSocket alone) must not fetch the board again.
+    startBoard(channel);
   }
 
   function reconnectNowIfNeeded() {
@@ -436,6 +438,7 @@
     forgetPassword();
     showChat(false);
     setStatus("disconnected", "off");
+    showBoardPlaceholder();
   });
 
   el.sendForm.addEventListener("submit", (e) => {
@@ -484,9 +487,13 @@
     if (sendChatText(JSON.stringify(payload))) el.resultForm.reset();
   });
 
-  // Room board. Read-only: fetch and render, never write, and never copy the
-  // board path into the channel field. parseBoard ignores a trailing partial line.
+  // Room board. Read-only, and only after Connect. The hash lives in this closure:
+  // not in the page URL, storage, the console, or the title. Disconnect drops it.
+  // boardLoadGen discards a load that finishes after a channel change or Disconnect.
+  // Automatic reconnects call openSocket and do not come through here.
   let boardLoadGen = 0;
+  let boardHash = null;
+  const BOARD_PLACEHOLDER = "Join a channel to see its room board.";
 
   function boardNode(tag, cls, text) {
     const n = document.createElement(tag);
@@ -503,8 +510,28 @@
 
   function setBoardStatus(text, kind) {
     if (!el.boardStatus) return;
-    el.boardStatus.textContent = text;
+    el.boardStatus.textContent = text || "";
     el.boardStatus.className = "board-status" + (kind ? " " + kind : "");
+  }
+
+  function showBoardMessage(message) {
+    if (!el.boardBody) return;
+    el.boardBody.replaceChildren(boardNode("p", "board-empty", message));
+  }
+
+  function showBoardPlaceholder() {
+    boardLoadGen++;
+    boardHash = null;
+    if (el.boardReload) el.boardReload.disabled = true;
+    if (el.boardVia) el.boardVia.textContent = "";
+    setBoardStatus("", "");
+    showBoardMessage(BOARD_PLACEHOLDER);
+  }
+
+  function showBoardFailure(message) {
+    if (el.boardVia) el.boardVia.textContent = "";
+    setBoardStatus("unavailable", "err");
+    showBoardMessage(message);
   }
 
   function taskCard(t) {
@@ -555,48 +582,79 @@
     }
   }
 
-  async function loadBoard(cacheBust) {
-    if (!globalThis.MuseBoard || !el.boardBody) return;
-    const gen = ++boardLoadGen;
-    setBoardStatus("loading", "");
-    if (el.boardVia) el.boardVia.textContent = "";
-    const sources = MuseBoard.boardSources(document.baseURI, cacheBust || 0);
-    let lastErr = "no source";
-    for (const url of sources) {
-      try {
-        const res = await fetch(url, { cache: "no-store", credentials: "omit" });
-        if (gen !== boardLoadGen) return;
-        if (!res.ok) {
-          lastErr = "HTTP " + res.status;
-          continue;
+  function renderLoaded(gen, hash, cacheBust) {
+    let sources;
+    try {
+      sources = MuseBoard.boardSources(hash, document.baseURI, cacheBust || 0);
+    } catch (e) {
+      if (gen !== boardLoadGen) return;
+      showBoardFailure("Couldn't read the room board.");
+      return;
+    }
+    return MuseBoard.loadBoardText(sources).then((result) => {
+      if (gen !== boardLoadGen) return;
+      if (result.status === "ok") {
+        renderBoard(MuseBoard.parseBoard(result.text));
+        if (el.boardVia) {
+          el.boardVia.textContent = " · " + result.via + " · " + hash.slice(0, 8);
         }
-        const ctype = (res.headers.get("content-type") || "").toLowerCase();
-        if (ctype.includes("text/html")) {
-          lastErr = "not a board file";
-          continue;
-        }
-        const text = await res.text();
-        if (gen !== boardLoadGen) return;
-        if (text.trimStart().startsWith("<")) {
-          lastErr = "not a board file";
-          continue;
-        }
-        renderBoard(MuseBoard.parseBoard(text));
-        const viaRaw = url.indexOf("raw.githubusercontent.com") !== -1;
-        if (el.boardVia) el.boardVia.textContent = viaRaw ? " · GitHub raw on main" : " · this repo";
         setBoardStatus("read-only", "ok");
         return;
-      } catch (err) {
-        if (gen !== boardLoadGen) return;
-        lastErr = err && err.message ? err.message : "failed";
       }
-    }
-    if (gen !== boardLoadGen) return;
-    setBoardStatus("unavailable", "err");
-    el.boardBody.replaceChildren(boardNode("p", "board-empty", "Couldn't read the room board (" + lastErr + ")."));
+      if (el.boardVia) el.boardVia.textContent = "";
+      if (result.status === "missing") {
+        setBoardStatus("no board", "");
+        showBoardMessage("No board for this channel yet.");
+        return;
+      }
+      showBoardFailure("Couldn't read the room board.");
+    });
   }
 
-  if (el.boardFile && globalThis.MuseBoard) el.boardFile.textContent = MuseBoard.BOARD_FILE;
-  if (el.boardReload) el.boardReload.addEventListener("click", () => { loadBoard(Date.now()); });
-  loadBoard(0);
+  function startBoard(channel) {
+    const gen = ++boardLoadGen;
+    boardHash = null;
+    if (el.boardReload) el.boardReload.disabled = true;
+    if (el.boardVia) el.boardVia.textContent = "";
+    setBoardStatus("loading", "");
+    let pending;
+    try {
+      if (!globalThis.MuseBoard || typeof MuseBoard.boardFileFor !== "function") {
+        throw new Error("board unavailable");
+      }
+      pending = MuseBoard.boardFileFor(channel);
+    } catch (e) {
+      if (gen !== boardLoadGen) return;
+      showBoardFailure("Couldn't read the room board.");
+      return;
+    }
+    Promise.resolve(pending).then((hash) => {
+      if (gen !== boardLoadGen) return;
+      if (!hash) {
+        showBoardFailure("Room board needs HTTPS or localhost.");
+        return;
+      }
+      boardHash = hash;
+      if (el.boardReload) el.boardReload.disabled = false;
+      return renderLoaded(gen, hash, 0);
+    }).catch(() => {
+      if (gen !== boardLoadGen) return;
+      showBoardFailure("Couldn't read the room board.");
+    });
+  }
+
+  function reloadBoard() {
+    if (!boardHash || (el.boardReload && el.boardReload.disabled)) return;
+    const gen = ++boardLoadGen;
+    const hash = boardHash;
+    setBoardStatus("loading", "");
+    if (el.boardVia) el.boardVia.textContent = "";
+    Promise.resolve(renderLoaded(gen, hash, Date.now())).catch(() => {
+      if (gen !== boardLoadGen) return;
+      showBoardFailure("Couldn't read the room board.");
+    });
+  }
+
+  if (el.boardReload) el.boardReload.addEventListener("click", () => { reloadBoard(); });
+  showBoardPlaceholder();
 })();

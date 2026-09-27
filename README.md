@@ -27,7 +27,7 @@ Muse (browser)  ──WSS──►  hack.chat  ◄──WSS──  Chief.Bridge 
 ```
 
 - **Chief** reads `config.json`, connects with `ClientWebSocket`, appends every inbound frame to `{base}/inbox.jsonl`, watches `{base}/outbox.jsonl` for outbound lines, and writes `{base}/state.json`.
-- **Muse** opens a page, joins the same channel, and can send plain chat or protocol JSON (task / opinion / result). It also shows the room board read-only (`boards/fuse-grok-6f4e970cd8.jsonl`).
+- **Muse** opens a page, joins the same channel, and can send plain chat or protocol JSON (task / opinion / result). After Connect it shows that channel's room board read-only (`boards/<sha256(channel)>.jsonl`).
 - **Status view** (optional): `tools/status.py` turns an inbox log into `docs/status.json`, and `docs/status/` renders it. Publishing fails closed (see below).
 
 Wire format: [docs/protocol.md](docs/protocol.md).
@@ -268,14 +268,16 @@ Type the same channel as Chief (the `channel` in its `config.json`; examples her
 
 ### Room board (read-only)
 
-The page shows this room's board above the join form: tasks, decisions, and scratch, from `boards/fuse-grok-6f4e970cd8.jsonl`. The record shape is `boards/schema.json` (`task`, `decision`, `scratch`). That file is not the chat protocol, and the page does not copy its path into the channel field.
+The board appears after you press Connect: tasks, decisions, and scratch for the channel you joined. The file is `boards/<sha256(channel)>.jsonl`, the lowercase hex SHA-256 of the channel after trim, with no prefix (see `boards/README.md`). The record shape is `boards/schema.json` (`task`, `decision`, `scratch`). That file is not the chat protocol, and the page does not copy anything from it into the channel field, the URL, storage, the console, or the page title.
 
-`board.js` loads it, and only reads:
+Nothing is fetched until you connect. Before that, the panel says to join a channel and Reload is disabled. Disconnect clears the panel and drops the hash. An automatic reconnect does not fetch again; Reload does.
 
-1. Same-origin `../../boards/fuse-grok-6f4e970cd8.jsonl`. This works when the static server's root is the repo (`web/muse/` and `docs/muse/` are both two directories down).
-2. Otherwise the committed file on `main`: `https://raw.githubusercontent.com/signalnotnoise/muse-chief-relay/main/boards/fuse-grok-6f4e970cd8.jsonl`. GitHub Pages publishes `docs/` and does not serve `boards/`, so the published client uses this.
+`board.js` reads, in order:
 
-Only newline-terminated lines are shown. A trailing partial line is ignored, because another writer may still be appending it. The page never writes the file and never rewrites the last line. Reload fetches again; it does not append.
+1. A same-origin `../../boards/<hash>.jsonl` when the page is served from the repo root (`web/muse/` and `docs/muse/` are both two directories down). This is skipped for `file://` and for a hostname ending in `.github.io`, because on GitHub Pages that relative path escapes the project site.
+2. Otherwise the committed file on `main` from raw.githubusercontent.com. GitHub Pages publishes `docs/` and does not serve `boards/`, so the published client uses this. raw.githubusercontent caching can delay updates by a few minutes.
+
+A last line that parses as a valid record is shown even when the file does not end in a newline. An unterminated last line that is not a valid record is ignored. The page never writes the file. Reload fetches again; it does not append. A missing file means no board has been committed for that channel yet. Without `crypto.subtle` (a page that is not HTTPS and not localhost) the board cannot be looked up; chat still works.
 
 ### Getting a trip in Muse (optional password)
 
@@ -324,7 +326,7 @@ Examples (send as the **entire** chat message text):
 | `tests/Chief.Bridge.Tests/` | xunit tests for the bridge's outbox reader, frame handling, config, CLI, inbox watcher, webhook poller (against a local HTTP listener) and auto-ack |
 | `agents/chief.md` | Relay instructions for the chief agent: watch loops, replying, protocol, authority, trust |
 | `web/muse/` | Primary Muse browser client (read-only room board included) |
-| `boards/` | Room boards, one `boards/<room>.jsonl` per room. Muse reads this room's file and does not write it. |
+| `boards/` | Room boards, one `boards/<sha256(channel)>.jsonl` per room. Muse reads the joined channel's file after Connect and does not write it. |
 | `docs/protocol.md` | Wire protocol |
 | `docs/security.md` | Trust model: trips, pass handling, what needs a human |
 | `docs/index.html` | Landing page (GitHub Pages root) |
