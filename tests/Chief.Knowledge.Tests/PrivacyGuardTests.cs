@@ -123,6 +123,38 @@ public class PrivacyGuardTests
     }
 
     [Fact]
+    public void A_raw_board_path_fails_closed_and_a_hash_or_placeholder_does_not()
+    {
+        var rawName = "room-channel";
+        var raw = "boards/" + rawName + ".jsonl";
+        var found = PrivacyGuard.Scan("planted.md", "This room's file is " + raw + ".");
+        Assert.NotEmpty(found);
+        Assert.Contains(found, f => f.Message.Contains("raw channel", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(found, f => f.Message.Contains(rawName));
+
+        var loose = PrivacyGuard.Scan("planted.md", "boards/<room>.jsonl");
+        Assert.NotEmpty(loose);
+        Assert.DoesNotContain(loose, f => f.Message.Contains("<room>"));
+
+        Assert.NotEmpty(PrivacyGuard.Scan("planted.md", "boards/" + new string('A', 64) + ".jsonl"));
+        Assert.NotEmpty(PrivacyGuard.Scan("planted.md", "boards/" + new string('a', 63) + ".jsonl"));
+        Assert.NotEmpty(PrivacyGuard.Scan("planted.md", "boards/" + new string('a', 65) + ".jsonl"));
+
+        var hash = new string('a', 64);
+        Assert.Empty(PrivacyGuard.Scan("ok.md", "See boards/" + hash + ".jsonl for it."));
+        Assert.Empty(PrivacyGuard.Scan("ok.md", "The file is `boards/<sha256(trimmed channel)>.jsonl`."));
+
+        using var dir = new TempDir();
+        Fixtures.WriteNote(dir.Path, "leaked", "See " + raw + ".");
+        var stderr = new StringWriter();
+        var code = KnowledgeCli.Run(["check", "--knowledge", dir.Path], new StringWriter(), stderr);
+        Assert.Equal(1, code);
+        var report = stderr.ToString();
+        Assert.Contains("raw channel", report, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(rawName, report);
+    }
+
+    [Fact]
     public void Shipped_notes_pass_the_privacy_check()
     {
         var stderr = new StringWriter();

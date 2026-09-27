@@ -259,7 +259,7 @@ test("no tracked text token hashes to a board filename", () => {
   const hashes = names.map((name) => name.slice(0, -".jsonl".length));
   const listed = execFileSync(
     "git",
-    ["ls-files", "-z", "--", "web", "docs", "boards", "tests", "agents", "README.md", "CHANGELOG.md"],
+    ["ls-files", "-z", "--", "web", "docs", "boards", "tests", "agents", "knowledge", "README.md", "CHANGELOG.md"],
     { cwd: ROOT, encoding: "utf8" }
   );
   const tokens = new Set();

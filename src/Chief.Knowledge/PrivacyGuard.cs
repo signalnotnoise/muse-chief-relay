@@ -29,6 +29,17 @@ public static partial class PrivacyGuard
         Hit(NickPassword(), "looks like a nick#password trip secret");
         Hit(UrlCredentials(), "URL contains credentials");
 
+        // A board file is boards/<64 lowercase hex>.jsonl, the SHA-256 of the
+        // trimmed channel. Any other boards/<name>.jsonl is a raw channel name.
+        // The documentation placeholder is the one exception; it names no channel.
+        foreach (Match match in BoardPath().Matches(text))
+        {
+            var name = match.Groups[1].Value;
+            if (IsBoardHash(name) || name == "<sha256(trimmed channel)>")
+                continue;
+            found.Add(new Issue(path, $"line {LineOf(text, match.Index)}: looks like a raw channel name in a board path"));
+        }
+
         foreach (Match match in VisibilityLine().Matches(text))
         {
             var value = match.Groups[1].Value;
@@ -75,4 +86,22 @@ public static partial class PrivacyGuard
 
     [GeneratedRegex(@"(?im)^visibility:\s*(\S+)\s*$")]
     private static partial Regex VisibilityLine();
+
+    // The placeholder contains a space, so it is matched literally. Everything
+    // else up to .jsonl is a single non-whitespace name.
+    [GeneratedRegex(@"(?<![A-Za-z0-9_])boards/(<sha256\(trimmed channel\)>|\S+)\.jsonl", RegexOptions.CultureInvariant)]
+    private static partial Regex BoardPath();
+
+    private static bool IsBoardHash(string name)
+    {
+        if (name.Length != 64)
+            return false;
+        foreach (var c in name)
+        {
+            if (c is >= '0' and <= '9' or >= 'a' and <= 'f')
+                continue;
+            return false;
+        }
+        return true;
+    }
 }

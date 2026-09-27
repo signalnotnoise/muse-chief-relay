@@ -90,7 +90,7 @@ A newer note and a note flagged `important` get a small multiplier on the fused 
 
 ## Privacy
 
-`check` and `rebuild` fail closed. If any note is marked anything but `public`, or if any file under `knowledge/` looks like it holds a bearer key, a password assignment, a token, a session secret, a trip password, or a URL with credentials, the command exits 1 and does not write an index. A failed rebuild leaves the previous index in place.
+`check` and `rebuild` fail closed. If any note is marked anything but `public`, or if any file under `knowledge/` looks like it holds a bearer key, a password assignment, a token, a session secret, a trip password, or a URL with credentials, the command exits 1 and does not write an index. A board path in a note fails the same way unless it is `boards/<sha256(trimmed channel)>.jsonl` or `boards/` plus 64 lowercase hex characters plus `.jsonl`. A failed rebuild leaves the previous index in place.
 
 An assignment is the same secret in plain form (`password` then a colon), JSON form (a quoted `password` or `api_key` before a colon), or a prefixed name (`my_password`). A word that only contains those letters, such as compass or bypass, is not an assignment.
 
