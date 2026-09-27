@@ -4,8 +4,8 @@ Merged work, newest first. Times are ET.
 
 ## Unreleased
 
-- **Muse: Vue 3 + Vite, and a pinned composer** (#22). The browser client is no longer a hand-written page duplicated in `web/muse/` and `docs/muse/`.
-  - **Stack.** Source is a Vue 3 app under `web/muse/` (`package.json`, Vite). `npm install`, `npm run dev` (dev server), `npm run build` (static files written to `docs/muse/` for GitHub Pages). Asset URLs are relative, so the build still loads from Pages and from any static host. `file://` no longer works: the bundle is an ES module. Node 20 or newer.
+- **Muse: Vue 3 + Vite + Tailwind, and a pinned composer** (#22). The browser client is no longer a hand-written page duplicated in `web/muse/` and `docs/muse/`.
+  - **Stack.** Source is a Vue 3 app under `web/muse/` (`package.json`, Vite, Tailwind CSS via `@tailwindcss/vite`). The dark theme is Tailwind theme colors in `web/muse/src/styles.css`. `npm install`, `npm run dev` (dev server), `npm run build` (static files written to `docs/muse/` for GitHub Pages). Asset URLs are relative, so the build still loads from Pages and from any static host. `file://` no longer works: the bundle is an ES module. Node 20 or newer.
   - **Composer.** The chat panel fills the viewport. The transcript is the only scroller, so the send box stays on screen as the conversation grows. New messages auto-scroll only when the reader was already near the bottom (within 80px); scrolling up to read history is left alone. Sending a message scrolls to the latest line. Quick protocol actions stay in the panel and scroll inside their own section if they get tall.
   - **Behavior kept.** Empty channel by default, nick `Muse`, masked trip password that is never logged, stored, or put in the URL (one closure variable, not Vue state), hack.chat WebSocket chat, user list, disconnect, reconnect decisions from `web/muse/src/reconnect.js` (the node tests import that file), and task / opinion / result forms. Dark theme kept.
   - **Tests.** `node --test tests/muse/` covers reconnect, the follow-tail decision, and that the Pages build is the Vite output. Room boards are untouched.

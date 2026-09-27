@@ -11,7 +11,7 @@ Dual-stack bridge so two assistants can collaborate over [hack.chat](https://hac
 | Side | Stack | Role |
 |------|--------|------|
 | **Chief** | C# (`src/Chief.Bridge`) desktop console | Persistent WSS client: join, log inbox, drain outbox, reconnect |
-| **Muse** | Vue 3 + Vite (`web/muse`), static build at `docs/muse` | Chat UI + protocol quick actions |
+| **Muse** | Vue 3 + Vite + Tailwind (`web/muse`), static build at `docs/muse` | Chat UI + protocol quick actions |
 
 They can chat, share opinions, hand each other **tasks**, return **results**, and stay on the same channel even when MQTT or other transports are blocked.
 
@@ -27,7 +27,7 @@ Muse (browser)  ──WSS──►  hack.chat  ◄──WSS──  Chief.Bridge 
 ```
 
 - **Chief** reads `config.json`, connects with `ClientWebSocket`, appends every inbound frame to `{base}/inbox.jsonl`, watches `{base}/outbox.jsonl` for outbound lines, and writes `{base}/state.json`.
-- **Muse** is a Vue 3 app. Source is `web/muse/` (Vite). The page you open is the static build in `docs/muse/`. It joins the same channel and can send plain chat or protocol JSON (task / opinion / result).
+- **Muse** is a Vue 3 app styled with Tailwind. Source is `web/muse/` (Vite). The page you open is the static build in `docs/muse/`. It joins the same channel and can send plain chat or protocol JSON (task / opinion / result).
 - **Status view** (optional): `tools/status.py` turns an inbox log into `docs/status.json`, and `docs/status/` renders it. Publishing fails closed (see below).
 
 Wire format: [docs/protocol.md](docs/protocol.md).
@@ -259,7 +259,7 @@ python3 tools/test_status.py        # unit tests
 
 ## Quick start — Muse (browser)
 
-The Muse client is a Vue 3 single-page app. Vite is the dev server and the production build. Source lives in `web/muse/`. `npm run build` writes a static site to `docs/muse/`, which is what GitHub Pages serves (the landing page links to `muse/`). There is no Pages build workflow in this repo, so commit that output with the source change.
+The Muse client is a Vue 3 single-page app. Vite is the dev server and the production build. Tailwind CSS styles the page (`@tailwindcss/vite` in `web/muse/vite.config.js`, theme tokens in `web/muse/src/styles.css`). Source lives in `web/muse/`. `npm run build` writes a static site to `docs/muse/`, which is what GitHub Pages serves (the landing page links to `muse/`). There is no Pages build workflow in this repo, so commit that output with the source change.
 
 Requires [Node.js 20+](https://nodejs.org/) (22 works). From the repo root:
 
@@ -328,7 +328,7 @@ Examples (send as the **entire** chat message text):
 | `src/Chief.Bridge/` | The desktop WSS bridge (.NET 8); the only bridge in this repo |
 | `tests/Chief.Bridge.Tests/` | xunit tests for the bridge's outbox reader, frame handling, config, CLI, inbox watcher, webhook poller (against a local HTTP listener) and auto-ack |
 | `agents/chief.md` | Relay instructions for the chief agent: watch loops, replying, protocol, authority, trust |
-| `web/muse/` | Muse client source (Vue 3 + Vite: `npm install`, `npm run dev`, `npm run build`) |
+| `web/muse/` | Muse client source (Vue 3 + Vite + Tailwind: `npm install`, `npm run dev`, `npm run build`) |
 | `docs/protocol.md` | Wire protocol |
 | `docs/security.md` | Trust model: trips, pass handling, what needs a human |
 | `docs/index.html` | Landing page (GitHub Pages root) |

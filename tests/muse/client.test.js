@@ -8,6 +8,17 @@ const appVue = path.join(srcDir, "App.vue");
 const useChat = path.join(srcDir, "useChat.js");
 const published = path.join(__dirname, "../../docs/muse");
 
+test("the Muse page is styled with Tailwind", () => {
+  const css = fs.readFileSync(path.join(srcDir, "styles.css"), "utf8");
+  const vite = fs.readFileSync(path.join(srcDir, "../vite.config.js"), "utf8");
+  const app = fs.readFileSync(appVue, "utf8");
+  assert.match(css, /@import\s+"tailwindcss"/);
+  assert.match(vite, /@tailwindcss\/vite/);
+  assert.match(app, /min-h-0/);
+  assert.match(app, /overflow-y-auto/);
+  assert.match(app, /id="send-form"/);
+});
+
 test("the Vue client uses the shared reconnect and scroll modules", () => {
   const text = fs.readFileSync(useChat, "utf8");
   assert.match(text, /from\s+"\.\/reconnect\.js"/);
@@ -55,6 +66,8 @@ test("the Pages build is the Vite output, not a second copy of the old client", 
   assert.match(text, /reconnecting in /);
   assert.match(text, /your-channel-name/);
   assert.match(text, /with a trip password/);
+  assert.match(text, /\.overflow-y-auto/);
+  assert.match(text, /\.min-h-0/);
   assert.equal(fs.existsSync(path.join(published, "app.js")), false);
   assert.equal(fs.existsSync(path.join(published, "reconnect.js")), false);
   assert.doesNotMatch(text, /localStorage|sessionStorage/);
