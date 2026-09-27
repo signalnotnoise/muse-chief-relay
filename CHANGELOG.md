@@ -11,7 +11,9 @@ Merged work, newest first. Times are ET.
   `watch` is harder to lose: a poll that hits transient filesystem trouble (a torn read, a locked file)
   no longer kills `watch --wait` — it records a warning (printed on stderr when the wait ends) and retries
   on the next loop, and a failure mid-`--settle` keeps the chats already collected. A one-shot `watch`
-  that can't read the inbox exits 2 with a clean error instead of a stack trace. 4 new tests (171 total).
+  that can't read the inbox exits 2 with a clean error instead of a stack trace. A missing inbox is still
+  an empty first poll; a path that exists but isn't a readable file (for example `inbox.jsonl` is a
+  directory) is that exit 2, not a successful empty poll. 7 new tests (174 total).
 - **#12 Chief responsiveness: bridge auto-ack, `watch --settle`, listener status** (open). chief only acts
   when a background `watch --wait` exits and wakes it, so every reply costs a full wake (about a minute),
   and a missed re-arm goes unnoticed. On 2026-09-27 a listener exited and wasn't re-armed, and Alex's

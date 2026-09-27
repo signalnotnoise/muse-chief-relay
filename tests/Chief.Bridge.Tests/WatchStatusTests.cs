@@ -315,6 +315,19 @@ public class WatchCliTests
     }
 
     [Fact]
+    public async Task One_shot_watch_exits_2_when_the_inbox_path_is_a_directory()
+    {
+        var (dir, cfg) = Deployment();
+        using var _ = dir;
+        var inbox = dir.File("inbox.jsonl");
+        File.Delete(inbox);
+        Directory.CreateDirectory(inbox);
+
+        Assert.Equal(2, await Program.Main(["watch", "--config", cfg]));
+        Assert.False(File.Exists(dir.File(".inbox_watch.offset")));
+    }
+
+    [Fact]
     public async Task Status_accepts_state_and_rejects_unknown_arguments()
     {
         var (dir, cfg) = Deployment();

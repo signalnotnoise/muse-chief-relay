@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Runtime.Versioning;
 using System.Text.Json.Nodes;
 
 namespace Chief.Bridge.Tests;
@@ -378,6 +379,33 @@ public class InboxWatcherTests
         Assert.Equal(WaitOutcome.Cancelled, await w.WaitAsync(null, _ => { }, cts.Token));
     }
 
+    /// <summary>The poll that finds the first chat succeeds; the next poll (inside the settle window) throws once.</summary>
+    private sealed class FailOnceInsideSettle : InboxWatcher
+    {
+        private bool _seenChats;
+
+        public int SettleFailures { get; private set; }
+
+        public FailOnceInsideSettle(string inbox, string offset, string nick)
+            : base(inbox, offset, nick, TimeSpan.FromMilliseconds(40))
+        {
+        }
+
+        public override WatchPoll Poll()
+        {
+            if (_seenChats && SettleFailures == 0)
+            {
+                SettleFailures++;
+                throw new IOException("simulated torn read");
+            }
+
+            var poll = base.Poll();
+            if (poll.Chats.Count > 0)
+                _seenChats = true;
+            return poll;
+        }
+    }
+
     /// <summary>Injects transient poll failures: the first <c>failures</c> polls throw.</summary>
     private sealed class FlakyWatcher : InboxWatcher
     {
@@ -429,26 +457,70 @@ public class InboxWatcherTests
     }
 
     [Fact]
+    public void A_missing_inbox_is_an_empty_bootstrap_and_a_directory_is_not()
+    {
+        var (dir, inbox, w) = Setup();
+        using var _ = dir;
+
+        var missing = w.Poll();
+        Assert.True(missing.Bootstrapped);
+        Assert.Empty(missing.Chats);
+
+        Directory.CreateDirectory(inbox);
+        var ex = Assert.Throws<IOException>(() => w.Poll());
+        Assert.Contains("directory", ex.Message);
+        Assert.False(w.TryPoll(out var poll, out var error));
+        Assert.Null(poll);
+        Assert.Contains("directory", error);
+    }
+
+    [Fact]
+    public void An_unreadable_inbox_is_not_treated_as_missing()
+    {
+        if (OperatingSystem.IsLinux())
+            UnreadableInboxIsNotMissing();
+    }
+
+    [SupportedOSPlatform("linux")]
+    private static void UnreadableInboxIsNotMissing()
+    {
+        var (dir, inbox, w) = Setup();
+        using var _ = dir;
+        File.WriteAllText(inbox, Chat("Alex", "secret"));
+        File.SetUnixFileMode(inbox, UnixFileMode.None);
+        try
+        {
+            Assert.False(w.TryPoll(out var poll, out var error));
+            Assert.Null(poll);
+            Assert.False(string.IsNullOrEmpty(error));
+        }
+        finally
+        {
+            File.SetUnixFileMode(inbox, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+        }
+    }
+
+    [Fact]
     public async Task Wait_with_settle_survives_a_poll_failure_mid_burst()
     {
         var dir = new TempDir();
         using var _ = dir;
         var inbox = dir.File("inbox.jsonl");
-        // One failure for the initial wait loop, one for inside the settle window.
-        var w = new FlakyWatcher(inbox, dir.File(".inbox_watch.offset"), "chief", failures: 2);
+        var w = new FailOnceInsideSettle(inbox, dir.File(".inbox_watch.offset"), "chief");
         File.WriteAllText(inbox, Chat("Alex", "history"));
         IReadOnlyList<WatchedChat>? got = null;
 
-        var task = w.WaitAsync(TimeSpan.FromSeconds(15), c => got = c, CancellationToken.None,
-            settle: TimeSpan.FromSeconds(3));
-        await Task.Delay(500); // first failure spent, watcher bootstrapped and waiting
+        var task = w.WaitAsync(TimeSpan.FromSeconds(5), c => got = c, CancellationToken.None,
+            settle: TimeSpan.FromMilliseconds(250));
+        await Task.Delay(150); // bootstrap, then wait
         File.AppendAllText(inbox, Chat("Fuse", "part one"));
-        await Task.Delay(700); // settle is collecting; its first re-poll fails, then recovers
+        await Task.Delay(120); // the first re-poll inside the settle window fails
         File.AppendAllText(inbox, Chat("Fuse", "part two"));
 
-        Assert.Equal(WaitOutcome.Delivered, await task);
+        Assert.Equal(WaitOutcome.Delivered, await task.WaitAsync(TimeSpan.FromSeconds(5)));
         Assert.Equal(new[] { "part one", "part two" }, got!.Select(c => c.Text));
-        Assert.Contains("inbox poll failed", w.Warning);
+        Assert.Equal(1, w.SettleFailures);
+        Assert.Contains("during settle", w.Warning);
     }
 
     [Fact]

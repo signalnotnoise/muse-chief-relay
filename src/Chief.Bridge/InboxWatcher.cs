@@ -59,7 +59,9 @@ internal enum WaitOutcome
 /// <item>The offset is in bytes, and only complete, newline-terminated lines are consumed: a line the
 /// bridge is still writing is left for the next poll.</item>
 /// <item>First run (no offset file): record the end of the last complete line and report nothing, so
-/// history never floods the first poll. If the inbox doesn't exist yet, record 0.</item>
+/// history never floods the first poll. If the inbox doesn't exist yet, record 0. A path that exists but
+/// isn't a readable file (a directory, or no permission) throws, so a one-shot <c>watch</c> exits 2
+/// instead of treating it as an empty inbox.</item>
 /// <item>Truncated inbox (shorter than the offset) or rotated inbox (its first bytes changed): start again
 /// from 0 and report what the new file holds.</item>
 /// <item>Frames that aren't inbound chats, the bridge's own nick, blank and malformed lines are skipped
@@ -98,7 +100,10 @@ internal class InboxWatcher
         var saved = ReadOffset(out var warning);
         Warning ??= warning;
 
-        if (!File.Exists(_inbox))
+        // File.Exists is false for a directory and for a file this process can't stat, so it cannot
+        // tell "not created yet" from "here, but not a readable inbox". Only a real absence is empty.
+        var fs = OpenInboxIfPresent();
+        if (fs is null)
         {
             // Nothing to read. On a first run, record 0 so everything in the inbox once it appears is new.
             return saved is null
@@ -106,38 +111,63 @@ internal class InboxWatcher
                 : new WatchPoll(Array.Empty<WatchedChat>(), saved, false, false, false);
         }
 
-        using var fs = new FileStream(_inbox, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-        var length = fs.Length;
-
-        if (saved is null)
+        using (fs)
         {
-            var end = LastLineEnd(fs, length);
-            return new WatchPoll(Array.Empty<WatchedChat>(), new WatchOffset(end, Head(fs, end)), true, false, true);
+            var length = fs.Length;
+
+            if (saved is null)
+            {
+                var end = LastLineEnd(fs, length);
+                return new WatchPoll(Array.Empty<WatchedChat>(), new WatchOffset(end, Head(fs, end)), true, false, true);
+            }
+
+            var start = saved.Offset;
+            var reset = false;
+            if (length < start)
+            {
+                start = 0; // truncated
+                reset = true;
+            }
+            else if (saved.Head is not null && Head(fs, start) != saved.Head)
+            {
+                start = 0; // replaced by a different file
+                reset = true;
+            }
+
+            var chats = new List<WatchedChat>();
+            var next = ReadCompleteLines(fs, start, length, line =>
+            {
+                if (ParseLine(line, _ownNick) is { } chat)
+                    chats.Add(chat);
+            });
+
+            var nextOffset = new WatchOffset(next, Head(fs, next));
+            var dirty = reset || nextOffset != saved;
+            return new WatchPoll(chats, nextOffset, false, reset, dirty);
+        }
+    }
+
+    /// <summary>
+    /// The inbox opened for reading, or null when it is not there yet. Throws <see cref="IOException"/>
+    /// or <see cref="UnauthorizedAccessException"/> when the path exists but isn't a readable file.
+    /// </summary>
+    private FileStream? OpenInboxIfPresent()
+    {
+        try
+        {
+            if ((File.GetAttributes(_inbox) & FileAttributes.Directory) != 0)
+                throw new IOException($"inbox path is a directory ({_inbox})");
+        }
+        catch (FileNotFoundException)
+        {
+            return null;
+        }
+        catch (DirectoryNotFoundException)
+        {
+            return null;
         }
 
-        var start = saved.Offset;
-        var reset = false;
-        if (length < start)
-        {
-            start = 0; // truncated
-            reset = true;
-        }
-        else if (saved.Head is not null && Head(fs, start) != saved.Head)
-        {
-            start = 0; // replaced by a different file
-            reset = true;
-        }
-
-        var chats = new List<WatchedChat>();
-        var next = ReadCompleteLines(fs, start, length, line =>
-        {
-            if (ParseLine(line, _ownNick) is { } chat)
-                chats.Add(chat);
-        });
-
-        var nextOffset = new WatchOffset(next, Head(fs, next));
-        var dirty = reset || nextOffset != saved;
-        return new WatchPoll(chats, nextOffset, false, reset, dirty);
+        return new FileStream(_inbox, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
     }
 
     /// <summary>
