@@ -1,0 +1,10 @@
+vocab.txt is the uncased BERT WordPiece vocabulary used by
+Xenova/all-MiniLM-L6-v2 (the same list as sentence-transformers/all-MiniLM-L6-v2).
+
+sha256: 07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3
+source: https://huggingface.co/Xenova/all-MiniLM-L6-v2/resolve/main/vocab.txt
+
+The ONNX weights are not in git. chief-knowledge downloads
+onnx/model_quantized.onnx on first use and checks
+sha256 afdb6f1a0e45b715d0bb9b11772f032c399babd23bfc31fed1c170afc848bdb1.
+Model id stored on every vector row: xenova/all-MiniLM-L6-v2-q-afdb6f1a0e45

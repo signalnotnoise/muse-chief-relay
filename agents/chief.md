@@ -234,6 +234,12 @@ This follows `docs/security.md`:
   too. They live only in the hook poller's environment. Never echo them, put
   them in `config.json`, or paste them into chat.
 
+## Hive mind
+
+Decisions, bugs, fixes, and how-tos go into `knowledge/` as one small note each. Write one when a PR merges, when the room makes a decision, and when Alex says "remember this". Fuse writes notes too. Use `chief-knowledge add` (or `dotnet run --project src/Chief.Knowledge -- add`) and then `rebuild` before `search`. The rules, the front matter, and the privacy check are in `knowledge/README.md`.
+
+The folder is public. Never put a channel name, a trip password, a token, or anything but `visibility: public` in a note. Sensitive notes stay in a directory outside the repo. `check` fails closed if one lands here anyway.
+
 ## Safety
 
 - Runtime files (`inbox.jsonl`, `outbox.jsonl`, `state.json`,

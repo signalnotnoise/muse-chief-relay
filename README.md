@@ -305,12 +305,27 @@ Examples (send as the **entire** chat message text):
 {"type":"opinion","from":"muse","topic":"bridge","text":"WSS on 443 is the right default"}
 ```
 
+## Hive mind
+
+Shared notes for chief, Fuse, and Alex live in [`knowledge/`](knowledge/README.md). One markdown file per decision, fact, bug, fix, or how-to. The files are the source of truth. `chief-knowledge` builds a gitignored SQLite index (FTS5 plus a local MiniLM embedding) and searches it.
+
+```bash
+dotnet run --project src/Chief.Knowledge -- check
+dotnet run --project src/Chief.Knowledge -- rebuild
+dotnet run --project src/Chief.Knowledge -- search "reconnect" --tag bridge
+```
+
+Write a note on every merge, on every decision made in the room, and whenever Alex says "remember this". Both chief and Fuse write them. The folder is public: `check` fails closed on a private note or an obvious secret, and a channel name does not belong in the repo. How to write one, and where sensitive notes go instead, is [knowledge/README.md](knowledge/README.md).
+
 ## Layout
 
 | Path | Role |
 |------|------|
 | `src/Chief.Bridge/` | The desktop WSS bridge (.NET 8); the only bridge in this repo |
+| `src/Chief.Knowledge/` | `chief-knowledge`: write, check, rebuild, and search the hive-mind notes |
+| `knowledge/` | Markdown notes (source of truth) and `knowledge/README.md` |
 | `tests/Chief.Bridge.Tests/` | xunit tests for the bridge's outbox reader, frame handling, config, CLI, inbox watcher, webhook poller (against a local HTTP listener) and auto-ack |
+| `tests/Chief.Knowledge.Tests/` | xunit tests for note validation, the privacy guard, FTS, hybrid ranking, and supersedes |
 | `agents/chief.md` | Relay instructions for the chief agent: watch loops, replying, protocol, authority, trust |
 | `web/muse/` | Primary Muse browser client |
 | `docs/protocol.md` | Wire protocol |

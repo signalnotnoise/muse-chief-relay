@@ -32,6 +32,9 @@ __pycache__/
 *.exe
 *.pdb
 
+# Rebuildable knowledge index. Markdown under knowledge/ is the source of truth.
+knowledge/.index/
+
 # OS / editor
 .DS_Store
 *.swp

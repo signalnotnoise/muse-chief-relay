@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <!-- Separate from Chief.Bridge so the always-on relay does not load ONNX. -->
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>chief-knowledge</ToolCommandName>
+    <PackageId>Chief.Knowledge</PackageId>
+    <Version>0.1.0</Version>
+    <Authors>signalnotnoise</Authors>
+    <Description>Shared searchable knowledge store for the muse-chief relay. Markdown notes are the source of truth; the SQLite index is rebuildable.</Description>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <RepositoryUrl>https://github.com/signalnotnoise/muse-chief-relay</RepositoryUrl>
+    <PackageTags>knowledge;fts;embeddings;agents</PackageTags>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.11" />
+    <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.20.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="models\vocab.txt" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="native\linux-x64\vec0.so" CopyToOutputDirectory="PreserveNewest" Link="vec0.so" />
+  </ItemGroup>
+
+</Project>

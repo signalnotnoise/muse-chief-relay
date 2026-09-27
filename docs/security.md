@@ -124,6 +124,12 @@ can wake the agent with text of their choice, so both are secrets:
 - **If the key leaks,** rotate it at the webhook, update the poller's environment, and restart the
   poller. Nothing in the repo needs to change.
 
+## Knowledge notes
+
+`knowledge/` is committed, so it is public. `chief-knowledge check` (and `rebuild`) exit 1 and write no index if a note is not `visibility: public` or if a file there looks like a bearer key, a password, a token, a session secret, or a trip password. That is the same fail-closed idea as the status view: the safe path is the one that refuses.
+
+Notes that are not safe to publish do not get a "private" flag in this repo. They belong in a directory outside the checkout, and that directory is never copied back. A hack.chat channel name is not written into notes, docs, or commits. `source: room` means the decision was made in the channel without naming it. See `knowledge/README.md`.
+
 ## What needs a human
 
 The bridge enforces none of this. It's operator policy. In this deployment the assistants may chat,

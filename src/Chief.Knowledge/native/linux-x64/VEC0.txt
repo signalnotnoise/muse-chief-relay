@@ -1,0 +1,10 @@
+sqlite-vec 0.1.6 loadable extension for linux-x86_64 (vec0.so).
+
+Source: https://github.com/asg017/sqlite-vec/releases/download/v0.1.6/sqlite-vec-0.1.6-loadable-linux-x86_64.tar.gz
+sha256: f285c46d5496fe7571be40ab40c0b151d091892c141f89a503e02392e0961233
+License: MIT OR Apache-2.0 (https://github.com/asg017/sqlite-vec)
+
+Chief.Knowledge loads this file only when the hash matches. On any other
+platform, or if the hash does not match, vector search uses the pure cosine
+fallback over the vectors table. The vectors table is always written and is
+the row that carries the embedding model id.

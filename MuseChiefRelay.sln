@@ -11,6 +11,10 @@ Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tests", "tests", "{D697BB1B
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Chief.Bridge.Tests", "tests\Chief.Bridge.Tests\Chief.Bridge.Tests.csproj", "{C13CA27E-0F32-42F8-B6BA-EFB955424F16}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Chief.Knowledge", "src\Chief.Knowledge\Chief.Knowledge.csproj", "{36C41EF0-ECBB-43F5-BFB5-C244DB4DF595}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Chief.Knowledge.Tests", "tests\Chief.Knowledge.Tests\Chief.Knowledge.Tests.csproj", "{A2179968-982E-4FF9-AA21-4B3994ACBBF0}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -28,9 +32,19 @@ Global
 		{C13CA27E-0F32-42F8-B6BA-EFB955424F16}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{C13CA27E-0F32-42F8-B6BA-EFB955424F16}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{C13CA27E-0F32-42F8-B6BA-EFB955424F16}.Release|Any CPU.Build.0 = Release|Any CPU
+		{36C41EF0-ECBB-43F5-BFB5-C244DB4DF595}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{36C41EF0-ECBB-43F5-BFB5-C244DB4DF595}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{36C41EF0-ECBB-43F5-BFB5-C244DB4DF595}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{36C41EF0-ECBB-43F5-BFB5-C244DB4DF595}.Release|Any CPU.Build.0 = Release|Any CPU
+		{A2179968-982E-4FF9-AA21-4B3994ACBBF0}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{A2179968-982E-4FF9-AA21-4B3994ACBBF0}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{A2179968-982E-4FF9-AA21-4B3994ACBBF0}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{A2179968-982E-4FF9-AA21-4B3994ACBBF0}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(NestedProjects) = preSolution
 		{8A76AF28-95D4-4A57-9273-93F1B3D8850E} = {8DAC3B8D-5F2B-426A-B992-AF213112363F}
 		{C13CA27E-0F32-42F8-B6BA-EFB955424F16} = {D697BB1B-19F3-4A6E-82F8-9B79086B096B}
+		{36C41EF0-ECBB-43F5-BFB5-C244DB4DF595} = {8DAC3B8D-5F2B-426A-B992-AF213112363F}
+		{A2179968-982E-4FF9-AA21-4B3994ACBBF0} = {D697BB1B-19F3-4A6E-82F8-9B79086B096B}
 	EndGlobalSection
 EndGlobal
