@@ -62,6 +62,32 @@ public class PrivacyGuardTests
     }
 
     [Fact]
+    public void Json_form_and_prefixed_names_fail_closed()
+    {
+        var jsonPassword = string.Concat("\"pass", "word\": \"", "hunter2supersecret\"");
+        var jsonApiKey = string.Concat("\"api", "_key\": \"", "abcdefghijklmnop\"");
+        var prefixed = string.Concat("my_pass", "word = ", "notreal1");
+        var jsonTrip = string.Concat("\"trip_", "password\": \"", "notreal1\"");
+
+        AssertKind(jsonPassword, "password");
+        AssertKind(jsonApiKey, "token");
+        AssertKind(prefixed, "password");
+        AssertKind(jsonTrip, "trip password");
+        Assert.DoesNotContain(PrivacyGuard.Scan("planted.md", jsonPassword), f => f.Message.Contains("hunter2"));
+
+        Assert.Empty(PrivacyGuard.Scan("prose.md", "bypass = northward"));
+        Assert.Empty(PrivacyGuard.Scan("prose.md", "compass: north"));
+
+        using var dir = new TempDir();
+        Fixtures.WriteNote(dir.Path, "leaked", jsonPassword);
+        var stderr = new StringWriter();
+        var code = KnowledgeCli.Run(["check", "--knowledge", dir.Path], new StringWriter(), stderr);
+        Assert.Equal(1, code);
+        Assert.Contains("password", stderr.ToString(), StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("hunter2", stderr.ToString());
+    }
+
+    [Fact]
     public void A_private_note_refuses_the_index_and_check_writes_nothing()
     {
         using var dir = new TempDir();
@@ -77,7 +103,9 @@ public class PrivacyGuardTests
         code = KnowledgeCli.Run(["rebuild", "--knowledge", dir.Path, "--index", index], new StringWriter(), stderr, _ => throw new InvalidOperationException("embedder must not run"));
         Assert.Equal(1, code);
         Assert.False(File.Exists(index));
-        Assert.Contains("not public", stderr.ToString(), StringComparison.OrdinalIgnoreCase);
+        var report = stderr.ToString();
+        Assert.Contains("not public", report, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(1, System.Text.RegularExpressions.Regex.Matches(report, "not public", System.Text.RegularExpressions.RegexOptions.IgnoreCase).Count);
     }
 
     [Fact]

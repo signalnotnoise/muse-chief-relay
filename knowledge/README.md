@@ -92,6 +92,8 @@ A newer note and a note flagged `important` get a small multiplier on the fused 
 
 `check` and `rebuild` fail closed. If any note is marked anything but `public`, or if any file under `knowledge/` looks like it holds a bearer key, a password assignment, a token, a session secret, a trip password, or a URL with credentials, the command exits 1 and does not write an index. A failed rebuild leaves the previous index in place.
 
+An assignment is the same secret in plain form (`password` then a colon), JSON form (a quoted `password` or `api_key` before a colon), or a prefixed name (`my_password`). A word that only contains those letters, such as compass or bypass, is not an assignment.
+
 Sensitive notes belong in a separate local-only store outside the repo, for example `~/.local/share/muse-chief-relay/private-knowledge/`. This tool never reads or writes that directory. Do not copy it into `knowledge/`, and do not point `--knowledge` at it and then commit the result.
 
 Never write a hack.chat channel name into this repo. Not in a note, not in an example, not in a commit message.

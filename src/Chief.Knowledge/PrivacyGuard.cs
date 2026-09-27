@@ -53,13 +53,15 @@ public static partial class PrivacyGuard
     [GeneratedRegex(@"\bBearer\s+[A-Za-z0-9\-._~+/]{8,}={0,2}", RegexOptions.CultureInvariant)]
     private static partial Regex Bearer();
 
-    [GeneratedRegex(@"(?im)(?:^|[^A-Za-z0-9_])(?:password|passwd|pwd|pass)\s*[:=]\s*['""]?[^\s'""]{4,}")]
+    // A quote may sit between the key and ':' ("password": "..."). '_' is a
+    // boundary so my_password matches; a letter still blocks compass and bypass.
+    [GeneratedRegex(@"(?im)(?:^|[^A-Za-z0-9])(?:password|passwd|pwd|pass)['""]?\s*[:=]\s*['""]?[^\s'""]{4,}")]
     private static partial Regex PasswordAssignment();
 
-    [GeneratedRegex(@"(?im)(?:^|[^A-Za-z0-9_])(?:token|secret|api[_-]?key|access[_-]?token|session[_-]?token)\s*[:=]\s*['""]?[^\s'""]{8,}")]
+    [GeneratedRegex(@"(?im)(?:^|[^A-Za-z0-9])(?:token|secret|api[_-]?key|access[_-]?token|session[_-]?token)['""]?\s*[:=]\s*['""]?[^\s'""]{8,}")]
     private static partial Regex TokenAssignment();
 
-    [GeneratedRegex(@"(?im)\btrip[_-]?password\b\s*[:=]\s*['""]?[^\s'""]{4,}")]
+    [GeneratedRegex(@"(?im)\btrip[_-]?password\b['""]?\s*[:=]\s*['""]?[^\s'""]{4,}")]
     private static partial Regex TripPassword();
 
     [GeneratedRegex(@"\b(?:ghp_|gho_|ghu_|ghs_|ghr_|github_pat_|sk-|xox[baprs]-|AKIA[0-9A-Z]{16})[A-Za-z0-9_\-]{8,}", RegexOptions.CultureInvariant)]

@@ -90,7 +90,7 @@ Runtime files (`inbox.jsonl`, `outbox.jsonl`, `unread.jsonl`, `state.json`) live
 - **Auto-ack** (optional, off by default): an instant `(auto) got it…` line when a trusted trip addresses the bridge. See "Auto-acknowledgement" below.
 - **Logs.** `inbox.jsonl` records every frame in and out. Frames that aren't JSON objects are logged as `{"raw": "..."}` and otherwise ignored. The join is logged without the pass. Any outbound `pass` field and the `token` in hack.chat's `session` frame are logged as `<redacted>`. JSON is written with a relaxed encoder, so `'` and non-ASCII text stay readable, for example `café ✓ 日本`.
 
-Unit tests: `dotnet test MuseChiefRelay.sln` (xunit, `tests/Chief.Bridge.Tests`). Muse client tests: `node --test tests/muse/` (reconnect decisions, follow-tail scroll, the room-board reader, and a check that `docs/muse/` is the Vite build).
+Unit tests: `dotnet test MuseChiefRelay.sln` (xunit, `tests/Chief.Bridge.Tests` and `tests/Chief.Knowledge.Tests`). Muse client tests: `node --test tests/muse/` (reconnect decisions, follow-tail scroll, the room-board reader, and a check that `docs/muse/` is the Vite build).
 
 ### Watching the inbox
 
@@ -352,7 +352,7 @@ dotnet run --project src/Chief.Knowledge -- rebuild
 dotnet run --project src/Chief.Knowledge -- search "reconnect" --tag bridge
 ```
 
-Write a note on every merge, on every decision made in the room, and whenever Alex says "remember this". Both chief and Fuse write them. The folder is public: `check` fails closed on a private note or an obvious secret, and a channel name does not belong in the repo. How to write one, and where sensitive notes go instead, is [knowledge/README.md](knowledge/README.md).
+Write a note on every merge, on every decision made in the room, and whenever Alex says "remember this". Both chief and Fuse write them. The folder is public: `check` fails closed on a private note or an obvious secret, including a JSON key or a prefixed name such as `my_password`, and a channel name does not belong in the repo. How to write one, and where sensitive notes go instead, is [knowledge/README.md](knowledge/README.md).
 
 ## Layout
 

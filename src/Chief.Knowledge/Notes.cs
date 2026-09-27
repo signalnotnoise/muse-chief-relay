@@ -164,9 +164,11 @@ public static class NoteLoader
             if (!string.Equals(Path.GetFileNameWithoutExtension(rel), note.Id, StringComparison.Ordinal))
                 validation.Add(new Issue(rel, $"file name must be {note.Id}.md"));
 
-            // Anything other than public is a privacy failure, including a missing
-            // value that the parser already rejected. Private notes never enter the index.
-            if (!string.Equals(note.Visibility, "public", StringComparison.Ordinal))
+            // PrivacyGuard already reports a `visibility:` line that is not public.
+            // This catches a non-public value the line regex did not (for example
+            // one with an internal space). A missing value is a validation error.
+            if (!string.Equals(note.Visibility, "public", StringComparison.Ordinal)
+                && !privacy.Exists(issue => issue.Path == rel && issue.Message.Contains("visibility is ", StringComparison.Ordinal)))
                 privacy.Add(new Issue(rel, "visibility is not public"));
 
             notes.Add(note);
@@ -380,11 +382,6 @@ public static class NoteLoader
 
         // Visibility is returned even when it is not public so the loader can
         // classify that as a privacy failure rather than a schema typo only.
-        if (visibility != "public" && visibility.Length > 0 && visibility != "private")
-        {
-            // still a privacy problem at load time; keep the note so the loader sees the value
-        }
-
         note = new NoteDocument
         {
             Id = id,
