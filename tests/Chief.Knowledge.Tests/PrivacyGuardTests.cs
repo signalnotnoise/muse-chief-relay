@@ -105,7 +105,7 @@ public class PrivacyGuardTests
         Assert.False(File.Exists(index));
         var report = stderr.ToString();
         Assert.Contains("not public", report, StringComparison.OrdinalIgnoreCase);
-        Assert.Equal(1, System.Text.RegularExpressions.Regex.Matches(report, "not public", System.Text.RegularExpressions.RegexOptions.IgnoreCase).Count);
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(report, "not public", System.Text.RegularExpressions.RegexOptions.IgnoreCase));
     }
 
     [Fact]
