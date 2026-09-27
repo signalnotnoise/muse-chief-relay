@@ -1,9 +1,11 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const fs = require("fs");
-const path = require("path");
 
-const docs = require("../../docs/muse/reconnect.js");
+let docs;
+
+test.before(async () => {
+  docs = await import("../../web/muse/src/reconnect.js");
+});
 
 test("an established session retries every join warn, including ones that are not nick-taken", () => {
   assert.equal(docs.onJoinWarn("Channel is full", true, 0), "retry");
@@ -53,10 +55,4 @@ test("socket closes do not spend the first-join warn budget", () => {
     0);
   assert.equal(invalid.decision, "stop");
   assert.equal(invalid.firstJoinWarns, 0);
-});
-
-test("docs/muse and web/muse reconnect.js are the same file", () => {
-  const a = fs.readFileSync(path.join(__dirname, "../../docs/muse/reconnect.js"));
-  const b = fs.readFileSync(path.join(__dirname, "../../web/muse/reconnect.js"));
-  assert.deepEqual(a, b);
 });

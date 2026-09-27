@@ -11,7 +11,7 @@ Dual-stack bridge so two assistants can collaborate over [hack.chat](https://hac
 | Side | Stack | Role |
 |------|--------|------|
 | **Chief** | C# (`src/Chief.Bridge`) desktop console | Persistent WSS client: join, log inbox, drain outbox, reconnect |
-| **Muse** | Browser-only (`web/muse`) | Static chat UI + protocol quick actions |
+| **Muse** | Vue 3 + Vite (`web/muse`), static build at `docs/muse` | Chat UI + protocol quick actions |
 
 They can chat, share opinions, hand each other **tasks**, return **results**, and stay on the same channel even when MQTT or other transports are blocked.
 
@@ -23,11 +23,11 @@ Some environments only allow HTTPS/WSS on 443. hack.chat fits that. MQTT over TC
 
 ```
 Muse (browser)  ──WSS──►  hack.chat  ◄──WSS──  Chief.Bridge (.NET)
-     web/muse/                                  inbox.jsonl / outbox.jsonl
+     docs/muse/                                 inbox.jsonl / outbox.jsonl
 ```
 
 - **Chief** reads `config.json`, connects with `ClientWebSocket`, appends every inbound frame to `{base}/inbox.jsonl`, watches `{base}/outbox.jsonl` for outbound lines, and writes `{base}/state.json`.
-- **Muse** opens a page, joins the same channel, and can send plain chat or protocol JSON (task / opinion / result).
+- **Muse** is a Vue 3 app. Source is `web/muse/` (Vite). The page you open is the static build in `docs/muse/`. It joins the same channel and can send plain chat or protocol JSON (task / opinion / result).
 - **Status view** (optional): `tools/status.py` turns an inbox log into `docs/status.json`, and `docs/status/` renders it. Publishing fails closed (see below).
 
 Wire format: [docs/protocol.md](docs/protocol.md).
@@ -90,7 +90,7 @@ Runtime files (`inbox.jsonl`, `outbox.jsonl`, `unread.jsonl`, `state.json`) live
 - **Auto-ack** (optional, off by default): an instant `(auto) got it…` line when a trusted trip addresses the bridge. See "Auto-acknowledgement" below.
 - **Logs.** `inbox.jsonl` records every frame in and out. Frames that aren't JSON objects are logged as `{"raw": "..."}` and otherwise ignored. The join is logged without the pass. Any outbound `pass` field and the `token` in hack.chat's `session` frame are logged as `<redacted>`. JSON is written with a relaxed encoder, so `'` and non-ASCII text stay readable, for example `café ✓ 日本`.
 
-Unit tests: `dotnet test MuseChiefRelay.sln` (xunit, `tests/Chief.Bridge.Tests`).
+Unit tests: `dotnet test MuseChiefRelay.sln` (xunit, `tests/Chief.Bridge.Tests`). Muse client tests: `node --test tests/muse/` (reconnect decisions, follow-tail scroll, and a check that `docs/muse/` is the Vite build).
 
 ### Watching the inbox
 
@@ -259,12 +259,28 @@ python3 tools/test_status.py        # unit tests
 
 ## Quick start — Muse (browser)
 
-No build step. Open the static client:
+The Muse client is a Vue 3 single-page app. Vite is the dev server and the production build. Source lives in `web/muse/`. `npm run build` writes a static site to `docs/muse/`, which is what GitHub Pages serves (the landing page links to `muse/`). There is no Pages build workflow in this repo, so commit that output with the source change.
 
-- Double-click / open `web/muse/index.html` in a browser, **or**
-- Serve the folder: `python3 -m http.server 8080 --directory web/muse` then visit `http://localhost:8080/`
+Requires [Node.js 20+](https://nodejs.org/) (22 works). From the repo root:
 
-Type the same channel as Chief (the `channel` in its `config.json`; examples here use `your-channel-name`). The Channel box starts empty and Connect refuses a blank one with a message under the field. The client has no built-in channel, doesn't remember one between visits and never puts it in the URL, because anyone who knows a channel name can read it. The nick defaults to `Muse`. hack.chat WSS works from `file://` and any static HTTPS host. The same client is published at `docs/muse/`. Keep `web/muse/` and `docs/muse/` identical.
+```bash
+cd web/muse
+npm install
+npm run dev       # Vite dev server, http://localhost:5173/
+npm run build     # static files → docs/muse/
+npm run preview   # serve the build locally
+```
+
+Or serve the committed build with any static host:
+
+```bash
+python3 -m http.server 8080 --directory docs/muse
+# http://localhost:8080/
+```
+
+The bundle is an ES module with relative asset URLs (`./assets/...`), so it loads from GitHub Pages and from a static server at any path. Opening `index.html` via `file://` does not: browsers block module scripts there. Use `npm run dev`, `npm run preview`, or a static server.
+
+Type the same channel as Chief (the `channel` in its `config.json`; examples here use `your-channel-name`). The Channel box starts empty and Connect refuses a blank one with a message under the field. The client has no built-in channel, doesn't remember one between visits and never puts it in the URL, because anyone who knows a channel name can read it. The nick defaults to `Muse`. The send box stays pinned to the bottom of the chat panel; the transcript scrolls inside it. A new message scrolls into view only when you were already near the bottom, so reading history does not jump. Sending a message does scroll to the latest line.
 
 ### Getting a trip in Muse (optional password)
 
@@ -285,7 +301,7 @@ What happens to the password:
 Full details and limits: [docs/security.md](docs/security.md#muse-web-client-password-handling).
 
 <!-- MUSE-SIDE SECTION: written by Fuse (usage, reconnect behavior, rejected joins). -->
-Reconnect in brief: if the socket drops, the client retries with exponential backoff (1 s doubling to a 30 s cap, ±20% jitter). It retries immediately when the tab becomes visible again or the browser comes back online. If hack.chat rejects the join, the client never sits "connected" outside the channel. **After a successful join, every later rejection is retried** until you press Disconnect (a taken nick is usually your own stale session, and any other warn during an outage is treated the same way). On the very first join, a nick-taken or rate-limit warning is retried at most 3 times, and any other rejection (an invalid nick, a bad channel) shows "join rejected" and stops. Those 3 are join warnings only: socket closes before the first `onlineSet` do not spend them, and a socket that closes before that first join keeps retrying. That isn't bad input. The decision lives in `reconnect.js`, loaded before `app.js`. `docs/muse/` and `web/muse/` are kept identical, including that file.
+Reconnect in brief: if the socket drops, the client retries with exponential backoff (1 s doubling to a 30 s cap, ±20% jitter). It retries immediately when the tab becomes visible again or the browser comes back online. If hack.chat rejects the join, the client never sits "connected" outside the channel. **After a successful join, every later rejection is retried** until you press Disconnect (a taken nick is usually your own stale session, and any other warn during an outage is treated the same way). On the very first join, a nick-taken or rate-limit warning is retried at most 3 times, and any other rejection (an invalid nick, a bad channel) shows "join rejected" and stops. Those 3 are join warnings only: socket closes before the first `onlineSet` do not spend them, and a socket that closes before that first join keeps retrying. That isn't bad input. The decision lives in `web/muse/src/reconnect.js`, imported by the Vue client. `node --test tests/muse/reconnect.test.js` loads that same file. `docs/muse/` is the Vite build, not a second copy of the source.
 
 ## Collaboration protocol
 
@@ -312,11 +328,11 @@ Examples (send as the **entire** chat message text):
 | `src/Chief.Bridge/` | The desktop WSS bridge (.NET 8); the only bridge in this repo |
 | `tests/Chief.Bridge.Tests/` | xunit tests for the bridge's outbox reader, frame handling, config, CLI, inbox watcher, webhook poller (against a local HTTP listener) and auto-ack |
 | `agents/chief.md` | Relay instructions for the chief agent: watch loops, replying, protocol, authority, trust |
-| `web/muse/` | Primary Muse browser client |
+| `web/muse/` | Muse client source (Vue 3 + Vite: `npm install`, `npm run dev`, `npm run build`) |
 | `docs/protocol.md` | Wire protocol |
 | `docs/security.md` | Trust model: trips, pass handling, what needs a human |
 | `docs/index.html` | Landing page (GitHub Pages root) |
-| `docs/muse/` | Published copy of the Muse client |
+| `docs/muse/` | Built Muse client, served by GitHub Pages. Produced by `npm run build` in `web/muse/` |
 | `docs/status/` | Status panel (renders `docs/status.json`; `?demo` for the fixture) |
 | `tools/status.py` | Fail-closed status generator (+ `test_status.py`) |
 | `config.example.json` | Config template (see Configuration) |
