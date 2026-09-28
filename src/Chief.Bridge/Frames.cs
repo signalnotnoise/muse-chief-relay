@@ -96,37 +96,150 @@ internal static class LogRedaction
             o["pass"] = Redacted;
         return copy;
     }
+
+    /// <summary>
+    /// Error text for an outbox line that produced no frames. Character count only.
+    /// The raw line is never included: a rejected line can still hold a <c>pass</c>,
+    /// token, or other secret, and this string is written to inbox.jsonl.
+    /// </summary>
+    public static string DroppedOutboxLine(string line) =>
+        $"outbox: dropped malformed line ({line.Trim().Length} chars)";
 }
 
 internal static class OutboxPayload
 {
     /// <summary>
-    /// Turn one outbox line into a frame. A JSON object with a string <c>cmd</c> is sent as is; an
-    /// object with a string <c>text</c> becomes a chat; anything else is sent as chat text verbatim.
-    /// Blank lines give null (nothing to send).
+    /// Turn one outbox line into zero or more frames. A JSON object with a string <c>cmd</c> is sent
+    /// as is; an object with a string <c>text</c> becomes a chat. A line may hold several
+    /// concatenated JSON objects (two appends that lost the newline between them); each one becomes
+    /// its own frame, but only when every top-level value is an accepted envelope. One non-sendable
+    /// value — plain text, a protocol object, an array, a bare value, truncated input, or trailing
+    /// garbage — drops the whole line, including any valid envelopes beside it. Fail closed: the
+    /// channel must never see raw outbox bytes, and a mixed line must not send a partial result.
+    /// Blank lines give no frames (nothing to send).
     /// </summary>
-    public static JsonObject? Build(string line)
+    public static IReadOnlyList<JsonObject> BuildAll(string line)
     {
-        var trimmed = line.Trim();
-        if (trimmed.Length == 0)
-            return null;
+        var bytes = Encoding.UTF8.GetBytes(line.Trim());
+        if (bytes.Length == 0)
+            return Array.Empty<JsonObject>();
 
-        try
+        // Split the line into top-level JSON value ranges. A line normally holds one
+        // envelope; two appends that lost the newline between them hold two.
+        // (JsonDocument.ParseValue is single-value by design, so the split is done
+        // with the tokenizer directly.)
+        var ranges = SplitTopLevelValues(bytes);
+        if (ranges is null)
+            return Array.Empty<JsonObject>(); // malformed: fail closed, send nothing
+
+        var payloads = new List<JsonObject>();
+        foreach (var (start, length) in ranges)
         {
-            if (JsonNode.Parse(trimmed) is JsonObject o)
+            JsonNode? node;
+            try
             {
-                if (Json.Str(o, "cmd") is not null)
-                    return o;
-                if (Json.Str(o, "text") is { } text)
-                    return new JsonObject { ["cmd"] = "chat", ["text"] = text };
+                node = JsonNode.Parse(bytes.AsSpan(start, length));
             }
+            catch (JsonException)
+            {
+                return Array.Empty<JsonObject>(); // unreachable in practice; fail closed anyway
+            }
+            // A parsed value that is not an accepted envelope fails the whole line.
+            // Skipping it and returning the neighbors would still send a chat from mixed
+            // input such as {"cmd":"chat","text":"a"}{"type":"result","body":"x"}.
+            if (node is not JsonObject obj || FromObject(obj) is not { } payload)
+                return Array.Empty<JsonObject>();
+            payloads.Add(payload);
         }
-        catch (JsonException)
-        {
-            // plain text
-        }
+        return payloads;
+    }
 
-        return new JsonObject { ["cmd"] = "chat", ["text"] = trimmed };
+    /// <summary>
+    /// Byte ranges of each top-level JSON value in <paramref name="bytes"/>, or null when the
+    /// input is not well-formed JSON (truncated mid-value, trailing garbage, ...).
+    /// A small hand scanner is used instead of <see cref="Utf8JsonReader"/> because the reader
+    /// is single-document by design: it throws once a first top-level value is complete.
+    /// Each range is re-parsed strictly by the caller, so the scanner only has to find
+    /// plausible value boundaries (string-aware, so braces inside strings don't split).
+    /// </summary>
+    private static List<(int Start, int Length)>? SplitTopLevelValues(byte[] bytes)
+    {
+        var ranges = new List<(int Start, int Length)>();
+        int i = 0, n = bytes.Length;
+        while (i < n)
+        {
+            while (i < n && IsJsonWhitespace(bytes[i])) i++;
+            if (i >= n) break;
+            int end = ScanOneValue(bytes, i);
+            if (end < 0) return null; // malformed or truncated: fail closed
+            ranges.Add((i, end - i));
+            i = end;
+        }
+        return ranges;
+    }
+
+    private static bool IsJsonWhitespace(byte b) =>
+        b is (byte)' ' or (byte)'\t' or (byte)'\n' or (byte)'\r';
+
+    /// <summary>
+    /// Scans one JSON value starting at <paramref name="bytes"/>[<paramref name="i"/>]
+    /// (which is not whitespace). Returns the exclusive end offset, or -1 when the
+    /// value is malformed or truncated.
+    /// </summary>
+    private static int ScanOneValue(byte[] bytes, int i)
+    {
+        int n = bytes.Length;
+        byte b = bytes[i];
+        if (b == (byte)'{' || b == (byte)'[')
+        {
+            int depth = 0;
+            bool inString = false;
+            for (int j = i; j < n; j++)
+            {
+                byte c = bytes[j];
+                if (inString)
+                {
+                    if (c == (byte)'\\') { j++; continue; } // skip the escaped char
+                    if (c == (byte)'"') inString = false;
+                }
+                else if (c == (byte)'"') inString = true;
+                else if (c == (byte)'{' || c == (byte)'[') depth++;
+                else if (c == (byte)'}' || c == (byte)']')
+                {
+                    depth--;
+                    if (depth == 0) return j + 1;
+                    if (depth < 0) return -1;
+                }
+            }
+            return -1; // truncated
+        }
+        if (b == (byte)'"')
+        {
+            for (int j = i + 1; j < n; j++)
+            {
+                byte c = bytes[j];
+                if (c == (byte)'\\') { j++; continue; }
+                if (c == (byte)'"') return j + 1;
+                if (c < 0x20) return -1; // control character: invalid JSON
+            }
+            return -1; // unterminated string
+        }
+        // true / false / null / number: run to the next boundary byte.
+        int k = i;
+        while (k < n && !IsJsonWhitespace(bytes[k]) && bytes[k] != (byte)'{' && bytes[k] != (byte)'}'
+            && bytes[k] != (byte)'[' && bytes[k] != (byte)']' && bytes[k] != (byte)'"'
+            && bytes[k] != (byte)',' && bytes[k] != (byte)':')
+            k++;
+        return k > i ? k : -1;
+    }
+
+    private static JsonObject? FromObject(JsonObject o)
+    {
+        if (Json.Str(o, "cmd") is not null)
+            return o;
+        if (Json.Str(o, "text") is { } text)
+            return new JsonObject { ["cmd"] = "chat", ["text"] = text };
+        return null;
     }
 }
 

@@ -23,6 +23,8 @@ claim any nick.
 - The bridge sends it only inside the join frame and logs that frame **without** the pass.
 - It also logs any `pass` field in an outbound frame as `<redacted>`. It logs the `token` in hack.chat's
   `session` frame as `<redacted>` too: that token belongs to the connection and has no place in a log.
+- A dropped outbox line is logged as an error with its character count only. The line itself is not
+  written to `inbox.jsonl`: it can still contain a pass, a token, or other raw content.
 - If a pass leaks, pick a new one. The trip changes with it, so update every `publish_trips` and
   trusted-trip list that named the old trip.
 

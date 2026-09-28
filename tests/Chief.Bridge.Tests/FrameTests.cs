@@ -88,35 +88,89 @@ public class InboundFrameTests
 public class OutboxPayloadTests
 {
     [Fact]
-    public void Blank_line_sends_nothing() => Assert.Null(OutboxPayload.Build("   "));
-
-    [Fact]
-    public void Plain_text_becomes_chat()
-    {
-        var p = OutboxPayload.Build("hello there")!;
-        Assert.Equal("chat", p["cmd"]!.GetValue<string>());
-        Assert.Equal("hello there", p["text"]!.GetValue<string>());
-    }
+    public void Blank_line_sends_nothing() => Assert.Empty(OutboxPayload.BuildAll("   "));
 
     [Fact]
     public void Object_with_cmd_passes_through()
     {
-        var p = OutboxPayload.Build("{\"cmd\":\"emote\",\"text\":\"waves\"}")!;
+        var p = Assert.Single(OutboxPayload.BuildAll("{\"cmd\":\"emote\",\"text\":\"waves\"}"));
         Assert.Equal("emote", p["cmd"]!.GetValue<string>());
     }
 
     [Fact]
     public void Object_with_text_only_becomes_chat()
     {
-        var p = OutboxPayload.Build("{\"text\":\"hi\"}")!;
+        var p = Assert.Single(OutboxPayload.BuildAll("{\"text\":\"hi\"}"));
         Assert.Equal("{\"cmd\":\"chat\",\"text\":\"hi\"}", p.ToJsonString(JsonUtil.Opts));
     }
 
     [Fact]
-    public void Other_json_is_sent_verbatim_as_chat()
+    public void Concatenated_envelopes_become_separate_chats()
     {
-        var p = OutboxPayload.Build("[1,2]")!;
-        Assert.Equal("[1,2]", p["text"]!.GetValue<string>());
+        // 2026-09-27: two appends lost the newline between them and one line held two
+        // envelopes; the old verbatim fallthrough put raw JSON in the channel.
+        var ps = OutboxPayload.BuildAll(
+            "{\"cmd\":\"chat\",\"text\":\"first\"}{\"cmd\":\"chat\",\"text\":\"second\"}");
+        Assert.Equal(2, ps.Count);
+        foreach (var p in ps)
+            Assert.Equal("chat", p["cmd"]!.GetValue<string>());
+        Assert.Equal("first", ps[0]["text"]!.GetValue<string>());
+        Assert.Equal("second", ps[1]["text"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void Concatenated_envelopes_may_mix_cmd_and_text_forms()
+    {
+        var ps = OutboxPayload.BuildAll("{\"cmd\":\"emote\",\"text\":\"waves\"} {\"text\":\"hi\"}");
+        Assert.Equal(2, ps.Count);
+        Assert.Equal("emote", ps[0]["cmd"]!.GetValue<string>());
+        Assert.Equal("{\"cmd\":\"chat\",\"text\":\"hi\"}", ps[1].ToJsonString(JsonUtil.Opts));
+    }
+
+    [Fact]
+    public void Malformed_line_sends_nothing_fail_closed()
+    {
+        // Plain text, JSON that is not a sendable envelope, trailing garbage, and
+        // truncated input are all dropped — never sent verbatim.
+        Assert.Empty(OutboxPayload.BuildAll("hello there"));
+        Assert.Empty(OutboxPayload.BuildAll("[1,2]"));
+        Assert.Empty(OutboxPayload.BuildAll("{\"type\":\"result\",\"body\":\"x\"}"));
+        Assert.Empty(OutboxPayload.BuildAll("{\"cmd\":\"chat\",\"text\":\"a\"}trailing garbage"));
+        Assert.Empty(OutboxPayload.BuildAll("{\"cmd\":\"chat\",\"text\":\"unterminated"));
+        Assert.Empty(OutboxPayload.BuildAll(
+            "{\"cmd\":\"chat\",\"text\":\"a\"}{\"cmd\":\"chat\",\"text\":\"b\"}trailing"));
+    }
+
+    [Fact]
+    public void Mixed_valid_and_nonsendable_value_drops_the_whole_line()
+    {
+        // A sendable envelope glued to a protocol object, an array, or another
+        // non-envelope yields zero frames. Sending the valid neighbor would
+        // break the fail-closed contract.
+        Assert.Empty(OutboxPayload.BuildAll(
+            "{\"cmd\":\"chat\",\"text\":\"a\"}{\"type\":\"result\",\"body\":\"x\"}"));
+        Assert.Empty(OutboxPayload.BuildAll(
+            "{\"type\":\"result\",\"body\":\"x\"}{\"cmd\":\"chat\",\"text\":\"a\"}"));
+        Assert.Empty(OutboxPayload.BuildAll(
+            "{\"cmd\":\"chat\",\"text\":\"a\"}[1,2]"));
+        Assert.Empty(OutboxPayload.BuildAll(
+            "{\"text\":\"hi\"} {\"nope\":true}"));
+    }
+
+    [Fact]
+    public void Dropped_line_diagnostic_is_length_only()
+    {
+        const string secret = "hunter2-session-token";
+        var line = "  {\"type\":\"result\",\"pass\":\"" + secret + "\",\"token\":\"eyJabc\"}  ";
+        var diag = LogRedaction.DroppedOutboxLine(line);
+
+        Assert.Equal($"outbox: dropped malformed line ({line.Trim().Length} chars)", diag);
+        Assert.DoesNotContain(secret, diag);
+        Assert.DoesNotContain("eyJabc", diag);
+        Assert.DoesNotContain("pass", diag);
+        Assert.DoesNotContain("token", diag);
+        Assert.DoesNotContain("result", diag);
+        Assert.DoesNotContain("{", diag);
     }
 }
 

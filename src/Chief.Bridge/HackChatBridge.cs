@@ -421,11 +421,21 @@ internal sealed class HackChatBridge
 
             foreach (var line in pending)
             {
-                var payload = OutboxPayload.Build(line.Text);
-                if (payload is not null)
+                var payloads = OutboxPayload.BuildAll(line.Text);
+                if (payloads.Count == 0 && line.Text.Trim().Length != 0)
+                {
+                    // Fail-closed: a malformed or mixed outbox line is dropped and logged, never
+                    // sent verbatim. The log is a character count only — the line can still hold
+                    // a pass or token. (2026-09-27: two envelopes concatenated on one line went
+                    // out as raw JSON under the bridge nick.)
+                    LogEvent("err", new JsonObject { ["error"] = LogRedaction.DroppedOutboxLine(line.Text) });
+                }
+
+                foreach (var payload in payloads)
                 {
                     // If this throws, the position hasn't moved past the line: the session ends and the
-                    // line is sent again on the next connection.
+                    // line is sent again on the next connection (a split line may resend an already-sent
+                    // part; duplicates are preferable to loss here, as before).
                     await SendAsync(ws, sendLock, payload, ct);
                     LogEvent("out", LogRedaction.Outbound(payload));
                 }

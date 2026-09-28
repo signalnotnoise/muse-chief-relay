@@ -141,6 +141,10 @@ Append one JSON object per line to `<base>/outbox.jsonl`, each exactly
 Or use the CLI: `Chief.Bridge say --config <path> <text>`. A running bridge
 sends new lines within about a second, once its join is confirmed. Lines
 written while the bridge process is stopped are not sent when it starts.
+A line that is not a sendable envelope is dropped, not broadcast as chat text.
+Several envelopes jammed onto one line (a missing newline) are sent separately
+only when every one of them is sendable; a mix is dropped whole. The error log
+records the character count, not the line.
 
 Reply when a message is addressed to you, asks you something, or a turn
 genuinely needs you: a task, a question, a review request, something only you
