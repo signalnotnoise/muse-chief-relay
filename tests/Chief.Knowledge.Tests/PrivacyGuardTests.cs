@@ -113,6 +113,100 @@ public class PrivacyGuardTests
     }
 
     [Fact]
+    public void Quoted_multi_word_assignment_with_a_short_first_token_fails_closed()
+    {
+        // The first word is under the minimum; the quoted span is not.
+        var shortFirst = string.Concat("\"pass", "word\": \"", "my secret\"");
+        var longFirst = string.Concat("\"pass", "word\": \"", "secret phrase\"");
+        var singleQuoted = string.Concat("pass", "word: '", "my secret", "'");
+        var token = string.Concat("\"api", "_key\": \"", "my secret\"");
+        var trip = string.Concat("\"trip_", "password\": \"", "my secret\"");
+
+        AssertKind(longFirst, "password");
+        AssertKind(shortFirst, "password");
+        AssertKind(singleQuoted, "password");
+        AssertKind(token, "token");
+        AssertKind(trip, "trip password");
+
+        var shortFound = PrivacyGuard.Scan("planted.md", shortFirst);
+        Assert.DoesNotContain(shortFound, f => f.Message.Contains("my secret"));
+
+        // The minimum still applies to the whole quoted span, and to an unquoted token.
+        Assert.Empty(PrivacyGuard.Scan("prose.md", string.Concat("\"pass", "word\": \"", "ab\"")));
+        Assert.Empty(PrivacyGuard.Scan("prose.md", string.Concat("pass", "word: ", "ab")));
+        Assert.Empty(PrivacyGuard.Scan("prose.md", string.Concat("\"to", "ken\": \"", "short\"")));
+
+        using var dir = new TempDir();
+        Fixtures.WriteNote(dir.Path, "leaked", shortFirst);
+        var stderr = new StringWriter();
+        var code = KnowledgeCli.Run(["check", "--knowledge", dir.Path], new StringWriter(), stderr);
+        Assert.Equal(1, code);
+        var report = stderr.ToString();
+        Assert.Contains("password", report, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("my secret", report);
+    }
+
+    [Fact]
+    public void A_secret_in_the_filename_or_path_fails_closed_when_the_body_is_clean()
+    {
+        const string clean = "This note body has nothing to hide.";
+        var keyId = string.Concat("AK", "IAIOSFODNN7EXAMPLE");
+        var prefixed = string.Concat("ghp_", "abcdefghijklmnopqrst");
+        var assigned = string.Concat("pass", "word=", "notreal1") + ".md";
+
+        var byName = PrivacyGuard.Scan(keyId + ".md", clean);
+        Assert.NotEmpty(byName);
+        Assert.Contains(byName, f => f.Message.StartsWith("path:", StringComparison.Ordinal) && f.Message.Contains("API token", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(byName, f => f.Message.Contains("EXAMPLE"));
+
+        var bySegment = PrivacyGuard.Scan("nested/" + prefixed + "/note.md", clean);
+        Assert.Contains(bySegment, f => f.Message.StartsWith("path:", StringComparison.Ordinal) && f.Message.Contains("API token", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(bySegment, f => f.Message.Contains(prefixed));
+
+        var bySeparator = PrivacyGuard.Scan("nested\\" + prefixed + "\\note.md", clean);
+        Assert.Contains(bySeparator, f => f.Message.StartsWith("path:", StringComparison.Ordinal) && f.Message.Contains("API token", StringComparison.OrdinalIgnoreCase));
+
+        var byAssignment = PrivacyGuard.Scan(assigned, clean);
+        Assert.Contains(byAssignment, f => f.Message.StartsWith("path:", StringComparison.Ordinal) && f.Message.Contains("password", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(byAssignment, f => f.Message.Contains("notreal1"));
+
+        Assert.Empty(PrivacyGuard.Scan("my-password-notes.md", clean));
+        Assert.Empty(PrivacyGuard.Scan("clean-note.md", clean));
+
+        var rawName = "room-channel";
+        var raw = PrivacyGuard.Scan("boards/" + rawName + ".jsonl", clean);
+        Assert.Contains(raw, f => f.Message.StartsWith("path:", StringComparison.Ordinal) && f.Message.Contains("raw channel", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(raw, f => f.Message.Contains(rawName));
+
+        var hash = new string('a', 64);
+        Assert.Empty(PrivacyGuard.Scan("boards/" + hash + ".jsonl", clean));
+        Assert.Empty(PrivacyGuard.Scan("boards/<sha256(trimmed channel)>.jsonl", clean));
+
+        using var dir = new TempDir();
+        File.WriteAllText(dir.File(keyId + ".md"), """
+            ---
+            id: clean-note
+            title: Clean
+            summary: Nothing planted in the body.
+            tags: [privacy]
+            source: alex
+            authors: [chief]
+            created: 2026-09-28
+            visibility: public
+            ---
+
+            This note body has nothing to hide.
+            """);
+        var stderr = new StringWriter();
+        var code = KnowledgeCli.Run(["check", "--knowledge", dir.Path], new StringWriter(), stderr);
+        Assert.Equal(1, code);
+        var report = stderr.ToString();
+        Assert.Contains("path:", report, StringComparison.Ordinal);
+        Assert.Contains("API token", report, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("refused", report, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void A_private_note_refuses_the_index_and_check_writes_nothing()
     {
         using var dir = new TempDir();

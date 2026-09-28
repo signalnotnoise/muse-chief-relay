@@ -91,9 +91,9 @@ A newer note and a note flagged `important` get a small multiplier on the fused 
 
 ## Privacy
 
-`check` and `rebuild` fail closed. If any note is marked anything but `public`, or if any file under `knowledge/` looks like it holds a bearer key, a password assignment, a token, a session secret, a trip password, or a URL with credentials, the command exits 1 and does not write an index. A board path in a note fails the same way unless it is `boards/<sha256(trimmed channel)>.jsonl` or `boards/` plus 64 lowercase hex characters plus `.jsonl`. A failed rebuild leaves the previous index in place.
+`check` and `rebuild` fail closed. If any note is marked anything but `public`, or if any file under `knowledge/` looks like it holds a bearer key, a password assignment, a token, a session secret, a trip password, or a URL with credentials, the command exits 1 and does not write an index. Those same patterns also run on the note's relative path, so a secret in a file name or a directory segment is refused even when the body is clean. A board path in a note, or in that relative path, fails the same way unless it is `boards/<sha256(trimmed channel)>.jsonl` or `boards/` plus 64 lowercase hex characters plus `.jsonl`. A failed rebuild leaves the previous index in place.
 
-An assignment is the same secret in plain form (`password` then a colon), JSON form (a quoted `password` or `api_key` before a colon), or a prefixed name (`my_password`). A word that only contains those letters, such as compass or bypass, is not an assignment.
+An assignment is the same secret in plain form (`password` then a colon), JSON form (a quoted `password` or `api_key` before a colon), or a prefixed name (`my_password`). A quoted value is the entire span inside the quotes. The length minimum applies to that whole span, so a short first word does not hide the rest. An unquoted value still ends at the first space. A word that only contains those letters, such as compass or bypass, is not an assignment.
 
 Sensitive notes belong in a separate local-only store outside the repo, for example `~/.local/share/muse-chief-relay/private-knowledge/`. This tool never reads or writes that directory. Do not copy it into `knowledge/`, and do not point `--knowledge` at it and then commit the result.
 
