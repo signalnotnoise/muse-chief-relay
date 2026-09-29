@@ -110,6 +110,7 @@ public static class NoteLoader
         var privacy = new List<Issue>();
         var warnings = new List<Issue>();
         var notes = new List<NoteDocument>();
+        var sensitivePaths = new HashSet<string>(StringComparer.Ordinal);
 
         if (!Directory.Exists(knowledgeDir))
         {
@@ -124,7 +125,7 @@ public static class NoteLoader
                 continue;
             if (rel is "README.md")
             {
-                ScanFile(path, rel, privacy);
+                ScanFile(path, rel, privacy, sensitivePaths);
                 continue;
             }
 
@@ -132,14 +133,14 @@ public static class NoteLoader
             if (top.StartsWith('.'))
             {
                 validation.Add(new Issue(rel, "unexpected hidden file under knowledge/"));
-                ScanFile(path, rel, privacy);
+                ScanFile(path, rel, privacy, sensitivePaths);
                 continue;
             }
 
             if (!rel.EndsWith(".md", StringComparison.Ordinal) || rel.Contains(Path.DirectorySeparatorChar) || rel.Contains(Path.AltDirectorySeparatorChar))
             {
                 validation.Add(new Issue(rel, "only README.md and one <id>.md per note belong under knowledge/"));
-                ScanFile(path, rel, privacy);
+                ScanFile(path, rel, privacy, sensitivePaths);
                 continue;
             }
 
@@ -150,11 +151,12 @@ public static class NoteLoader
             }
             catch (DecoderFallbackException)
             {
+                Absorb(rel, "", privacy, sensitivePaths);
                 privacy.Add(new Issue(rel, "not valid UTF-8; refusing to index"));
                 continue;
             }
 
-            privacy.AddRange(PrivacyGuard.Scan(rel, text));
+            var found = Absorb(rel, text, privacy, sensitivePaths);
             if (!TryParse(rel, text, out var note, out var errors))
             {
                 validation.AddRange(errors);
@@ -168,7 +170,7 @@ public static class NoteLoader
             // This catches a non-public value the line regex did not (for example
             // one with an internal space). A missing value is a validation error.
             if (!string.Equals(note.Visibility, "public", StringComparison.Ordinal)
-                && !privacy.Exists(issue => issue.Path == rel && issue.Message.Contains("visibility is ", StringComparison.Ordinal)))
+                && !found.Any(issue => issue.Message.Contains("visibility is ", StringComparison.Ordinal)))
                 privacy.Add(new Issue(rel, "visibility is not public"));
 
             notes.Add(note);
@@ -192,6 +194,12 @@ public static class NoteLoader
 
         if (FindCycle(notes) is { } cycle)
             validation.Add(new Issue(cycle, "supersedes cycle; those notes would hide each other"));
+
+        // A path finding means the relative path is itself a secret. Validation
+        // and other diagnostics for that file must not print it either.
+        RedactSensitivePaths(privacy, sensitivePaths);
+        RedactSensitivePaths(validation, sensitivePaths);
+        RedactSensitivePaths(warnings, sensitivePaths);
 
         return new Corpus
         {
@@ -434,19 +442,37 @@ public static class NoteLoader
         return uri.Scheme == Uri.UriSchemeHttps && string.IsNullOrEmpty(uri.UserInfo);
     }
 
-    private static void ScanFile(string path, string rel, List<Issue> privacy)
+    private static void ScanFile(string path, string rel, List<Issue> privacy, HashSet<string> sensitivePaths)
     {
-        string text;
         try
         {
-            text = ReadUtf8(path);
+            Absorb(rel, ReadUtf8(path), privacy, sensitivePaths);
         }
         catch (DecoderFallbackException)
         {
+            Absorb(rel, "", privacy, sensitivePaths);
             privacy.Add(new Issue(rel, "not valid UTF-8; refusing to index"));
-            return;
         }
-        privacy.AddRange(PrivacyGuard.Scan(rel, text));
+    }
+
+    private static IReadOnlyList<Issue> Absorb(string rel, string text, List<Issue> privacy, HashSet<string> sensitivePaths)
+    {
+        var found = PrivacyGuard.Scan(rel, text);
+        privacy.AddRange(found);
+        if (found.Any(i => i.Message.StartsWith("path:", StringComparison.Ordinal)))
+            sensitivePaths.Add(rel);
+        return found;
+    }
+
+    private static void RedactSensitivePaths(List<Issue> issues, HashSet<string> sensitivePaths)
+    {
+        if (sensitivePaths.Count == 0)
+            return;
+        for (var i = 0; i < issues.Count; i++)
+        {
+            if (sensitivePaths.Contains(issues[i].Path))
+                issues[i] = new Issue(PrivacyGuard.RedactedPath, issues[i].Message);
+        }
     }
 
     private static string ReadUtf8(string path) => Utf8.GetString(File.ReadAllBytes(path));

@@ -361,7 +361,7 @@ dotnet run --project src/Chief.Knowledge -- rebuild
 dotnet run --project src/Chief.Knowledge -- search "reconnect" --tag bridge
 ```
 
-Write a note on every merge, on every decision made in the room, and whenever Alex says "remember this". Both chief and Fuse write them. The folder is public: `check` fails closed on a private note or an obvious secret, including a JSON key or a prefixed name such as `my_password`, and a channel name does not belong in the repo. How to write one, and where sensitive notes go instead, is [knowledge/README.md](knowledge/README.md).
+Write a note on every merge, on every decision made in the room, and whenever Alex says "remember this". Both chief and Fuse write them. The folder is public: `check` fails closed on a private note or an obvious secret, including a JSON key or a prefixed name such as `my_password`. A quoted value is read in full, so a short first word does not hide the rest, and a backslash escapes the next character so an escaped quote does not end the value early. The file name and path are scanned with the same patterns. When the path itself matches, the report says `[redacted-path]` instead of copying that path. A channel name does not belong in the repo. How to write one, and where sensitive notes go instead, is [knowledge/README.md](knowledge/README.md).
 
 ## Lesson outline coach
 
