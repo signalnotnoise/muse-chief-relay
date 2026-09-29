@@ -1,0 +1,96 @@
+# Publishes GitHub Pages from an Actions artifact.
+# The Muse build inlines the VITE_WATCH_CHANNEL repository secret.
+# That build is not committed. docs/muse/ on main stays the unconfigured fallback.
+#
+# Repository Settings → Pages → Build and deployment → Source must be
+# "GitHub Actions". Until that switch, deploy-pages cannot publish and the
+# live site stays on the legacy main /docs branch build.
+
+name: Deploy GitHub Pages
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deployment at a time. Do not cancel an in-progress production deploy.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/muse/package-lock.json
+
+      - name: Install Muse dependencies
+        working-directory: web/muse
+        run: npm ci
+
+      - name: Stage docs without the committed Muse build
+        run: |
+          site="${RUNNER_TEMP}/pages"
+          rm -rf "$site"
+          mkdir -p "$site"
+          cp -a docs/. "$site/"
+          rm -rf "$site/muse"
+
+      - name: Build Muse with the watch channel
+        working-directory: web/muse
+        env:
+          VITE_WATCH_CHANNEL: ${{ secrets.VITE_WATCH_CHANNEL }}
+          MUSE_BUILD_OUTDIR: ${{ runner.temp }}/pages/muse
+        run: |
+          # Presence check only. Do not echo the secret.
+          if [ -z "$(printf '%s' "$VITE_WATCH_CHANNEL" | tr -d '[:space:]')" ]; then
+            echo "::error::VITE_WATCH_CHANNEL secret is empty or unset"
+            exit 1
+          fi
+          npm run build
+          python3 -c 'import os, sys; from pathlib import Path; root = Path(os.environ["MUSE_BUILD_OUTDIR"]); blob = "".join(p.read_text(encoding="utf-8", errors="replace") for p in root.rglob("*.js")); channel = os.environ["VITE_WATCH_CHANNEL"].strip(); sys.exit(0 if channel and channel in blob else "Muse build did not inline VITE_WATCH_CHANNEL")'
+          echo "Muse build inlined VITE_WATCH_CHANNEL"
+
+      - name: Confirm the checkout was not rewritten
+        run: |
+          if [ -n "$(git status --porcelain -- docs/muse)" ]; then
+            echo "::error::The Muse build wrote into docs/muse. Refusing to keep a secret-bearing bundle in the checkout."
+            git status --porcelain -- docs/muse
+            exit 1
+          fi
+          test -f "${RUNNER_TEMP}/pages/index.html"
+          test -f "${RUNNER_TEMP}/pages/.nojekyll"
+          test -d "${RUNNER_TEMP}/pages/status"
+          test -f "${RUNNER_TEMP}/pages/muse/index.html"
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ${{ runner.temp }}/pages
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5

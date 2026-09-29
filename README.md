@@ -27,7 +27,7 @@ Muse (browser)  ──WSS──►  hack.chat  ◄──WSS──  Chief.Bridge 
 ```
 
 - **Chief** reads `config.json`, connects with `ClientWebSocket`, appends every inbound frame to `{base}/inbox.jsonl`, watches `{base}/outbox.jsonl` for outbound lines, and writes `{base}/state.json`.
-- **Muse** is a Vue 3 app styled with Tailwind. Source is `web/muse/` (Vite). The page you open is the static build in `docs/muse/`. It joins the same channel and can send plain chat or protocol JSON (task / opinion / result). The site has three sections — Chat (`#/`), Board (`#/board`), and Watch live (`#/watch`) — behind one shared header. The Board tab shows that channel's room board read-only (`boards/<sha256(channel)>.jsonl`).
+- **Muse** is a Vue 3 app styled with Tailwind. Source is `web/muse/` (Vite). The page you open locally is the static build in `docs/muse/`. GitHub Pages serves an Actions build of that same app (see Quick start). It joins the same channel and can send plain chat or protocol JSON (task / opinion / result). The site has three sections — Chat (`#/`), Board (`#/board`), and Watch live (`#/watch`) — behind one shared header. The Board tab shows that channel's room board read-only (`boards/<sha256(channel)>.jsonl`).
 - **Status view** (optional): `tools/status.py` turns an inbox log into `docs/status.json`, and `docs/status/` renders it. Publishing fails closed (see below).
 
 Wire format: [docs/protocol.md](docs/protocol.md).
@@ -259,7 +259,7 @@ python3 tools/test_status.py        # unit tests
 
 ## Quick start — Muse (browser)
 
-The Muse client is a Vue 3 single-page app. Vite is the dev server and the production build. Tailwind CSS styles the page (`@tailwindcss/vite` in `web/muse/vite.config.mjs`, theme tokens in `web/muse/src/styles.css`). Source lives in `web/muse/`. `npm run build` writes a static site to `docs/muse/`, which is what GitHub Pages serves (the landing page links to `muse/`). There is no Pages build workflow in this repo, so commit that output with the source change.
+The Muse client is a Vue 3 single-page app. Vite is the dev server and the production build. Tailwind CSS styles the page (`@tailwindcss/vite` in `web/muse/vite.config.mjs`, theme tokens in `web/muse/src/styles.css`). Source lives in `web/muse/`. `npm run build` writes a static site to `docs/muse/` unless `MUSE_BUILD_OUTDIR` is set. Commit that output with the client change, and build it with `VITE_WATCH_CHANNEL` unset. That committed copy is the unconfigured fallback the tests check. The live site is built by `.github/workflows/pages.yml`: it passes the `VITE_WATCH_CHANNEL` repository secret into the Muse build, overlays that output on the rest of `docs/`, and deploys the result with GitHub Pages actions. The landing page still links to `muse/`.
 
 Requires [Node.js 20+](https://nodejs.org/) (22 works). `web/muse/package.json` is not `"type": "module"`, so `web/muse/board.js` stays the CommonJS reader the node tests `require`. The Vue source is ESM via `web/muse/src/package.json`. From the repo root:
 
@@ -267,7 +267,7 @@ Requires [Node.js 20+](https://nodejs.org/) (22 works). `web/muse/package.json` 
 cd web/muse
 npm install
 npm run dev       # Vite dev server, http://localhost:5173/
-npm run build     # static files → docs/muse/
+npm run build     # static files → docs/muse/ (leave VITE_WATCH_CHANNEL unset when committing)
 npm run preview   # serve the build locally
 ```
 
@@ -287,7 +287,7 @@ VITE_WATCH_CHANNEL=your-channel-name npm run dev
 VITE_WATCH_CHANNEL=your-channel-name npm run build
 ```
 
-For GitHub Pages, set that name as an Actions secret or variable and pass it into the Pages build. The committed `docs/muse/` bundle is built with the variable unset, so it shows "watch channel not configured" and does not contain a channel name. `#/watchdog` is still the interactive client. The watch page scrolls inside its own root. It shows live only after hack.chat's `onlineSet`; a warning before that drops the socket and retries, and a taken spectator nick is replaced.
+GitHub Pages reads the name from the `VITE_WATCH_CHANNEL` repository secret in `.github/workflows/pages.yml`. The workflow fails if that secret is empty, and it does not print the value. The committed `docs/muse/` bundle is still built with the variable unset, so it shows "watch channel not configured" and does not contain a channel name. `node --test tests/muse/` checks that committed copy. A local build with the variable set writes the name into `docs/muse/` unless `MUSE_BUILD_OUTDIR` points somewhere else; do not commit that output. `#/watchdog` is still the interactive client. The watch page scrolls inside its own root. It shows live only after hack.chat's `onlineSet`; a warning before that drops the socket and retries, and a taken spectator nick is replaced.
 
 Type the same channel as Chief (the `channel` in its `config.json`; examples here use `your-channel-name`). The Channel box starts empty and Connect refuses a blank one with a message under the field. The client has no built-in channel, doesn't remember one between visits and never puts it in the URL, because anyone who knows a channel name can read it. The nick defaults to `Muse`. The send box stays pinned to the bottom of the chat panel; the transcript scrolls inside it. A new message scrolls into view only when you were already near the bottom, so reading history does not jump. Sending a message does scroll to the latest line.
 
@@ -304,12 +304,12 @@ Nothing is fetched until you connect. Before that, the panel says to join a chan
 
 A last line that parses as a valid record is shown even when the file does not end in a newline. An unterminated last line that is not a valid record is ignored. The page never writes the file. Reload fetches again; it does not append. A missing file means no board has been committed for that channel yet. Without `crypto.subtle` (a page that is not HTTPS and not localhost) the board cannot be looked up; chat still works.
 
-Rebuild the page GitHub Pages serves after changing the client, and commit the result:
+After a client change, rebuild the committed fallback with `VITE_WATCH_CHANNEL` unset and commit it. The live site picks up the source on the next push to `main`, once the repository Pages source is GitHub Actions (the workflow builds Muse with the repository secret into a temp directory and does not commit that output).
 
 ```bash
 cd web/muse
 npm install
-npm run build    # writes docs/muse/
+npm run build    # writes docs/muse/ (unconfigured fallback)
 ```
 
 ### Getting a trip in Muse (optional password)
@@ -397,7 +397,8 @@ Board task 2 is that product card, owner `chief`, state `claimed`. `boards/schem
 | `docs/protocol.md` | Wire protocol |
 | `docs/security.md` | Trust model: trips, pass handling, what needs a human |
 | `docs/index.html` | Landing page (GitHub Pages root) |
-| `docs/muse/` | Built Muse client, served by GitHub Pages. Produced by `npm run build` in `web/muse/` |
+| `.github/workflows/pages.yml` | GitHub Pages build. Inlines `VITE_WATCH_CHANNEL` from the repository secret and deploys `docs/` with a fresh `muse/` |
+| `docs/muse/` | Built Muse client. The committed copy is the unconfigured fallback (`VITE_WATCH_CHANNEL` unset) that the tests check. Pages serves the Actions build |
 | `docs/status/` | Status panel (renders `docs/status.json`; `?demo` for the fixture) |
 | `tools/status.py` | Fail-closed status generator (+ `test_status.py`) |
 | `config.example.json` | Config template (see Configuration) |

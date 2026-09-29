@@ -76,13 +76,18 @@ channel names out of public pages, examples, issues and screenshots, and use a p
 `your-channel-name`.
 
 The read-only spectator page at `muse/#/watch` does not commit a channel name either. It reads
-`VITE_WATCH_CHANNEL` from the environment when the client is built (a GitHub Actions secret or
-variable for a Pages build). The copy committed under `docs/muse/` is built with that variable
-unset and shows "watch channel not configured". `tests/muse/board.test.js` still rejects every
-tracked token that hashes to a board filename. There is no exception.
+`VITE_WATCH_CHANNEL` from the environment when the client is built. Locally that is the shell.
+On GitHub Pages, `.github/workflows/pages.yml` passes the `VITE_WATCH_CHANNEL` repository secret
+into `npm run build` and deploys that output as a Pages artifact. The workflow fails if the
+secret is empty, and it does not print the value. The deployed Pages JavaScript contains
+that name, because that is how the spectator page joins. The git tree does not. The copy
+committed under `docs/muse/` is still built with the variable unset and shows "watch channel
+not configured". That committed copy is
+what the tests check. `tests/muse/board.test.js` still rejects every tracked token that hashes
+to a board filename. There is no exception.
 
-Board filenames are the SHA-256 of the channel, so the repo and Pages don't contain private
-channel names. A hash of a guessable name can be brute-forced, so pick a high-entropy channel. A
+Board filenames are the SHA-256 of the channel, so those files don't contain private channel
+names. A hash of a guessable name can be brute-forced, so pick a high-entropy channel. A
 name already published (git history, old PRs, old Pages builds) stays known, and rotating the
 channel is the only fix. The Vue client hashes the channel with Web Crypto after Connect and
 renders the board as text. A missing board, a failed fetch, or a page without `crypto.subtle`

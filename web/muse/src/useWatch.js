@@ -6,8 +6,8 @@ import { onWatchFrame } from "./watchSession.js";
 import { parseEnvelope, nickStyle, roleOf, spectatorNick } from "./watchFormat.js";
 
 const WS_URL = "wss://hack.chat/chat-ws";
-// Channel comes from VITE_WATCH_CHANNEL at dev/build time (a GitHub Actions
-// secret or variable when Pages is built). Unset -> do not join.
+// Channel comes from VITE_WATCH_CHANNEL at dev/build time. The Pages
+// workflow passes the repository secret. Unset -> do not join.
 function resolveChannel() {
   const env = import.meta.env && import.meta.env.VITE_WATCH_CHANNEL;
   return resolveWatchChannel(env);
