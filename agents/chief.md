@@ -17,9 +17,10 @@ same loop.
 - **Runtime files** live under the bridge's `base` dir (default: the config
   file's directory): `inbox.jsonl` (every frame in and out), `outbox.jsonl`
   (lines waiting to send), `state.json` (connection state),
-  `.inbox_watch.offset` (where `watch` stopped), and `.hook.offset` /
+  `.inbox_watch.offset` (where `watch` stopped), `.hook.offset` /
   `.hook.offset.status` (where the hook poller stopped, and its heartbeat and
-  last fire).
+  last fire), and `hook/reply.lock` (the decide-and-reply flock; see
+  "One reply at a time").
 
 The bridge reconnects by itself. A dropped hack.chat socket, a nick that is still
 taken, a rate limit, or a DNS/TLS failure does not mean the process exited: it
@@ -70,8 +71,8 @@ hack.chat ─► Chief.Bridge (always on) ─► inbox.jsonl ─► Chief.Bridge
    payload is only the wake-up call. When `hook.trips` is empty it includes
    untrusted senders, so a sender showing up there is not a trust decision.
    An empty array means another wake already handled it.
-5. **Reply** with `say` or the outbox (below), then stop. The next chat wakes
-   you again.
+5. **Reply** with `say` or the outbox (below), inside the `hook/reply.lock`
+   flock, then stop. The next chat wakes you again.
 
 Fuse does the same with its own poll script: every 5 s it checks the inbox and
 wakes a fresh, disposable worker per inbound chat, and its replies usually
@@ -110,7 +111,8 @@ Chief.Bridge watch --config <path>
 - Default offset file: `<base>/.inbox_watch.offset`. Use `--state <file>` to
   keep a separate one. Run one drain at a time per offset file: two drains on
   one offset file can both return the same chats, and you answer twice (this
-  happened on 2026-09-24).
+  happened on 2026-09-24). The reply lock below is what keeps the second
+  drain from sending.
 
 ### Is the wake-up path working?
 
@@ -150,6 +152,97 @@ Reply when a message is addressed to you, asks you something, or a turn
 genuinely needs you: a task, a question, a review request, something only you
 can do from your machine. Don't narrate, don't acknowledge every message, and
 don't fill silence.
+
+### One reply at a time (`reply.lock`)
+
+Two wakes can drain the same chats. Before you decide and send, take an
+exclusive `flock` on `<base>/hook/reply.lock` so only one of them replies.
+A deployment may use another path under `base` that still ends in
+`reply.lock`; it is the same lock. The bridge does not open this file. It is
+not a config field. The hook poller's `<state>.lock` is a different file.
+
+The lock is on the open file description. **Restart the bridge only from a
+shell that does not hold that flock.** `hc restart`, `dotnet Chief.Bridge.dll`,
+and `chief-bridge`, started while the descriptor is open, inherit it. The
+bridge then holds WRITE until it exits, and later `flock` calls block.
+`status` can still show the pid running and connected. Production recovered
+when the bridge was restarted from a shell outside `flock`.
+
+This repo does not ship `hc`. A local `hc restart` is an operator wrapper.
+The close loop below belongs in that wrapper, before it spawns the bridge.
+The same procedure is in the README under "Reply lock".
+
+Take the lock with a timeout. `N` is seconds. A wake uses a short wait (for
+example 5) so a busy lock fails instead of sitting forever:
+
+```bash
+LOCK="<base>/hook/reply.lock"
+flock -w 5 -- "$LOCK" -c '…decide, then say or append the outbox line…'
+```
+
+Exit 0 means you held the lock and finished. Exit 1 means the wait hit the
+timeout and the lock is still busy.
+
+When the lock is busy, check `<base>/inbox.jsonl` instead of sending without
+the lock and instead of waiting with no `-w`. An agent reply is one JSON line
+with `"dir":"out"`, `msg.cmd` of `chat`, and no `"auto":"ack"` (that row is
+the bridge's instant acknowledgement). Inbound chats are `"dir":"in"`.
+
+- An agent-reply row already logged after the inbound chats this wake is
+  answering means the reply is done. Stop. Do not `say`, and do not append
+  another outbox line.
+- No such row means the holder has not sent yet. This wake still does not
+  send. The holder sends, or a later wake sees the reply in the inbox.
+
+If every `flock -w` times out, read the bridge pid from `status` (`pid:`
+line) and see whether that process has the lock open:
+
+```bash
+pid=12345   # the pid from status
+for fdpath in /proc/"$pid"/fd/*; do
+  target=$(readlink -- "$fdpath" 2>/dev/null) || continue
+  case $target in
+    */reply.lock|reply.lock|*/reply.lock\ \(deleted\)|reply.lock\ \(deleted\))
+      echo "bridge holds $target" ;;
+  esac
+done
+```
+
+A path ending in `hook/reply.lock` matches `*/reply.lock`. When the bridge
+holds it, SIGTERM that pid from a shell that is not inside `flock`, wait
+until `status` shows the pid is not running, and start the bridge there:
+
+```bash
+dotnet /path/to/publish/Chief.Bridge.dll --config /path/to/config.json
+# or: chief-bridge --config /path/to/config.json
+```
+
+Before a local wrapper spawns the bridge, close inherited descriptors whose
+path ends in `reply.lock` (bash). The child then cannot keep WRITE after the
+wrapper exits:
+
+```bash
+close_inherited_reply_locks() {
+  local fdpath fd target
+  for fdpath in /proc/self/fd/*; do
+    fd=${fdpath##*/}
+    case $fd in
+      ''|*[!0-9]*) continue ;;
+    esac
+    [ "$fd" -le 2 ] && continue
+    target=$(readlink -- "$fdpath" 2>/dev/null) || continue
+    case $target in
+      *" (deleted)") target=${target% \(deleted\)} ;;
+    esac
+    case $target in
+      */reply.lock|reply.lock) eval "exec ${fd}>&-" ;;
+    esac
+  done
+}
+```
+
+Call that, then start the bridge. Leave the lock file uncommitted. Keep
+`state.json` and inbox lines out of chat and commits.
 
 ### The bridge's instant acknowledgement
 
@@ -253,8 +346,8 @@ The board schema has no in-progress state and no subtasks. Task 2 stays `claimed
 ## Safety
 
 - Runtime files (`inbox.jsonl`, `outbox.jsonl`, `state.json`,
-  `.inbox_watch.offset`, `.hook.offset*`) are gitignored. Never commit them: they can contain
-  session data.
+  `.inbox_watch.offset`, `.hook.offset*`, `reply.lock`) are gitignored. Never commit them: they can contain
+  session data. `reply.lock` is the decide-and-reply flock (`hook/reply.lock` under `base`).
 - `docs/status.json` is a public artifact even when empty. Don't commit a real
   one without Alex's OK; the repo ships the fixture only.
 - Alex's private knowledge graph (Voizle) is not in this repo; see `docs/security.md`.

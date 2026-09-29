@@ -6,6 +6,9 @@ unread.jsonl
 state.json
 .inbox_watch.offset*
 .hook.offset*
+# Decide-and-reply exclusive lock (any directory, including hook/reply.lock).
+# A bridge process must not inherit this descriptor. See README, "Reply lock".
+reply.lock
 bridge.pid
 bridge.stdout
 bridge.stderr

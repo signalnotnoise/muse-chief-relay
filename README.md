@@ -91,7 +91,7 @@ Config resolution:
 - An explicit path, or `MUSE_RELAY_CONFIG`, that points at a missing file is an error (exit code 2). It never falls through to another file.
 - `say` prints the outbox it wrote to, and `status` prints the config it read, so you can see which deployment you touched.
 
-Runtime files (`inbox.jsonl`, `outbox.jsonl`, `unread.jsonl`, `state.json`) live under `base` from config (default: directory of the config file). **Do not commit them.**
+Runtime files (`inbox.jsonl`, `outbox.jsonl`, `unread.jsonl`, `state.json`, and the decide-and-reply lock `hook/reply.lock`) live under `base` from config (default: directory of the config file). **Do not commit them.**
 
 ### How the bridge behaves
 
@@ -126,8 +126,79 @@ chief-bridge watch --config /path/to/config.json --wait --timeout 1800   # block
 - **`--wait`** blocks until at least one new chat qualifies. It wakes on file-system events and polls every second as a fallback. Then it prints the array and exits 0. With `--timeout <seconds>` (0 to 922337203685) it gives up, prints `[]` and exits **3**. On SIGTERM or SIGINT it prints `[]` and exits 143 or 130. Usage and config errors exit 2, as does a one-shot run whose inbox can't be read. A missing inbox is an empty poll; a path that is there but isn't a readable file (a directory, or no permission) is exit 2.
 - **Transient read failures:** if a poll can't read the inbox (a torn read, a locked file), `watch --wait` doesn't die: it records a warning, printed on stderr when the wait ends, and retries on the next loop.
 - **Ways to run it.** An agent woken by the webhook poller (below) runs plain `watch` to drain everything new, which is what chief does now. A scheduler can poll `watch` every few seconds. An agent that is woken when a background command finishes can run `watch --wait` in the background and start it again after each exit, but chief found that wake unreliable (see `agents/chief.md`). Messages that arrive in between are waiting for the next run.
-- **Replying:** use `say` (`chief-bridge say --config <path> <text>`), or append `{"cmd":"chat","text":"..."}` lines to `outbox.jsonl`.
+- **Replying:** use `say` (`chief-bridge say --config <path> <text>`), or append `{"cmd":"chat","text":"..."}` lines to `outbox.jsonl`. One wake at a time holds `hook/reply.lock` while it decides (see "Reply lock" below).
 - `watch` only reads `inbox.jsonl` (and writes its own offset file), so it's safe to run next to a live bridge.
+
+### Reply lock (`hook/reply.lock`)
+
+Decide-and-reply takes an exclusive [`flock`](https://man7.org/linux/man-pages/man1/flock.1.html) on `<base>/hook/reply.lock` so two wakes cannot both send a channel reply. A deployment may use another path under `base` that still ends in `reply.lock`; it is the same lock. The bridge process does not open this file, and it is not a `config.json` field. `Chief.Bridge hook`'s `<state>.lock` is a different file (one poller per offset). The same rules are in [`agents/chief.md`](agents/chief.md) and [`knowledge/reply-lock-deadlock.md`](knowledge/reply-lock-deadlock.md).
+
+`flock` attaches the lock to the open file description. A long-lived bridge started while that description is open inherits the descriptor and holds WRITE until the bridge exits. Later `flock` calls block. That is what happens when the bridge is restarted from inside the lock (`hc restart`, `dotnet Chief.Bridge.dll`, or `chief-bridge`). `status` can still show the pid running and connected. Production recovered when the bridge was restarted from a shell that was not inside `flock`.
+
+This repo does not ship `hc`. The old `legacy/python/bin/hc` was removed with the Python bridge. A local `hc restart` is an operator wrapper around starting the bridge. Harden that wrapper with the close loop below, before it spawns the bridge.
+
+**Restart the bridge from a shell that does not hold the lock.**
+
+```bash
+dotnet /path/to/publish/Chief.Bridge.dll --config /path/to/config.json
+# or: chief-bridge --config /path/to/config.json
+```
+
+**Take the lock with a timeout.** `N` is seconds. A wake uses a short wait (for example 5) so a busy lock fails instead of sitting forever:
+
+```bash
+LOCK="<base>/hook/reply.lock"
+flock -w 5 -- "$LOCK" -c '…decide, then say or append the outbox line…'
+```
+
+`flock` exits 0 when it acquired the lock and the command finished. Exit 1 means the wait hit the timeout and the lock is still busy.
+
+**When the lock is busy, check the inbox for a reply that already went out.** Do that check instead of waiting with no `-w` and instead of sending without the lock.
+
+An agent reply in `<base>/inbox.jsonl` is one JSON line with `"dir":"out"`, `msg.cmd` equal to `chat`, and no `"auto":"ack"`. Rows with `"auto":"ack"` are the bridge's instant acknowledgement, not this wake's reply. Inbound chats are `"dir":"in"`.
+
+- An agent-reply row already logged after the inbound chats this wake is answering means the reply is done. Stop without `say` and without another outbox line.
+- No such row means the holder of the lock has not sent yet. This wake still does not send. The holder sends, or a later wake sees the reply in the inbox.
+
+**If the bridge already holds the lock,** `status` prints `pid: <pid> (running)`. Confirm the inherited descriptor, then SIGTERM that pid from a shell that is not inside `flock`, wait until `status` shows the pid is not running, and start the bridge with the command above:
+
+```bash
+pid=12345   # the pid from status
+for fdpath in /proc/"$pid"/fd/*; do
+  target=$(readlink -- "$fdpath" 2>/dev/null) || continue
+  case $target in
+    */reply.lock|reply.lock|*/reply.lock\ \(deleted\)|reply.lock\ \(deleted\))
+      echo "bridge holds $target" ;;
+  esac
+done
+kill "$pid"
+```
+
+A path ending in `hook/reply.lock` matches `*/reply.lock`.
+
+**Close inherited lock descriptors before spawning the bridge.** Put this bash function in the local restart wrapper, in the process that is about to spawn the bridge, and call it before the spawn. Closing the descriptor there means the child cannot keep WRITE after the wrapper exits:
+
+```bash
+close_inherited_reply_locks() {
+  local fdpath fd target
+  for fdpath in /proc/self/fd/*; do
+    fd=${fdpath##*/}
+    case $fd in
+      ''|*[!0-9]*) continue ;;
+    esac
+    [ "$fd" -le 2 ] && continue
+    target=$(readlink -- "$fdpath" 2>/dev/null) || continue
+    case $target in
+      *" (deleted)") target=${target% \(deleted\)} ;;
+    esac
+    case $target in
+      */reply.lock|reply.lock) eval "exec ${fd}>&-" ;;
+    esac
+  done
+}
+```
+
+The lock file is gitignored (`reply.lock` in any directory). Leave it uncommitted. Keep `state.json` and inbox lines out of chat and commits: `state.json` names the channel, and inbox lines can carry chat text.
 
 ### Webhook poller (`hook`)
 
@@ -404,7 +475,7 @@ Board task 2 is that product card, owner `chief`, state `claimed`. `boards/schem
 | `knowledge/` | Markdown notes (source of truth) and `knowledge/README.md` |
 | `tests/Chief.Bridge.Tests/` | xunit tests for the bridge's outbox reader, frame handling, config, CLI, inbox watcher, webhook poller (against a local HTTP listener) and auto-ack |
 | `tests/Chief.Knowledge.Tests/` | xunit tests for note validation, the privacy guard, FTS, hybrid ranking, and supersedes |
-| `agents/chief.md` | Relay instructions for the chief agent: watch loops, replying, protocol, authority, trust |
+| `agents/chief.md` | Relay instructions for the chief agent: watch loops, replying, `reply.lock`, protocol, authority, trust |
 | `agents/lesson-outline-coach.md` | Playbook for the Lesson outline coach: checklist, critique note, board task |
 | `docs/lesson-outline-coach/` | SME-gate checklist and the critique-note template |
 | `web/muse/` | Muse client source (Vue 3 + Vite + Tailwind). `board.js` is the read-only board reader. `npm install`, `npm run dev`, `npm run build` |
