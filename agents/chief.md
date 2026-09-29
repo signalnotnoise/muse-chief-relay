@@ -242,7 +242,7 @@ This follows `docs/security.md`:
 
 Decisions, bugs, fixes, and how-tos go into `knowledge/` as one small note each. Write one when a PR merges, when the room makes a decision, and when Alex says "remember this". Fuse writes notes too. Use `chief-knowledge add` (or `dotnet run --project src/Chief.Knowledge -- add`) and then `rebuild` before `search`. The rules, the front matter, and the privacy check are in `knowledge/README.md`.
 
-The folder is public. Never put a channel name, a trip password, a token, or anything but `visibility: public` in a note. A quoted JSON key or a prefixed name such as `my_password` is still a secret. A quoted value counts in full, and the file name and path are scanned with the same patterns. Sensitive notes stay in a directory outside the repo. `check` fails closed if one lands here anyway.
+The folder is public. Never put a channel name, a trip password, a token, or anything but `visibility: public` in a note. A quoted JSON key or a prefixed name such as `my_password` is still a secret. A quoted value counts in full, and a backslash escapes the next character so an escaped quote does not end it early. The file name and path are scanned with the same patterns. When the path itself matches, `check` prints `[redacted-path]` instead of that path. Sensitive notes stay in a directory outside the repo. `check` fails closed if one lands here anyway.
 
 ## Lesson outline coach
 
