@@ -8,3 +8,7 @@
 {"type":"task","id":3,"title":"Persist morning OSS brainstorm into knowledge note","owner":"chief","state":"done"}
 {"type":"task","id":4,"title":"Park medical track until privacy story","owner":"Alex","state":"blocked","blocked_on":"privacy design"}
 {"type":"task","id":5,"title":"3D asset-QA bot — SocialMgr promo clips only for now","owner":"SocialMgr","state":"open"}
+{"type":"decision","ts":1790676963,"decider":"Alex","decision":"Muse product backlog cards for workspaces, file/image send, and LaTeX files should be seeded on the room board","context":"Alex listed them in chat after asking to start adding things to the board."}
+{"type":"task","id":6,"title":"Workspaces — shared workspaces in Muse","owner":"Alex","state":"open"}
+{"type":"task","id":7,"title":"File and image send — upload/send files and images (app path, not hack.chat attachments)","owner":"Alex","state":"open"}
+{"type":"task","id":8,"title":"LaTeX files — support latex documents in Muse","owner":"Alex","state":"open"}

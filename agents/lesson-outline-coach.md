@@ -103,10 +103,10 @@ That close is a room decision. It needs the same trust as any other board claim.
 
 **For this outline,** append a new task. The id is one greater than the highest task id already in the file. Re-read the file on the branch you will push; if the board moved, pick the id again. Two writers who append the same id will leave only the later line.
 
-On the seeded board the highest task id is 5, so the next critique is 6. If the file has grown, use one past the highest id instead of copying 6.
+On the seeded board the highest task id is 8. Tasks 6–8 are open Muse product backlog cards (workspaces, file and image send, and LaTeX files), so the next critique is 9. If the file has grown, use one past the highest id instead of copying 9.
 
 ```json
-{"type":"task","id":6,"title":"Revise outline: equivalent fractions on a number line","owner":"chief","state":"open"}
+{"type":"task","id":9,"title":"Revise outline: equivalent fractions on a number line","owner":"chief","state":"open"}
 ```
 
 Choose the state from the verdict:

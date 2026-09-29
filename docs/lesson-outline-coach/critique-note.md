@@ -67,7 +67,7 @@ Repair these before teaching. Do not treat this as a replacement outline.
 
 Appended a new task. Did not rewrite earlier lines. Did not change task 2 (the product card stays `claimed` until the room appends a later `done` line).
 
-- Task id: 6
+- Task id: 9
 - Title: Revise outline: equivalent fractions on a number line
 - Owner: chief
 - State: open
@@ -84,7 +84,7 @@ Appended a new task. Did not rewrite earlier lines. Did not change task 2 (the p
 - The body uses the six headings in this specimen, in this order: Outline, Verdict, Gates, Critique, Left open, Board.
 - The Gates section has all twelve lines, in the checklist order, none omitted.
 - Quote the outline only in short phrases you need for a mark. Do not paste the whole outline.
-- The Board section names the task id and state you appended, or says the board was not updated and why. It does not name the channel. The only board path allowed in a note is `boards/<sha256(trimmed channel)>.jsonl`.
+- The Board section names the task id and state you appended, or says the board was not updated and why. It does not name the channel. The only board path allowed in a note is `boards/<sha256(trimmed channel)>.jsonl`. The specimen's task id 9 is an illustration: tasks 6–8 are Muse product backlog cards, and a real critique uses one past the highest id already in the file.
 
 Write it with the tool, from the repo root. The body file is the six headings only. The flags write the front matter. Do not put a second `---` block in the body file. Change the id, title, and summary for the outline you actually read; the values below only match this specimen.
 

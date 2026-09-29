@@ -148,7 +148,6 @@ test("the seeded room board keeps its first lines and records the classroom-kit 
   const parsed = board.parseBoard(text);
   assert.equal(parsed.skipped, 0);
   assert.equal(parsed.scratch.length, 0);
-  assert.equal(parsed.decisions.length, 4);
   assert.equal(parsed.decisions[0].decider, "Fuse");
   assert.equal(parsed.decisions[0].decision, "Room board created");
   assert.equal(parsed.decisions[1].decider, "Alex");
@@ -164,7 +163,23 @@ test("the seeded room board keeps its first lines and records the classroom-kit 
   assert.equal(parsed.decisions[3].context, "Alex authorized chief to pick the closest card.");
   assert.equal(parsed.decisions[2].ts, parsed.decisions[1].ts + 1);
   assert.equal(parsed.decisions[3].ts, parsed.decisions[2].ts + 1);
-  assert.equal(parsed.tasks.length, 5);
+  assert.equal(parsed.decisions.length, 5);
+  assert.equal(parsed.decisions[4].decider, "Alex");
+  assert.equal(
+    parsed.decisions[4].decision,
+    "Muse product backlog cards for workspaces, file/image send, and LaTeX files should be seeded on the room board"
+  );
+  assert.equal(
+    parsed.decisions[4].context,
+    "Alex listed them in chat after asking to start adding things to the board."
+  );
+  assert.equal(parsed.decisions[4].ts, 1790676963);
+  assert.equal(lines.length, 14);
+  assert.equal(
+    lines[9],
+    '{"type":"task","id":5,"title":"3D asset-QA bot — SocialMgr promo clips only for now","owner":"SocialMgr","state":"open"}'
+  );
+  assert.equal(parsed.tasks.length, 8);
   const byId = new Map(parsed.tasks.map((item) => [item.id, item]));
   assert.equal(byId.get(1).owner, "Alex");
   assert.equal(byId.get(1).state, "done");
@@ -182,6 +197,15 @@ test("the seeded room board keeps its first lines and records the classroom-kit 
   assert.equal(byId.get(5).owner, "SocialMgr");
   assert.equal(byId.get(5).state, "open");
   assert.equal(byId.get(5).title, "3D asset-QA bot — SocialMgr promo clips only for now");
+  assert.equal(byId.get(6).owner, "Alex");
+  assert.equal(byId.get(6).state, "open");
+  assert.equal(byId.get(6).title, "Workspaces — shared workspaces in Muse");
+  assert.equal(byId.get(7).owner, "Alex");
+  assert.equal(byId.get(7).state, "open");
+  assert.equal(byId.get(7).title, "File and image send — upload/send files and images (app path, not hack.chat attachments)");
+  assert.equal(byId.get(8).owner, "Alex");
+  assert.equal(byId.get(8).state, "open");
+  assert.equal(byId.get(8).title, "LaTeX files — support latex documents in Muse");
 });
 
 test("an unterminated last line is kept when it is a valid record and ignored when it is not", () => {
