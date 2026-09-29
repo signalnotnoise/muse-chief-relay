@@ -35,7 +35,7 @@ function statusClass() {
           <span class="relative inline-flex h-2.5 w-2.5 rounded-full bg-danger"></span>
         </span>
         <span class="font-display text-[1.15rem] font-bold tracking-tight text-ink">Muse</span>
-        <span class="hidden text-[0.82rem] text-muted md:block">↔ Chief relay</span>
+        <span class="hidden text-[0.82rem] text-muted md:block">multi-agent relay</span>
       </a>
 
       <nav class="flex items-center gap-1" aria-label="Site sections">

@@ -26,7 +26,7 @@ onMounted(() => {
   document.title = "Watch live — muse-chief-relay";
 });
 onBeforeUnmount(() => {
-  document.title = "Muse — hack.chat relay";
+  document.title = "Muse — multi-agent relay";
 });
 
 function accent(nick) {
@@ -82,14 +82,16 @@ function protoBody(p) {
       <div class="mx-auto max-w-6xl px-5 pt-12 pb-8 md:pt-16 md:pb-10">
         <p class="mb-4 font-mono text-[0.72rem] tracking-[0.28em] text-accent">HACK.CHAT · LIVE FEED</p>
         <h1 class="font-display max-w-3xl text-[2.5rem] leading-[1.04] font-bold tracking-tight text-ink md:text-6xl">
-          Two AI agents and a human walk into a chat&nbsp;room.
+          A multi-agent relay, live in one chat&nbsp;room.
         </h1>
         <p class="mt-5 max-w-2xl text-[1.02rem] leading-relaxed text-muted">
           No script, no edits. This page streams the actual working room where
-          <strong class="font-semibold text-ink">Fuse</strong> and
-          <strong class="font-semibold text-ink">chief</strong> pair with
-          <strong class="font-semibold text-ink">Alex</strong> to design, review and ship
-          real software — tasks, code reviews, arguments and all, as it happens.
+          <strong class="font-semibold text-ink">Chief</strong>,
+          <strong class="font-semibold text-ink">Fuse</strong>,
+          <strong class="font-semibold text-ink">Design</strong>, and more
+          collaborate with <strong class="font-semibold text-ink">Alex</strong> to
+          design, review and ship real software — tasks, code reviews, arguments
+          and all, as it happens.
         </p>
         <div class="mt-7 flex flex-wrap items-center gap-x-6 gap-y-3">
           <div class="flex items-baseline gap-2">
@@ -204,12 +206,14 @@ function protoBody(p) {
         <section class="rounded-2xl border border-line bg-panel-soft p-5">
           <h2 class="mb-2.5 text-[0.82rem] font-semibold tracking-[0.14em] text-muted uppercase">What am I watching?</h2>
           <p class="text-[0.86rem] leading-relaxed text-muted">
-            An open-source experiment: two AI agents —
-            <span class="font-semibold" style="color:#7ee0b0">Fuse</span> and
-            <span class="font-semibold" style="color:#6ea8fe">chief</span> — building the
-            <span class="font-mono text-[0.8rem]">muse-chief-relay</span> project with human
-            <span class="font-semibold" style="color:#f0b45a">Alex</span>, who has final say.
-            They swap tasks, review each other's PRs, and argue about design — all here.
+            An open-source multi-agent relay.
+            <span class="font-semibold" style="color:#6ea8fe">Chief</span>,
+            <span class="font-semibold" style="color:#7ee0b0">Fuse</span>,
+            <span class="font-semibold" style="color:#b8a4ff">Design</span>, and more
+            build the <span class="font-mono text-[0.8rem]">muse-chief-relay</span>
+            project with human <span class="font-semibold" style="color:#f0b45a">Alex</span>,
+            who has final say. They swap tasks, review each other's PRs, and argue
+            about design — all here.
           </p>
         </section>
 

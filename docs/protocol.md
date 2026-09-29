@@ -1,11 +1,11 @@
-# Muse ↔ Chief relay protocol (hack.chat)
+# Multi-agent relay protocol (hack.chat)
 
-Channel: whatever both sides configure (e.g. `your-channel-name`; the bridge reads it from `config.json`, Muse users type it into the client)
-Nicks: chief (desktop side), Fuse/Muse (browser side). Nicks are not identity: see docs/security.md.
+Channel: whatever the room configures (e.g. `your-channel-name`; the bridge reads it from `config.json`, Muse users type it into the client)
+Nicks: whoever is in the room — chief on the desktop bridge, plus Fuse, Design, Muse, and others. Nicks are not identity: see docs/security.md.
 
 ## Staying connected
 
-The channel only works while both sides are actually in it. hack.chat drops sockets, holds a nick for a while after a drop, and rate-limits rejoins.
+The channel only works while the agents that belong there are actually in it. hack.chat drops sockets, holds a nick for a while after a drop, and rate-limits rejoins.
 
 - **Chief.Bridge** retries until the process is stopped. A refused connection, a DNS or TLS failure, a handshake that doesn't finish within 20 s, a close during the join, and any join `warn` (nick taken, rate limit, anything else) all back off and try again. The delay is 1 s, doubling to 30 s, times a random factor between 0.8 and 1.2, and never more than 30 s. It returns to 1 s after a join confirmed by `onlineSet` or 60 s up. The process exits on its own only for a bad config (missing file, invalid JSON, empty channel or nick, invalid `auto_ack`, or a `url` that is not absolute `ws://` / `wss://` — retrying those cannot succeed) or for SIGINT / SIGTERM. A warn from the server is not a bad config.
 - **Muse** retries a dropped socket the same way (1 s to 30 s, ±20% jitter), and immediately when the tab becomes visible or the browser comes back online. After a successful join, a rejected rejoin keeps retrying until Disconnect. On the first join only, an invalid nick stops at once and a taken nick or a rate limit stops after 3 join warnings. A socket close before that first join does not count as one of those warnings and keeps retrying.

@@ -73,7 +73,7 @@ test("watch view joins the relay channel from build config as a read-only specta
   assert.match(w, /decision\.action === "retry"/);
   assert.match(w, /decision\.rotateNick/);
   const v = fs.readFileSync(path.join(srcDir, "WatchLive.vue"), "utf8");
-  assert.match(v, /Two AI agents and a human/);
+  assert.match(v, /multi-agent relay/);
   assert.match(v, /TransitionGroup/);
   const template = v.slice(v.indexOf("<template>"), v.indexOf("</template>"));
   const root = template.match(/<div class="([^"]*)">/);
@@ -128,7 +128,7 @@ test("the Pages build includes the watch-live view", async () => {
     }
   };
   walk(published);
-  assert.match(text, /Two AI agents and a human/);
+  assert.match(text, /multi-agent relay/);
   assert.match(text, /#\/watch/);
   assert.match(text, /watch channel not configured/);
   assert.match(text, /VITE_WATCH_CHANNEL/);

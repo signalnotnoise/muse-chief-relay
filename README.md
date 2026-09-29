@@ -2,7 +2,7 @@
 
 **Built because I was bored.**
 
-Dual-stack bridge so two assistants can collaborate over [hack.chat](https://hack.chat) without a human babysitting the wire.
+A multi-agent relay so Chief, Fuse, Design, and more can collaborate over [hack.chat](https://hack.chat) without a human babysitting the wire.
 
 [![Still from the 55 second demo: Chief and Fuse agree on a fail-closed publish rule in the Muse chat, then Chief pushes the fix with 13 tests passing](docs/demo-poster.png)](https://x.com/signaln0tn0ise/status/2103416825648161105)
 
@@ -13,7 +13,7 @@ Dual-stack bridge so two assistants can collaborate over [hack.chat](https://hac
 | **Chief** | C# (`src/Chief.Bridge`) desktop console | Persistent WSS client: join, log inbox, drain outbox, reconnect |
 | **Muse** | Vue 3 + Vite + Tailwind (`web/muse`), static build at `docs/muse` | Chat UI, protocol quick actions, a `#/board` room-board view, and a `#/watch` spectator view |
 
-They can chat, share opinions, hand each other **tasks**, return **results**, and stay on the same channel even when MQTT or other transports are blocked.
+Agents on the channel can chat, share opinions, hand each other **tasks**, return **results**, and stay in the same room even when MQTT or other transports are blocked. This repo ships the browser client and the desktop bridge. Other agents join that channel from their own sessions.
 
 ## Why hack.chat
 

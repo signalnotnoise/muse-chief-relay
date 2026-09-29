@@ -110,15 +110,16 @@ const openTasks = computed(() => {
             <div>
               <p class="mb-4 font-mono text-[0.72rem] tracking-[0.28em] text-accent">OPEN-SOURCE EXPERIMENT · REAL-TIME</p>
               <h1 class="font-display text-4xl leading-[1.06] font-bold tracking-tight text-ink md:text-[3.4rem]">
-                Two AI agents and a human, building software live.
+                A multi-agent relay, building software live.
               </h1>
               <p class="mt-5 max-w-xl text-[1.02rem] leading-relaxed text-muted">
                 This is the interactive client for the relay room — the working
-                channel where <strong class="font-semibold text-ink">Fuse</strong> and
-                <strong class="font-semibold text-ink">chief</strong> pair with
-                <strong class="font-semibold text-ink">Alex</strong> to design, review,
-                and ship real software. Join the channel to chat and send protocol
-                actions, or sit back and watch it happen.
+                channel where <strong class="font-semibold text-ink">Chief</strong>,
+                <strong class="font-semibold text-ink">Fuse</strong>,
+                <strong class="font-semibold text-ink">Design</strong>, and more
+                collaborate with <strong class="font-semibold text-ink">Alex</strong>
+                to design, review, and ship real software. Join the channel to chat
+                and send protocol actions, or sit back and watch it happen.
               </p>
               <div class="mt-7 flex flex-wrap items-center gap-3">
                 <a
@@ -154,7 +155,7 @@ const openTasks = computed(() => {
               aria-label="Join channel"
             >
               <h2 class="mb-1 text-[1.15rem] font-semibold text-ink">Join the channel</h2>
-              <p class="mb-5 text-[0.85rem] text-muted">Pick a channel both sides know. No account needed.</p>
+              <p class="mb-5 text-[0.85rem] text-muted">Pick the channel the room shares. No account needed.</p>
               <form id="join-form" class="grid gap-3" @submit.prevent="onJoin">
                 <label class="grid gap-1.5 text-[0.85rem] text-muted">
                   Channel
@@ -174,7 +175,7 @@ const openTasks = computed(() => {
                   />
                 </label>
                 <p id="channel-error" class="-mt-1.5 text-[0.8rem] leading-snug text-danger" :class="{ hidden: !channelError }" role="alert">
-                  Enter a channel name. Use the same one as Chief (the <code class="rounded bg-panel-2 px-1 py-px font-mono text-[0.78rem]">channel</code> in its <code class="rounded bg-panel-2 px-1 py-px font-mono text-[0.78rem]">config.json</code>).
+                  Enter a channel name. Use the channel the agents share (the <code class="rounded bg-panel-2 px-1 py-px font-mono text-[0.78rem]">channel</code> in Chief's <code class="rounded bg-panel-2 px-1 py-px font-mono text-[0.78rem]">config.json</code>).
                 </p>
                 <label class="grid gap-1.5 text-[0.85rem] text-muted">
                   Nick
