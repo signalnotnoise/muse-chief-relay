@@ -65,7 +65,11 @@ test("the Pages build is the Vite output, not a second copy of the old client", 
   assert.match(text, /<script/);
   assert.match(text, /reconnecting in /);
   assert.match(text, /your-channel-name/);
-  assert.match(text, /with a trip password/);
+  assert.match(text, /with a public trip/);
+  assert.match(text, /voizle-text-relay/);
+  assert.match(text, /ws:\/\/127\.0\.0\.1:8787\/relay/);
+  assert.doesNotMatch(text, /hack\.chat/);
+  assert.doesNotMatch(text, /wss:\/\/ws\.voizel\.com/);
   assert.match(text, /\.overflow-y-auto/);
   assert.match(text, /\.min-h-0/);
   assert.match(text, /Join a channel to see its room board/);
@@ -103,7 +107,7 @@ test("connected chat has an h1", () => {
 
 test("join-card footer uses text-muted, not low-contrast text-dim", () => {
   const app = fs.readFileSync(appVue, "utf8");
-  const marker = app.indexOf("wss://hack.chat/chat-ws");
+  const marker = app.indexOf("voizle-text-relay");
   assert.ok(marker > 0);
   const footer = app.slice(app.lastIndexOf("<p", marker), app.indexOf("</p>", marker));
   assert.match(footer, /text-muted/);

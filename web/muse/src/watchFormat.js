@@ -52,9 +52,16 @@ export function parseEnvelope(text) {
   return null;
 }
 
-// hack.chat nicks may only contain letters, numbers, and underscores, so the
-// generated nick uses an underscore separator (a dash is rejected with a warn,
-// which used to retry with the same invalid nick forever).
+// The relay keeps "!" when the trip already has it. Display adds one only
+// when the id does not, so a public trip is not shown with a doubled prefix.
+export function formatTrip(trip) {
+  const t = String(trip || "").trim();
+  if (!t) return "";
+  return t.startsWith("!") ? t : "!" + t;
+}
+
+// Nicks are letters, digits, ".", "_", and "-". The generated spectator nick
+// uses an underscore so it stays inside that alphabet.
 export function spectatorNick() {
   return "spectator_" + Math.random().toString(36).slice(2, 6);
 }

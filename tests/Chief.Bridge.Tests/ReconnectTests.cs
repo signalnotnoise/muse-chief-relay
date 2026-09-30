@@ -173,7 +173,9 @@ public class ReconnectTests
             .Where(f => f.EndsWith(".js", StringComparison.Ordinal) || f.EndsWith(".html", StringComparison.Ordinal))
             .Select(File.ReadAllText));
         Assert.Contains("reconnecting in ", built, StringComparison.Ordinal);
-        Assert.Contains("with a trip password", built, StringComparison.Ordinal);
+        Assert.Contains("with a public trip", built, StringComparison.Ordinal);
+        Assert.Contains("voizle-text-relay", built, StringComparison.Ordinal);
+        Assert.DoesNotContain("hack.chat", built, StringComparison.Ordinal);
     }
 
     private static string RepoRoot()

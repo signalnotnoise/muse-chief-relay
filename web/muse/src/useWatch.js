@@ -1,18 +1,24 @@
 import { nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 import { onSocketClose } from "./reconnect.js";
+import { isHello, joinFrame } from "./relayProtocol.js";
+import { resolveRelayUrl } from "./relayUrl.js";
 import { isNearBottom } from "./scroll.js";
 import { resolveWatchChannel } from "./watchChannel.js";
 import { onWatchFrame } from "./watchSession.js";
 import { parseEnvelope, nickStyle, roleOf, spectatorNick } from "./watchFormat.js";
 
-const WS_URL = "wss://hack.chat/chat-ws";
 // Channel comes from VITE_WATCH_CHANNEL at dev/build time. The Pages
 // workflow passes the repository secret. Unset -> do not join.
 function resolveChannel() {
   const env = import.meta.env && import.meta.env.VITE_WATCH_CHANNEL;
   return resolveWatchChannel(env);
 }
+function resolveRelay() {
+  const env = import.meta.env && import.meta.env.VITE_RELAY_URL;
+  return resolveRelayUrl(env);
+}
 const CHANNEL = resolveChannel();
+const RELAY_URL = resolveRelay();
 const BACKOFF_BASE_MS = 1000;
 const BACKOFF_MAX_MS = 30000;
 const MAX_MESSAGES = 300;
@@ -27,8 +33,8 @@ function metricsOf(el) {
   return { scrollHeight: el.scrollHeight, scrollTop: el.scrollTop, clientHeight: el.clientHeight };
 }
 
-// Read-only live view of the relay channel. Joins as a random spectator,
-// never sends chat, reconnects with backoff. No password, no storage.
+// Read-only live view of the relay room. Joins as a random spectator,
+// never sends chat, reconnects with backoff. No trip, no storage.
 export function useWatch() {
   const statusText = ref("connecting…");
   const live = ref(false);
@@ -41,6 +47,7 @@ export function useWatch() {
   const trips = new Map();
   let ws = null;
   let joined = false;
+  let helloSeen = false;
   let wantConnected = false;
   let retryAttempt = 0;
   let retryTimer = null;
@@ -104,49 +111,60 @@ export function useWatch() {
     push({ kind: "sys", text });
   }
 
-  function handleMessage(data) {
-    const cmd = data && data.cmd;
-    if (cmd === "session") return;
-    if (cmd === "onlineSet") {
-      trips.clear();
-      const list = Array.isArray(data.users) ? data.users : [];
+  function applyUsers(list) {
+    trips.clear();
+    if (Array.isArray(list)) {
       for (const u of list) {
         if (u && u.nick) trips.set(u.nick, u.trip || "");
       }
-      syncUsers();
+    }
+    syncUsers();
+  }
+
+  function pushChat(data) {
+    const who = data.nick || "?";
+    const text = data.text || "";
+    const proto = parseEnvelope(text);
+    if (proto) {
+      push({ kind: "proto", nick: who, trip: data.trip || trips.get(who) || "", proto });
+    } else {
+      push({ kind: "chat", nick: who, trip: data.trip || trips.get(who) || "", text });
+    }
+  }
+
+  function handleMessage(data) {
+    const type = data && data.type;
+    if (type === "hello" || type === "pong") return;
+    if (type === "welcome") {
+      applyUsers(data.users);
+      const replay = Array.isArray(data.replay) ? data.replay : [];
+      for (const line of replay) {
+        if (line && line.type === "chat") pushChat(line);
+      }
       pushSys(`${trips.size} in the room`);
       return;
     }
-    if (cmd === "onlineAdd") {
-      if (data.nick) {
-        trips.set(data.nick, data.trip || "");
-        syncUsers();
-        pushSys(`${data.nick} joined`);
+    if (type === "presence") {
+      if (Array.isArray(data.users)) applyUsers(data.users);
+      if (data.event === "join" && data.nick) pushSys(`${data.nick} joined`);
+      else if (data.event === "leave" && data.nick) pushSys(`${data.nick} left`);
+      else if (data.event === "nick") {
+        pushSys(`${data.previousNick || "someone"} is now ${data.nick || "?"}`);
       }
       return;
     }
-    if (cmd === "onlineRemove") {
-      if (data.nick) {
-        trips.delete(data.nick);
-        syncUsers();
-        pushSys(`${data.nick} left`);
-      }
+    if (type === "error") {
+      pushSys(data.text || data.code || "error");
       return;
     }
-    if (cmd === "info" || cmd === "warn") {
-      pushSys(data.text || "");
+    if (type === "chat") {
+      if (data.nick) trips.set(data.nick, data.trip || trips.get(data.nick) || "");
+      syncUsers();
+      pushChat(data);
       return;
     }
-    if (cmd === "chat") {
-      const who = data.nick || "?";
-      const text = data.text || "";
-      const proto = parseEnvelope(text);
-      if (proto) {
-        push({ kind: "proto", nick: who, trip: trips.get(who) || "", proto });
-      } else {
-        push({ kind: "chat", nick: who, trip: trips.get(who) || "", text });
-      }
-      return;
+    if (type === "bye") {
+      pushSys(data.reason === "replaced" ? "this nick was replaced" : "left the room");
     }
   }
 
@@ -181,23 +199,33 @@ export function useWatch() {
     }, delay);
   }
 
+  function sendJoin(sock) {
+    sock.send(JSON.stringify(joinFrame({ room: CHANNEL, nick })));
+  }
+
   function openSocket() {
     clearRetry();
     dropSocket();
     joined = false;
+    helloSeen = false;
     if (!CHANNEL) {
       setStatus("watch channel not configured", false);
       pushSys("watch channel not configured");
       return;
     }
+    if (!RELAY_URL) {
+      setStatus("relay URL not configured", false);
+      pushSys("relay URL not configured");
+      return;
+    }
     setStatus("connecting…", false);
-    const sock = new WebSocket(WS_URL);
+    const sock = new WebSocket(RELAY_URL);
     ws = sock;
     sock.onopen = () => {
       if (sock !== ws) return;
+      helloSeen = false;
       joined = false;
-      setStatus("joining…", false);
-      sock.send(JSON.stringify({ cmd: "join", channel: CHANNEL, nick }));
+      setStatus("connecting…", false);
     };
     sock.onmessage = (ev) => {
       if (sock !== ws) return;
@@ -205,6 +233,17 @@ export function useWatch() {
       try {
         data = JSON.parse(ev.data);
       } catch {
+        return;
+      }
+      if (!helloSeen) {
+        if (!isHello(data)) {
+          dropSocket();
+          scheduleReconnect();
+          return;
+        }
+        helloSeen = true;
+        setStatus("joining…", false);
+        sendJoin(sock);
         return;
       }
       const decision = onWatchFrame(data, joined);
@@ -232,6 +271,7 @@ export function useWatch() {
       if (sock !== ws) return;
       ws = null;
       joined = false;
+      helloSeen = false;
       if (onSocketClose(wantConnected) === "stop") {
         setStatus("disconnected", false);
         return;
@@ -270,6 +310,7 @@ export function useWatch() {
     statusText,
     live,
     channel: CHANNEL,
+    relayUrl: RELAY_URL,
     messages,
     users,
     unseen,

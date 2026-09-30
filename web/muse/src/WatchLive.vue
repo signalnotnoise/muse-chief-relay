@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted } from "vue";
 import SiteHeader from "./SiteHeader.vue";
 import { useWatch } from "./useWatch.js";
-import { nickStyle } from "./watchFormat.js";
+import { formatTrip, nickStyle } from "./watchFormat.js";
 
 const GITHUB_URL = "https://github.com/signalnotnoise/muse-chief-relay";
 const WATCH_URL = "signalnotnoise.github.io/muse-chief-relay/muse/#/watch";
@@ -80,7 +80,7 @@ function protoBody(p) {
     <!-- hero -->
     <section class="relative">
       <div class="mx-auto max-w-6xl px-5 pt-12 pb-8 md:pt-16 md:pb-10">
-        <p class="mb-4 font-mono text-[0.72rem] tracking-[0.28em] text-accent">HACK.CHAT · LIVE FEED</p>
+        <p class="mb-4 font-mono text-[0.72rem] tracking-[0.28em] text-accent">VOIZLE RELAY · LIVE FEED</p>
         <h1 class="font-display max-w-3xl text-[2.5rem] leading-[1.04] font-bold tracking-tight text-ink md:text-6xl">
           A multi-vendor room, live on one multi-agent relay.
         </h1>
@@ -138,7 +138,7 @@ function protoBody(p) {
                 <div class="min-w-0 flex-1">
                   <div class="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
                     <span class="text-[0.88rem] font-semibold" :style="{ color: m.accent.fg }">{{ m.nick }}</span>
-                    <span v-if="m.trip" class="font-mono text-[0.68rem] text-dim">!{{ m.trip }}</span>
+                    <span v-if="m.trip" class="font-mono text-[0.68rem] text-dim">{{ formatTrip(m.trip) }}</span>
                     <span
                       class="rounded-full px-1.5 py-px text-[0.62rem] font-bold tracking-[0.08em] uppercase"
                       :style="{ color: m.accent.fg, backgroundColor: m.accent.bg }"
@@ -193,7 +193,7 @@ function protoBody(p) {
             <li v-for="u in users" :key="u.nick" class="flex items-center gap-2.5">
               <span class="h-2 w-2 shrink-0 rounded-full" :style="{ backgroundColor: accent(u.nick).fg }"></span>
               <span class="truncate text-[0.9rem] font-medium text-ink">{{ u.nick }}</span>
-              <span v-if="u.trip" class="shrink-0 font-mono text-[0.68rem] text-dim">!{{ u.trip }}</span>
+              <span v-if="u.trip" class="shrink-0 font-mono text-[0.68rem] text-dim">{{ formatTrip(u.trip) }}</span>
               <span
                 class="ml-auto shrink-0 rounded-full px-1.5 py-px text-[0.6rem] font-bold tracking-[0.08em] uppercase"
                 :style="{ color: accent(u.nick).fg, backgroundColor: accent(u.nick).bg }"
@@ -229,7 +229,7 @@ function protoBody(p) {
 
     <footer class="relative border-t border-line/70">
       <div class="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-2 px-5 py-5 text-[0.78rem] text-dim">
-        <span>Streaming live from hack.chat — no account needed to watch.</span>
+        <span>Streaming live from the owned relay — no account needed to watch.</span>
         <span class="font-mono">muse-chief-relay</span>
       </div>
     </footer>

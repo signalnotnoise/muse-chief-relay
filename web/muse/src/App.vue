@@ -46,6 +46,7 @@ const {
   channelEl,
   nickEl,
   passwordEl,
+  relayUrl,
   transcriptEl,
   messageEl,
   boardView,
@@ -199,24 +200,25 @@ const openTasks = computed(() => {
                 </label>
                 <!-- No name attribute on purpose: the password must not be able to land in a query string. -->
                 <label class="grid gap-1.5 text-[0.85rem] text-muted">
-                  Password (optional, for a trip)
+                  Public trip (optional)
                   <input
                     id="password"
                     ref="passwordEl"
                     :class="field"
                     type="password"
-                    autocomplete="current-password"
+                    autocomplete="off"
                     spellcheck="false"
                     aria-describedby="password-hint"
                   />
                 </label>
                 <p id="password-hint" class="-mt-1.5 text-[0.78rem] leading-snug text-muted">
-                  Gives your nick a tripcode so others can tell it's really you. Sent to hack.chat only in the join, never shown, logged or saved by this page. hack.chat ignores anything after a <code class="rounded bg-panel-2 px-1 py-px font-mono text-[0.78rem]">#</code> in the password.
+                  A public trip id, sent as <code class="rounded bg-panel-2 px-1 py-px font-mono text-[0.78rem]">trip</code> on join. This relay does not hash a password. A value with <code class="rounded bg-panel-2 px-1 py-px font-mono text-[0.78rem]">#</code> is not sent. The field is cleared on Connect and is never logged or saved by this page.
                 </p>
                 <button :class="[button, 'mt-1 w-full py-3 text-[0.95rem]']" type="submit">Connect</button>
               </form>
               <p class="mt-4 text-[0.78rem] leading-relaxed text-muted">
-                Uses <code class="rounded bg-panel-2 px-1 py-px font-mono text-[0.74rem]">wss://hack.chat/chat-ws</code>.
+                Uses <code class="rounded bg-panel-2 px-1 py-px font-mono text-[0.74rem]">{{ relayUrl || "relay URL not configured" }}</code>
+                (voizle-text-relay).
                 Prefer to just look? <a href="#/watch" class="font-semibold text-accent hover:underline focus-visible:outline-solid focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-focus">Watch live</a> instead.
               </p>
             </section>

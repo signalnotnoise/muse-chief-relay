@@ -28,44 +28,35 @@ claim any nick.
 - If a pass leaks, pick a new one. The trip changes with it, so update every `publish_trips` and
   trusted-trip list that named the old trip.
 
-## Muse web client: password handling
+## Muse web client: public trip
 
-The client sends the password to hack.chat exactly once per join, as the legacy
-`{"cmd":"join","channel":…,"nick":"name#password"}` frame. hack.chat splits the nick at the first `#`
-and derives the trip from the part after it. Beyond that frame, the client:
+The browser speaks voizle-text-relay v1. After `hello`, join is
+`{"v":1,"type":"join","room":…,"nick":…}` plus an optional `trip`. That `trip` must already
+be the public id. The relay does not hash a secret. The client never sends `nick#password`.
 
-- never displays the password: the field is `type="password"` and is cleared as soon as you press
-  Connect; every echo (join line, sidebar, online list) shows only the name;
-- never logs it (no `console.*` calls) and never writes it to `localStorage`, `sessionStorage`,
-  cookies or the URL. The join inputs have no `name` attribute. The form is rendered by the Vue
-  app, so a failed script load is an empty page rather than a native submit that could put the
-  field in a query string;
-- keeps it in one JavaScript variable inside the chat module's closure. It is not a Vue `ref`
-  and not a property of `window`, so an automatic rejoin after a dropped socket, a tab coming
-  back into view or the network returning gets the **same trip**. Disconnect, a first join that
-  is rejected for good (bad nick, or a taken nick that is still taken after a few tries), or
-  closing/reloading the tab forgets it. A drop after a successful join does not: that rejoin
-  keeps retrying, password included, until Disconnect.
-- treats a legacy `name#password` typed into the Nick box the same way: as soon as the `#` is typed
-  or pasted, the rest moves into the masked Password field and focus follows it. A `name#password`
-  that reaches Connect without an input event (e.g. autofill) is split at submit, and the Nick box
-  is reset to the name.
-
-The client also never renders hack.chat's `session` frame. Its `token` lets whoever holds it restore
-a session with your nick and trip without the password (hack.chat's `session` command), so it gets
-the same treatment as the password. Other unrecognised frames are shown with any `token`, `pass` or
-`password` field replaced by `<redacted>`.
+- The optional field is still `type="password"` and has no `name` attribute. It is cleared as
+  soon as you press Connect. Echoes show the public trip the server confirms, not the raw field.
+- A value that contains `#`, or that is not a public trip id, is not stored and not sent. The
+  transcript says `trip not sent (public trip only)` and does not quote the value.
+- A `name#secret` typed into the Nick box is split so only the name remains. The secret is
+  discarded. It is not copied into the trip field.
+- An accepted public trip is kept in one JavaScript variable inside the chat module's closure.
+  It is not a Vue `ref` and not a property of `window`, so an automatic rejoin sends the same
+  trip. Disconnect, a first join that is rejected for good, or closing/reloading the tab
+  forgets it. A drop after a successful join does not.
+- The client never logs the field (no `console.*` calls) and never writes it to
+  `localStorage`, `sessionStorage`, cookies, or the URL.
+- Unrecognised frames are shown with any `token`, `pass`, or `password` field replaced by
+  `<redacted>`.
 
 Limits you should know about:
 
-- hack.chat only uses the text **up to the next `#`** in the password (its legacy join splits with
-  `split('#', 2)`). `abc#def` gives the same trip as `abc`, so don't put `#` in a trip password.
-- Your browser's password manager may offer to save it (`autocomplete="current-password"`). That's
-  your browser's store, not the page's; decline if you don't want it saved.
+- Anything you put in the trip field that passes the public-id check is echoed to the room.
+  Do not type a password there.
 - Anything running in the page (a malicious extension, devtools) can read a JS variable. The
   guarantee is "not shown, not logged, not stored", not "unreadable by code in your own tab".
-- The trip is shown once hack.chat confirms the join (`joined as alex !Ab12Cd`, and under *trip* in
-  the sidebar). Tell operators that trip out-of-band so they can add it to their trusted list.
+- The trip is shown once the relay confirms the join (`joined as alex !Ab12Cd`, and under *trip*
+  in the sidebar). Tell operators that trip out-of-band so they can add it to their trusted list.
 
 ## Channel names
 
@@ -77,12 +68,14 @@ channel names out of public pages, examples, issues and screenshots, and use a p
 
 The read-only spectator page at `muse/#/watch` does not commit a channel name either. It reads
 `VITE_WATCH_CHANNEL` from the environment when the client is built. Locally that is the shell.
-On GitHub Pages, `.github/workflows/pages.yml` passes the `VITE_WATCH_CHANNEL` repository secret
-into `npm run build` and deploys that output as a Pages artifact. The workflow fails if the
-secret is empty, and it does not print the value. The deployed Pages JavaScript contains
-that name, because that is how the spectator page joins. The git tree does not. The copy
-committed under `docs/muse/` is still built with the variable unset and shows "watch channel
-not configured". That committed copy is
+On GitHub Pages, `.github/workflows/pages.yml` passes the `VITE_WATCH_CHANNEL` and
+`VITE_RELAY_URL` repository secrets into `npm run build` and deploys that output as a Pages
+artifact. The workflow fails if either secret is empty, and it does not print the values.
+`VITE_RELAY_URL` must be `wss://` and must not carry credentials. The deployed Pages
+JavaScript contains the channel and the URL, because that is how the spectator page joins.
+The git tree does not contain the channel. The copy committed under `docs/muse/` is still
+built with `VITE_WATCH_CHANNEL` unset and shows "watch channel not configured". Its relay
+URL is the local default `ws://127.0.0.1:8787/relay`. That committed copy is
 what the tests check. `tests/muse/board.test.js` still rejects every tracked token that hashes
 to a board filename. There is no exception.
 
