@@ -22,6 +22,11 @@ internal sealed class HackChatBridge
     // which _sendWake wakes early so an ack doesn't wait out the outbox poll.
     private readonly ConcurrentQueue<JsonObject> _acks = new();
     private readonly SemaphoreSlim _sendWake = new(0, 1);
+    // 1 only after onlineSet, and only until this session ends. Backoff in RunForeverAsync
+    // runs with this cleared, so a quiet-socket timeout cannot pile reconnects.
+    private int _idleArmed;
+    private int _idleFired;
+    private long _lastInboundTicks;
 
     public HackChatBridge(RelayConfig cfg, BridgeRuntime? runtime = null)
     {
@@ -107,7 +112,7 @@ internal sealed class HackChatBridge
                 $"[chief] disconnect: {reason} (joined: {(session.Confirmed ? "yes" : "no")}, up {(long)uptime.TotalSeconds}s, attempt {attempt})");
             try
             {
-                WriteState(alive: false, connected: false, reconnecting: true);
+                WriteState(alive: false, connected: false, reconnecting: true, reason);
             }
             catch (Exception ex)
             {
@@ -115,6 +120,9 @@ internal sealed class HackChatBridge
             }
 
             // stdout can be a closed pipe. That is not a reason to give up on the channel.
+            // receive-idle is disarmed for this entire wait. RunOnceAsync arms it only after
+            // onlineSet and disarms it before returning, including when the socket went quiet.
+            // It must not fire during backoff (a maintenance window would otherwise pile reconnects).
             TryStdout($"[chief] reconnect in {delay.TotalSeconds:0.#}s (attempt {attempt})…");
             try
             {
@@ -206,6 +214,21 @@ internal sealed class HackChatBridge
 
     private async Task RunOnceAsync(Session s, int attempt, CancellationToken ct)
     {
+        // Disarmed through connect, the join wait, and (via finally) the caller's backoff.
+        DisarmReceiveIdle();
+        try
+        {
+            await RunSessionAsync(s, attempt, ct);
+        }
+        finally
+        {
+            DisarmReceiveIdle();
+            Volatile.Write(ref _idleFired, 0);
+        }
+    }
+
+    private async Task RunSessionAsync(Session s, int attempt, CancellationToken ct)
+    {
         // Acks are best effort and belong to the moment: none carries over from an earlier session.
         while (_acks.TryDequeue(out _)) { }
 
@@ -248,6 +271,7 @@ internal sealed class HackChatBridge
         var joinResult = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
         var recvTask = ReceiveLoopAsync(ws, s, joinResult, sessionCts.Token);
         var outTask = Task.CompletedTask;
+        var idleTask = Task.CompletedTask;
 
         var joinTimeout = Task.Delay(_runtime.JoinTimeout, pumpCts.Token)
             .ContinueWith(_ => { }, TaskScheduler.Default);
@@ -257,9 +281,19 @@ internal sealed class HackChatBridge
         {
             Console.WriteLine($"[chief] joined #{_cfg.Channel} as {_cfg.Nick}");
             // The outbox is drained only after the join is confirmed, so no line is spent on a socket
-            // that isn't in the channel yet.
+            // that isn't in the channel yet. The quiet-socket watchdog starts at the same moment:
+            // not while the join is still unconfirmed, and not during reconnect backoff.
             outTask = OutboxLoopAsync(ws, sendLock, pumpCts.Token);
-            await Task.WhenAny(recvTask, outTask);
+            if (_cfg.ReceiveIdle > TimeSpan.Zero)
+            {
+                ArmReceiveIdle();
+                idleTask = ReceiveIdleWatchAsync(s, pumpCts.Token);
+                await Task.WhenAny(recvTask, outTask, idleTask);
+            }
+            else
+            {
+                await Task.WhenAny(recvTask, outTask);
+            }
         }
         else if (first == joinResult.Task)
         {
@@ -270,19 +304,31 @@ internal sealed class HackChatBridge
             s.EndReason = $"join not confirmed within {_runtime.JoinTimeout.TotalSeconds:0}s";
         }
 
+        if (Volatile.Read(ref _idleFired) != 0)
+        {
+            // On this thread, before Describe(), so a cancelled receive cannot replace the
+            // quiet-socket reason. Session teardown below cancels sessionCts after the close frame.
+            s.EndReason ??= $"receive_idle: quiet socket, no inbound frame for {FormatIdle(_cfg.ReceiveIdle)}";
+            Volatile.Write(ref _idleFired, 0);
+        }
+
         if (recvTask.IsCompleted)
             s.EndReason ??= Describe(recvTask, "receive");
         if (outTask.IsCompleted && outTask.IsFaulted)
             s.EndReason ??= Describe(outTask, "send");
+        if (idleTask.IsFaulted)
+            s.EndReason ??= Describe(idleTask, "receive-idle");
 
-        // End of session (drop, rejected join, or shutdown): stop the outbox pump, send a close frame if
-        // the socket is still up, give the server a moment to answer it, then stop the receive loop.
+        // End of session (drop, rejected join, quiet socket, or shutdown): disarm before the close
+        // grace and before the caller's backoff, stop the outbox pump, send a close frame if the
+        // socket is still up, give the server a moment to answer it, then stop the receive loop.
+        DisarmReceiveIdle();
         pumpCts.Cancel();
         await TryCloseOutputAsync(ws, sendLock, _runtime.CloseGrace);
         sessionCts.CancelAfter(_runtime.CloseGrace);
         try
         {
-            await Task.WhenAll(recvTask, outTask);
+            await Task.WhenAll(recvTask, outTask, idleTask);
         }
         catch
         {
@@ -329,7 +375,12 @@ internal sealed class HackChatBridge
             }
 
             if (raw is not null)
+            {
+                // Any complete server frame refreshes the idle clock once the watchdog is armed.
+                // Chat is not required: info, warn, and presence frames are traffic too.
+                NoteInboundFrame();
                 HandleFrame(raw, s, joinResult);
+            }
         }
     }
 
@@ -520,18 +571,93 @@ internal sealed class HackChatBridge
         }
     }
 
-    private void WriteState(bool alive, bool connected, bool reconnecting)
+    private void ArmReceiveIdle()
     {
-        var json = JsonSerializer.Serialize(new
+        var now = _runtime.UtcNow().UtcTicks;
+        long seen;
+        do
         {
-            alive,
-            at = DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
-            channel = _cfg.Channel,
-            nick = _cfg.Nick,
-            connected,
-            reconnecting,
-            pid = Environment.ProcessId
-        }, JsonUtil.Opts);
+            seen = Interlocked.Read(ref _lastInboundTicks);
+            if (seen >= now)
+                break;
+        } while (Interlocked.CompareExchange(ref _lastInboundTicks, now, seen) != seen);
+
+        Volatile.Write(ref _idleArmed, 1);
+    }
+
+    private void NoteInboundFrame()
+    {
+        // Stamps are kept even before the watchdog is armed (the confirming onlineSet arrives first).
+        // ArmReceiveIdle starts the window at confirmation; the watch itself checks _idleArmed.
+        Interlocked.Exchange(ref _lastInboundTicks, _runtime.UtcNow().UtcTicks);
+    }
+
+    private void DisarmReceiveIdle() => Volatile.Write(ref _idleArmed, 0);
+
+    private async Task ReceiveIdleWatchAsync(Session s, CancellationToken ct)
+    {
+        var limit = _cfg.ReceiveIdle;
+        try
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                if (Volatile.Read(ref _idleArmed) == 0 || !s.Confirmed)
+                    return;
+
+                var lastTicks = Interlocked.Read(ref _lastInboundTicks);
+                if (Volatile.Read(ref _idleArmed) == 0)
+                    return;
+                // Ticks are unset only if arming lost the race with a cleared stamp. Waiting the
+                // full window is the safe side: returning here would end a live session.
+                if (lastTicks <= 0)
+                {
+                    await _runtime.IdleDelay(limit, ct);
+                    continue;
+                }
+
+                var idleFor = _runtime.UtcNow() - new DateTimeOffset(lastTicks, TimeSpan.Zero);
+                var remaining = limit - idleFor;
+                if (remaining <= TimeSpan.Zero)
+                {
+                    if (Volatile.Read(ref _idleArmed) == 0 || !s.Confirmed)
+                        return;
+                    // The session thread records EndReason; teardown then cancels sessionCts.
+                    Volatile.Write(ref _idleFired, 1);
+                    return;
+                }
+
+                await _runtime.IdleDelay(remaining, ct);
+            }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            // Session ended, or shutdown. Not a quiet socket.
+        }
+    }
+
+    private static string FormatIdle(TimeSpan limit)
+    {
+        var seconds = limit.TotalSeconds;
+        return Math.Abs(seconds - Math.Round(seconds)) < 0.001 ? $"{seconds:0}s" : $"{seconds:0.###}s";
+    }
+
+    private void WriteState(bool alive, bool connected, bool reconnecting, string? reason = null)
+    {
+        var obj = new JsonObject
+        {
+            ["alive"] = alive,
+            ["at"] = DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+            ["channel"] = _cfg.Channel,
+            ["nick"] = _cfg.Nick,
+            ["connected"] = connected,
+            ["reconnecting"] = reconnecting
+        };
+        // Only while reconnecting, and only the redacted end reason. The trip password never lands here.
+        if (reconnecting && !string.IsNullOrEmpty(reason))
+            obj["reason"] = Redact(reason);
+        obj["pid"] = Environment.ProcessId;
+
+        var json = obj.ToJsonString(JsonUtil.Opts);
 
         // Write-then-rename so a reader never sees a half-written state.json.
         var tmp = _state + ".tmp";

@@ -22,6 +22,38 @@ internal sealed class RelayConfig
     // Optional webhook poller settings for `Chief.Bridge hook`. Null: not configured.
     public HookConfig? Hook { get; set; }
 
+    /// <summary>Default <see cref="ReceiveIdleSeconds"/>: end a joined session after 300s with no inbound frame.</summary>
+    public const double DefaultReceiveIdleSeconds = 300;
+
+    /// <summary>Upper bound for <see cref="ReceiveIdleSeconds"/> (one day). 0 is allowed and disables the watchdog.</summary>
+    public const double MaxReceiveIdleSeconds = 86400;
+
+    /// <summary>
+    /// External process watchdogs should wait this long when <see cref="ReceiveIdleSeconds"/> is left at
+    /// <see cref="DefaultReceiveIdleSeconds"/>. Longer than the bridge, so the process can rejoin itself
+    /// before anything else kills it, and the two clocks do not fight.
+    /// </summary>
+    public const int RecommendedExternalWatchdogSeconds = 360;
+
+    /// <summary>
+    /// Seconds without any inbound server frame before a joined session is ended and reconnected.
+    /// Default 300. <c>0</c> disables the watchdog. Negative, non-finite, and values above
+    /// <see cref="MaxReceiveIdleSeconds"/> are a bad config (exit 2).
+    /// Armed only after <c>onlineSet</c>, and disarmed for the whole reconnect backoff, so the timer
+    /// cannot fire or pile reconnects during a maintenance window. Any external process watchdog should
+    /// use a longer clock — <see cref="RecommendedExternalWatchdogSeconds"/> seconds when this stays 300 —
+    /// so the bridge gets the first chance to rejoin and the two do not fight.
+    /// </summary>
+    [JsonPropertyName("receive_idle_s")]
+    public double ReceiveIdleSeconds { get; set; } = DefaultReceiveIdleSeconds;
+
+    /// <summary><see cref="ReceiveIdleSeconds"/> as a timeout. Zero when the watchdog is disabled.</summary>
+    [JsonIgnore]
+    public TimeSpan ReceiveIdle =>
+        ReceiveIdleSeconds <= 0 || !double.IsFinite(ReceiveIdleSeconds)
+            ? TimeSpan.Zero
+            : TimeSpan.FromSeconds(ReceiveIdleSeconds);
+
     [JsonIgnore] public string BaseDir { get; set; } = ".";
     [JsonIgnore] public string ConfigPath { get; set; } = "";
     [JsonIgnore] public string Source { get; set; } = "";
@@ -111,7 +143,18 @@ internal sealed class RelayConfig
         cfg.BaseDir = Path.GetFullPath(baseRaw, configDir);
         cfg.ConfigPath = path;
         cfg.Source = source;
+        cfg.ValidateReceiveIdle();
         return cfg;
+    }
+
+    private void ValidateReceiveIdle()
+    {
+        if (double.IsFinite(ReceiveIdleSeconds)
+            && ReceiveIdleSeconds >= 0
+            && ReceiveIdleSeconds <= MaxReceiveIdleSeconds)
+            return;
+        throw new ConfigException(
+            $"{ConfigPath}: receive_idle_s must be from 0 to {MaxReceiveIdleSeconds:0} (0 disables the quiet-socket watchdog)");
     }
 
     /// <summary>The hook poller's status file (<c>&lt;hook.state&gt;.status</c>), or null without a hook block.</summary>

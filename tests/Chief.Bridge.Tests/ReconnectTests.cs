@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Net;
 using System.Net.WebSockets;
 using System.Text;
@@ -198,8 +199,13 @@ internal sealed class RelayFixture : IAsyncDisposable
     public string? Url { get; init; }
     public bool UseRealSocket { get; init; }
     public TimeSpan ConnectTimeout { get; init; } = TimeSpan.FromSeconds(2);
+    public TimeSpan JoinTimeout { get; init; } = TimeSpan.FromSeconds(2);
     public int CancelAfterCreates { get; set; }
     public Action<string>? Stdout { get; set; }
+    public double? ReceiveIdleSeconds { get; init; }
+    public Func<DateTimeOffset>? UtcNow { get; set; }
+    public Func<TimeSpan, CancellationToken, Task>? IdleDelay { get; set; }
+    public Action? OnBackoff { get; set; }
 
     private readonly string _pass;
 
@@ -229,6 +235,28 @@ internal sealed class RelayFixture : IAsyncDisposable
         Assert.True(connected, $"never connected (attempts={Script.Created})");
     }
 
+    public async Task RunUntil(Func<bool> ready)
+    {
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+        var run = Run(cts);
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(6);
+        var ok = false;
+        while (DateTime.UtcNow < deadline)
+        {
+            if (ready())
+            {
+                ok = true;
+                break;
+            }
+
+            await Task.Delay(15);
+        }
+
+        cts.Cancel();
+        await run;
+        Assert.True(ok, $"condition not met (attempts={Script.Created}, delays={Delays.Count})");
+    }
+
     public async Task RunToCompletion()
     {
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
@@ -238,6 +266,8 @@ internal sealed class RelayFixture : IAsyncDisposable
     private async Task Run(CancellationTokenSource cts)
     {
         var cfg = WriteConfig();
+        var utcNow = UtcNow;
+        var idleDelay = IdleDelay;
         var runtime = new BridgeRuntime
         {
             SocketFactory = timeout =>
@@ -251,16 +281,19 @@ internal sealed class RelayFixture : IAsyncDisposable
             },
             Delay = (delay, token) =>
             {
+                OnBackoff?.Invoke();
                 Delays.Add(delay);
                 token.ThrowIfCancellationRequested();
                 return Task.CompletedTask;
             },
             JitterUnit = () => 0.5,
             ConnectTimeout = ConnectTimeout,
-            JoinTimeout = TimeSpan.FromSeconds(2),
+            JoinTimeout = JoinTimeout,
             CloseGrace = TimeSpan.FromMilliseconds(30),
             OutboxPoll = TimeSpan.FromMilliseconds(20),
-            Stdout = Stdout
+            Stdout = Stdout,
+            UtcNow = utcNow ?? (() => DateTimeOffset.UtcNow),
+            IdleDelay = idleDelay ?? ((delay, token) => Task.Delay(delay, token))
         };
 
         var bridge = new HackChatBridge(cfg, runtime);
@@ -277,16 +310,18 @@ internal sealed class RelayFixture : IAsyncDisposable
     {
         var path = Dir.File("config.json");
         var url = Url ?? "wss://hack.chat/chat-ws";
-        var json = JsonSerializer.Serialize(new
+        var doc = new Dictionary<string, object?>
         {
-            url,
-            origin = "https://hack.chat",
-            channel = "throwaway-test",
-            nick = Nick,
-            pass = _pass,
-            @base = "."
-        });
-        File.WriteAllText(path, json);
+            ["url"] = url,
+            ["origin"] = "https://hack.chat",
+            ["channel"] = "throwaway-test",
+            ["nick"] = Nick,
+            ["pass"] = _pass,
+            ["base"] = "."
+        };
+        if (ReceiveIdleSeconds is { } idle)
+            doc["receive_idle_s"] = idle;
+        File.WriteAllText(path, JsonSerializer.Serialize(doc));
         return RelayConfig.Load(path, false, Dir.Path, _ => null);
     }
 
@@ -312,6 +347,7 @@ internal sealed class SocketScript
     public int Created { get; private set; }
     public List<string> Sent { get; } = new();
     public string SentText => string.Join("\n", Sent);
+    public ScriptedSocket? Latest { get; private set; }
 
     public void Enqueue(params Attempt[] attempts)
     {
@@ -323,7 +359,9 @@ internal sealed class SocketScript
     {
         Created++;
         var attempt = _attempts.Count > 0 ? _attempts.Dequeue() : Attempt.CloseDuringJoin();
-        return new ScriptedSocket(attempt, Sent);
+        var socket = new ScriptedSocket(attempt, Sent);
+        Latest = socket;
+        return socket;
     }
 }
 
@@ -341,6 +379,7 @@ internal sealed class Attempt
         Messages = [JsonSerializer.Serialize(new { cmd = "warn", text })]
     };
     public static Attempt CloseDuringJoin() => new();
+    public static Attempt HoldBeforeJoin() => new() { Hold = true };
     public static Attempt OnlineSetHold(string nick) => OnlineSet(nick, hold: true);
     public static Attempt OnlineSetThenClose(string nick) => OnlineSet(nick, hold: false);
 
@@ -361,10 +400,17 @@ internal sealed class Attempt
 
 internal sealed class ScriptedSocket(Attempt attempt, List<string> sent) : IRelaySocket
 {
-    private readonly Queue<byte[]> _incoming = new(attempt.Messages.Select(m => Encoding.UTF8.GetBytes(m)));
+    private readonly ConcurrentQueue<byte[]> _incoming = new(attempt.Messages.Select(m => Encoding.UTF8.GetBytes(m)));
+    private readonly SemaphoreSlim _ready = new(0);
     private bool _open;
 
     public bool CanCloseOutput => _open;
+
+    public void Push(string json)
+    {
+        _incoming.Enqueue(Encoding.UTF8.GetBytes(json));
+        _ready.Release();
+    }
 
     public async Task ConnectAsync(Uri uri, CancellationToken cancellationToken)
     {
@@ -383,19 +429,24 @@ internal sealed class ScriptedSocket(Attempt attempt, List<string> sent) : IRela
 
     public async ValueTask<RelayReceiveResult> ReceiveAsync(Memory<byte> buffer, CancellationToken cancellationToken)
     {
-        if (_incoming.Count > 0)
+        while (true)
         {
-            var msg = _incoming.Dequeue();
-            if (msg.Length > buffer.Length)
-                throw new InvalidOperationException("test frame does not fit the receive buffer");
-            msg.CopyTo(buffer.Span);
-            return new RelayReceiveResult(msg.Length, true, false, null, null);
-        }
+            if (_incoming.TryDequeue(out var msg))
+            {
+                if (msg.Length > buffer.Length)
+                    throw new InvalidOperationException("test frame does not fit the receive buffer");
+                msg.CopyTo(buffer.Span);
+                return new RelayReceiveResult(msg.Length, true, false, null, null);
+            }
 
-        if (attempt.Hold)
-            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
-        _open = false;
-        return RelayReceiveResult.Closed("Close", null);
+            if (!attempt.Hold)
+            {
+                _open = false;
+                return RelayReceiveResult.Closed("Close", null);
+            }
+
+            await _ready.WaitAsync(cancellationToken);
+        }
     }
 
     public ValueTask CloseOutputAsync(CancellationToken cancellationToken)

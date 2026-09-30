@@ -27,9 +27,11 @@ taken, a rate limit, or a DNS/TLS failure does not mean the process exited: it
 backs off (1 s doubling to 30 s, with jitter) and keeps trying. Leave it alone
 while `state.json` says `reconnecting: true` and the pid is still running.
 It exits on its own only for a bad config (exit 2: missing file, bad JSON, empty
-channel or nick, or a `url` that isn't `ws://` or `wss://`) or because it was
+channel or nick, a bad `receive_idle_s`, or a `url` that isn't `ws://` or `wss://`) or because it was
 stopped (SIGINT / SIGTERM, exit 0, `alive: false`). If `status` says the pid is
 not running, something outside the reconnect loop stopped it.
+
+A socket that stays open but goes quiet is the same loop. After the join is confirmed, any inbound server frame refreshes `receive_idle_s` (default 300). Chat is not required. If it expires, the bridge cancels the session, sets `state.json` to `reconnecting: true` with a `reason` starting with `receive_idle`, and backs off like any other drop. The timer is off before the join is confirmed and stays off for the whole backoff, so it does not start extra reconnects during a maintenance window. `0` disables it. An external process watchdog, if you run one, should wait longer than that internal timer — 360s when the internal timeout is 300s — so the bridge rejoins itself and the two do not fight. See `knowledge/receive-idle-watchdog.md`.
 
 In the commands below, `Chief.Bridge` means the built bridge
 (`dotnet <publish dir>/Chief.Bridge.dll`, or `dotnet run --project

@@ -37,6 +37,17 @@ internal sealed class BridgeRuntime
     public TimeSpan CloseGrace { get; init; } = TimeSpan.FromSeconds(2);
     public TimeSpan OutboxPoll { get; init; } = TimeSpan.FromMilliseconds(350);
 
+    /// <summary>Clock for the receive-idle watchdog. Tests can move it.</summary>
+    public Func<DateTimeOffset> UtcNow { get; init; } = static () => DateTimeOffset.UtcNow;
+
+    /// <summary>
+    /// Wait used only by the receive-idle watchdog. Production sleeps. A test that skips reconnect
+    /// backoff via <see cref="Delay"/> can still advance <see cref="UtcNow"/> here. The watchdog is
+    /// not running during backoff, so this wait must not be folded into <see cref="Delay"/>.
+    /// </summary>
+    public Func<TimeSpan, CancellationToken, Task> IdleDelay { get; init; } =
+        static (delay, ct) => Task.Delay(delay, ct);
+
     /// <summary>Uniform [0, 1] draw for reconnect jitter. Failures here are treated as 0.5.</summary>
     public Func<double> JitterUnit { get; init; } = static () => Random.Shared.NextDouble();
 

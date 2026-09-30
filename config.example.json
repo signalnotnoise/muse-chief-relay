@@ -5,6 +5,7 @@
   "nick": "chief",
   "pass": "",
   "base": ".",
+  "receive_idle_s": 300,
   "publish_repos": [
     "signalnotnoise/muse-chief-relay"
   ],

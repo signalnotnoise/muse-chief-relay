@@ -287,6 +287,10 @@ internal static class Program
             Console.WriteLine($"alive: {(Flag("alive") ? "true" : "false")}");
             Console.WriteLine($"connected: {(Flag("connected") ? "true" : "false")}");
             Console.WriteLine($"reconnecting: {(Flag("reconnecting") ? "true" : "false")}");
+            if (root.TryGetProperty("reason", out var reasonEl)
+                && reasonEl.ValueKind == JsonValueKind.String
+                && reasonEl.GetString() is { Length: > 0 } reason)
+                Console.WriteLine($"reason: {reason}");
             if (root.TryGetProperty("at", out var at) && at.TryGetInt64(out var atSecs))
                 Console.WriteLine($"at: {atSecs} ({DateTimeOffset.FromUnixTimeSeconds(atSecs).ToLocalTime():yyyy-MM-dd HH:mm:ss zzz})");
             if (root.TryGetProperty("pid", out var pidEl) && pidEl.TryGetInt32(out var pid))

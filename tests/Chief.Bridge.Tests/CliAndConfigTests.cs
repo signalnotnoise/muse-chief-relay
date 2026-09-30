@@ -130,6 +130,47 @@ public class RelayConfigTests
         Assert.Throws<ConfigException>(() => RelayConfig.Load(dir.File("bad.json"), false, dir.Path, NoEnv));
         Assert.Throws<ConfigException>(() => RelayConfig.Load(dir.File("nochan.json"), false, dir.Path, NoEnv));
     }
+
+    [Fact]
+    public void Receive_idle_defaults_to_300_seconds()
+    {
+        using var dir = new TempDir();
+        File.WriteAllText(dir.File("c.json"), Valid);
+
+        var cfg = RelayConfig.Load(dir.File("c.json"), false, dir.Path, NoEnv);
+
+        Assert.Equal(300, cfg.ReceiveIdleSeconds);
+        Assert.Equal(RelayConfig.DefaultReceiveIdleSeconds, cfg.ReceiveIdleSeconds);
+        Assert.Equal(TimeSpan.FromSeconds(300), cfg.ReceiveIdle);
+        Assert.Equal(360, RelayConfig.RecommendedExternalWatchdogSeconds);
+        Assert.True(RelayConfig.RecommendedExternalWatchdogSeconds > cfg.ReceiveIdleSeconds);
+    }
+
+    [Fact]
+    public void Receive_idle_zero_disables_the_watchdog()
+    {
+        using var dir = new TempDir();
+        File.WriteAllText(dir.File("c.json"), "{\"channel\":\"c\",\"nick\":\"n\",\"receive_idle_s\":0}");
+
+        var cfg = RelayConfig.Load(dir.File("c.json"), false, dir.Path, NoEnv);
+
+        Assert.Equal(0, cfg.ReceiveIdleSeconds);
+        Assert.Equal(TimeSpan.Zero, cfg.ReceiveIdle);
+    }
+
+    [Theory]
+    [InlineData("-1")]
+    [InlineData("86401")]
+    [InlineData("\"nope\"")]
+    public void Receive_idle_out_of_range_is_a_config_error(string literal)
+    {
+        using var dir = new TempDir();
+        File.WriteAllText(dir.File("c.json"), "{\"channel\":\"c\",\"nick\":\"n\",\"receive_idle_s\":" + literal + "}");
+
+        var ex = Assert.Throws<ConfigException>(() => RelayConfig.Load(dir.File("c.json"), false, dir.Path, NoEnv));
+
+        Assert.Contains("receive_idle_s", ex.Message, StringComparison.Ordinal);
+    }
 }
 
 public class BackoffTests
