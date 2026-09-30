@@ -34,10 +34,14 @@ The browser speaks voizle-text-relay v1. After `hello`, join is
 `{"v":1,"type":"join","room":…,"nick":…}` plus an optional `trip`. That `trip` must already
 be the public id. The relay does not hash a secret. The client never sends `nick#password`.
 
-- The optional field is still `type="password"` and has no `name` attribute. It is cleared as
-  soon as you press Connect. Echoes show the public trip the server confirms, not the raw field.
-- A value that contains `#`, or that is not a public trip id, is not stored and not sent. The
-  transcript says `trip not sent (public trip only)` and does not quote the value.
+- The optional field is labeled **Public trip only**, stays `type="password"`, has no `name`
+  attribute, and uses `maxlength="12"`. It is cleared as soon as you press Connect. Echoes show
+  the public trip the server confirms, not the raw field.
+- A value that contains `#`, is longer than 12 characters, has `!` anywhere but an optional
+  leading bang, fails the opaque alphabet, or looks password-shaped (mixed case + digit at
+  length ≥ 10) is not stored and not sent. The transcript says `trip not sent (public trip only)`
+  and does not quote the value. The wire protocol still allows trips up to 64; Muse is stricter
+  on purpose so a password pasted into this field cannot go out as `trip`.
 - A `name#secret` typed into the Nick box is split so only the name remains. The secret is
   discarded. It is not copied into the trip field.
 - An accepted public trip is kept in one JavaScript variable inside the chat module's closure.

@@ -198,21 +198,22 @@ const openTasks = computed(() => {
                     @input="onNickInput"
                   />
                 </label>
-                <!-- No name attribute on purpose: the password must not be able to land in a query string. -->
+                <!-- No name attribute on purpose: the value must not land in a query string. -->
                 <label class="grid gap-1.5 text-[0.85rem] text-muted">
-                  Public trip (optional)
+                  Public trip only (optional)
                   <input
                     id="password"
                     ref="passwordEl"
                     :class="field"
                     type="password"
+                    maxlength="12"
                     autocomplete="off"
                     spellcheck="false"
                     aria-describedby="password-hint"
                   />
                 </label>
                 <p id="password-hint" class="-mt-1.5 text-[0.78rem] leading-snug text-muted">
-                  A public trip id, sent as <code class="rounded bg-panel-2 px-1 py-px font-mono text-[0.78rem]">trip</code> on join. This relay does not hash a password. A value with <code class="rounded bg-panel-2 px-1 py-px font-mono text-[0.78rem]">#</code> is not sent. The field is cleared on Connect and is never logged or saved by this page.
+                  Short public trip id only (up to 12 characters), sent as <code class="rounded bg-panel-2 px-1 py-px font-mono text-[0.78rem]">trip</code> on join. This relay does not hash a password — never type one here. Values with <code class="rounded bg-panel-2 px-1 py-px font-mono text-[0.78rem]">#</code>, longer than 12 characters, or password-shaped are not sent and are never quoted in the transcript. The field is cleared on Connect and is never logged or saved by this page.
                 </p>
                 <button :class="[button, 'mt-1 w-full py-3 text-[0.95rem]']" type="submit">Connect</button>
               </form>

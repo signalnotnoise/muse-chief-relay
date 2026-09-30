@@ -22,8 +22,17 @@ test("join sends a public trip and never a nick#password", async () => {
   );
   assert.equal(publicTrip(""), "");
   assert.equal(publicTrip("  !Ab12Cd  "), "!Ab12Cd");
+  assert.equal(publicTrip("!xt2keO"), "!xt2keO");
+  assert.equal(publicTrip("tripAB12"), "tripAB12");
+  assert.equal(publicTrip("w7IWRT"), "w7IWRT");
   assert.equal(publicTrip("name#secret"), "");
   assert.equal(publicTrip("has space"), "");
+  // Long charset match (password-shaped) must not be sent as a public trip.
+  assert.equal(publicTrip("Aa1" + "b".repeat(20) + "!"), "");
+  assert.equal(publicTrip("a".repeat(13)), "");
+  assert.equal(publicTrip("AbCdEfGh12"), ""); // mixed case + digit, length ≥ 10
+  assert.equal(publicTrip("plainTripId!"), ""); // bang not only as prefix
+  assert.equal(publicTrip("!plain!trip"), "");
 
   const bare = joinFrame({ room: "lobby", nick: "Muse", trip: "" });
   assert.deepEqual(bare, { v: 1, type: "join", room: "lobby", nick: "Muse" });
@@ -32,6 +41,12 @@ test("join sends a public trip and never a nick#password", async () => {
   const secret = joinFrame({ room: "lobby", nick: "Muse", trip: "hunter2#no" });
   assert.equal("trip" in secret, false);
   assert.equal(JSON.stringify(secret).includes("#"), false);
+
+  const longSecret = "Aa1" + "b".repeat(20) + "!";
+  const longJoin = joinFrame({ room: "lobby", nick: "Muse", trip: longSecret });
+  assert.equal("trip" in longJoin, false);
+  assert.equal(JSON.stringify(longJoin).includes(longSecret), false);
+  assert.equal(JSON.stringify(longJoin).includes("Aa1"), false);
 
   const tripped = joinFrame({ room: "lobby", nick: "Muse", trip: "!Ab12Cd" });
   assert.equal(tripped.trip, "!Ab12Cd");
