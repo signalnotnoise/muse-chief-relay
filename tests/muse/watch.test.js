@@ -67,7 +67,10 @@ test("watch view joins the relay channel from build config as a read-only specta
   assert.match(w, /VITE_WATCH_CHANNEL/);
   assert.match(w, /VITE_RELAY_URL/);
   assert.match(w, /watch channel not configured/);
-  assert.match(w, /joinFrame/);
+  const joinAt = w.indexOf("sock.send(JSON.stringify(joinFrame(");
+  const joinCall = w.slice(joinAt, w.indexOf(");", joinAt));
+  assert.match(joinCall, /joinFrame\(\{ room: CHANNEL, nick \}\)/);
+  assert.doesNotMatch(joinCall, /trip|password/);
   assert.match(w, /isHello/);
   assert.doesNotMatch(w, /VITE_RELAY_CHANNEL/);
   assert.doesNotMatch(w, /hack\.chat/);

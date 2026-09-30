@@ -31,13 +31,20 @@ claim any nick.
 ## Muse web client: public trip
 
 The browser speaks voizle-text-relay v1. After `hello`, join is
-`{"v":1,"type":"join","room":…,"nick":…}` plus an optional `trip`. That `trip` must already
-be the public id. The relay does not hash a secret. The client never sends `nick#password`.
+`{"v":1,"type":"join","room":…,"nick":…}` plus an optional `trip`. That `trip` is only the
+public code, sent as `!` plus six letters or digits (for example `!Ab12Cd`). The relay does
+not hash a secret. The client never sends a password, and never sends `nick#password`.
 
-- The optional field is still `type="password"` and has no `name` attribute. It is cleared as
-  soon as you press Connect. Echoes show the public trip the server confirms, not the raw field.
-- A value that contains `#`, or that is not a public trip id, is not stored and not sent. The
-  transcript says `trip not sent (public trip only)` and does not quote the value.
+Type the code only, like `Ab12Cd` (!XXXX without the !). Do not type the password that used
+to produce that code on hack.chat.
+
+- The field is `type="text"` with `id="trip"`. It is not a password box, so a password
+  manager should not fill it. It has no `name` attribute. It is cleared as soon as you press
+  Connect.
+- Only a six-character public code is accepted (`A–Z`, `a–z`, `0–9`, `+`, `/`). A leading `!`
+  is stripped and then put back on the wire, so `Ab12Cd` and `!Ab12Cd` both send `!Ab12Cd`.
+  A password, a longer secret, or `nick#password` is not stored and not sent. The transcript
+  says the trip was not sent and does not quote what you typed.
 - A `name#secret` typed into the Nick box is split so only the name remains. The secret is
   discarded. It is not copied into the trip field.
 - An accepted public trip is kept in one JavaScript variable inside the chat module's closure.

@@ -32,8 +32,11 @@ test("join fields have no name attribute", () => {
   assert.ok(start > 0 && end > start);
   const form = vue.slice(start, end);
   assert.doesNotMatch(form, /\sname\s*=/);
-  assert.match(form, /type="password"/);
-  assert.match(form, /id="password"/);
+  assert.doesNotMatch(form, /type="password"/);
+  assert.doesNotMatch(form, /id="password"/);
+  assert.match(form, /id="trip"/);
+  assert.match(form, /type="text"/);
+  assert.match(form, /Not your password/);
 });
 
 test("muse source does not log or touch browser storage", () => {

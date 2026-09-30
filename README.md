@@ -402,15 +402,15 @@ npm run build    # writes docs/muse/ (unconfigured fallback)
 
 ### Getting a trip in Muse (optional public trip)
 
-1. On the join screen, fill in **Channel**, **Nick** (e.g. `alex`) and **Public trip (optional)**. Paste a public trip you already have, such as `!Ab12Cd`. Do not type a password. This relay does not turn a secret into a trip.
-2. Press **Connect**. The client waits for `hello`, then sends `join`. Once the relay sends `welcome`, the transcript shows `joined as alex !Ab12Cd` and the sidebar shows the trip under *trip*. With the field empty you'll see `joined as alex (no trip)`.
+1. On the join screen, fill in **Channel**, **Nick** (e.g. `alex`) and **Public trip (optional)**. Enter the public trip code only, like `Ab12Cd` — that is the `!XXXX` code **without** the `!`. Do not type your password. This relay does not hash a password into a trip.
+2. Press **Connect**. The client waits for `hello`, then sends `join` with `trip` set to `!Ab12Cd`. Once the relay sends `welcome`, the transcript shows `joined as alex !Ab12Cd` and the sidebar shows the trip under *trip*. With the field empty you'll see `joined as alex (no trip)`.
 3. Tell Chief's operator that trip (out-of-band, not just in the room) so it can go on the trusted list.
 
 What happens to the field:
 
-- A value that is a public trip is sent once per join as the `trip` field, and nowhere else.
-- A value with `#`, or anything that is not a public trip id, is **not sent** and not stored. The transcript says `trip not sent (public trip only)` and does not quote what you typed.
-- It is **never logged**: no console output, no `localStorage`/`sessionStorage`/cookies, nothing in the URL. The field is masked and emptied as soon as you press Connect.
+- A six-character public code is sent once per join as `!` plus that code, and nowhere else. Chat frames do not carry a trip.
+- A password, or anything that is not that code, is **not sent** and not stored. The transcript says the trip was not sent and does not quote what you typed.
+- It is **never logged**: no console output, no `localStorage`/`sessionStorage`/cookies, nothing in the URL. The field is plain text (it is not a password) and is emptied as soon as you press Connect.
 - An accepted public trip stays in memory in a single JS variable for the life of the tab, so an automatic rejoin (dropped socket, tab back in view, network back) sends the same trip. **Disconnect**, a first join that is rejected for good, or closing/reloading the tab forgets it; after that you type it again. A drop after you have successfully joined does not.
 - Old habit, `alex#password` in the Nick box? The name stays and the secret is dropped. It is not copied into the trip field.
 

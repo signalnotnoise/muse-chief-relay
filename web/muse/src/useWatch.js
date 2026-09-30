@@ -200,6 +200,7 @@ export function useWatch() {
   }
 
   function sendJoin(sock) {
+    // Spectator join is room and nick only. No trip is attached.
     sock.send(JSON.stringify(joinFrame({ room: CHANNEL, nick })));
   }
 

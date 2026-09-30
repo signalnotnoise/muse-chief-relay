@@ -5,14 +5,17 @@
 export const PROTOCOL_NAME = "voizle-text-relay";
 export const PROTOCOL_VERSION = 1;
 
-const TRIP_RE = /^[!A-Za-z0-9._~+/=-]{1,64}$/;
+// A public trip is the short code people write as !XXXX. The user types the
+// code without "!". This client does not hash a password. A raw password,
+// nick#password, or any other string is refused and must not be sent.
+const PUBLIC_TRIP_BODY = /^[A-Za-z0-9+/]{6}$/;
 
-// A public trip id, or "" when the value is empty or not safe to send.
-// Anything containing "#" is a secret-shaped password and is dropped.
 export function publicTrip(raw) {
-  const trip = String(raw == null ? "" : raw).trim();
-  if (!trip || trip.includes("#") || !TRIP_RE.test(trip)) return "";
-  return trip;
+  let trip = String(raw == null ? "" : raw).trim();
+  if (!trip) return "";
+  if (trip.startsWith("!")) trip = trip.slice(1);
+  if (!PUBLIC_TRIP_BODY.test(trip)) return "";
+  return "!" + trip;
 }
 
 export function isHello(frame) {

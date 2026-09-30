@@ -85,7 +85,7 @@ export function useChat() {
 
   const channelEl = ref(null);
   const nickEl = ref(null);
-  const passwordEl = ref(null);
+  const tripEl = ref(null);
   const transcriptEl = ref(null);
   const messageEl = ref(null);
 
@@ -112,13 +112,11 @@ export function useChat() {
 
   let ws = null;
   let myChannel = "";
-  // The public trip, if the user typed one that is safe to send. It lives
-  // only in this closure variable, not in Vue state. An automatic rejoin
-  // sends the same trip. A secret (anything with "#", or a value that is
-  // not a public trip id) is never stored here. The field is cleared as
-  // soon as Connect is pressed. Disconnect, a first join that is rejected
-  // for good, or closing the tab forgets it. A drop after a successful
-  // join keeps it.
+  // The public trip code (!XXXX), only after publicTrip() accepts it. A
+  // password is never stored here and never sent. An automatic rejoin sends
+  // the same public trip. The field is cleared as soon as Connect is
+  // pressed. Disconnect, a first join that is rejected for good, or closing
+  // the tab forgets it. A drop after a successful join keeps it.
   let myPublicTrip = "";
   let tripOmitted = false;
   let myTrip = "";
@@ -150,7 +148,7 @@ export function useChat() {
   function forgetTrip() {
     myPublicTrip = "";
     tripOmitted = false;
-    if (passwordEl.value) passwordEl.value.value = "";
+    if (tripEl.value) tripEl.value.value = "";
   }
 
   function syncUsers() {
@@ -345,7 +343,10 @@ export function useChat() {
           kind: "sys",
         });
         if (tripOmitted && !hasJoinedOnce) {
-          appendRow({ text: "trip not sent (public trip only)", kind: "sys" });
+          appendRow({
+            text: "trip not sent — enter the public trip code only (like Ab12Cd), not a password",
+            kind: "sys",
+          });
         }
         if (first) nextTick(() => messageEl.value && messageEl.value.focus());
         return;
@@ -465,8 +466,8 @@ export function useChat() {
       return;
     }
     channelError.value = false;
-    const typed = passwordEl.value ? passwordEl.value.value : "";
-    if (passwordEl.value) passwordEl.value.value = "";
+    const typed = tripEl.value ? tripEl.value.value : "";
+    if (tripEl.value) tripEl.value.value = "";
     const rawNick = nickEl.value ? nickEl.value.value : nick.value;
     connect(nextChannel, rawNick, typed);
   }
@@ -577,7 +578,7 @@ export function useChat() {
     resultSummary,
     channelEl,
     nickEl,
-    passwordEl,
+    tripEl,
     transcriptEl,
     messageEl,
     relayUrl: RELAY_URL,

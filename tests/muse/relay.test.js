@@ -21,23 +21,31 @@ test("join sends a public trip and never a nick#password", async () => {
     "../../web/muse/src/relayProtocol.js"
   );
   assert.equal(publicTrip(""), "");
-  assert.equal(publicTrip("  !Ab12Cd  "), "!Ab12Cd");
+  assert.equal(publicTrip("  Ab12Cd  "), "!Ab12Cd");
+  assert.equal(publicTrip("!Ab12Cd"), "!Ab12Cd");
   assert.equal(publicTrip("name#secret"), "");
   assert.equal(publicTrip("has space"), "");
+  assert.equal(publicTrip("hunter2"), "");
+  assert.equal(publicTrip("correct horse battery staple"), "");
+  assert.equal(publicTrip("!!Ab12Cd"), "");
 
   const bare = joinFrame({ room: "lobby", nick: "Muse", trip: "" });
   assert.deepEqual(bare, { v: 1, type: "join", room: "lobby", nick: "Muse" });
   assert.equal("trip" in bare, false);
 
-  const secret = joinFrame({ room: "lobby", nick: "Muse", trip: "hunter2#no" });
+  const secret = joinFrame({ room: "lobby", nick: "Muse", trip: "hunter2" });
   assert.equal("trip" in secret, false);
+  assert.equal(JSON.stringify(secret).includes("hunter2"), false);
   assert.equal(JSON.stringify(secret).includes("#"), false);
 
-  const tripped = joinFrame({ room: "lobby", nick: "Muse", trip: "!Ab12Cd" });
+  const tripped = joinFrame({ room: "lobby", nick: "Muse", trip: "Ab12Cd" });
   assert.equal(tripped.trip, "!Ab12Cd");
   assert.equal(tripped.room, "lobby");
+  assert.equal("password" in tripped, false);
 
-  assert.deepEqual(chatFrame("hello"), { v: 1, type: "chat", text: "hello" });
+  const chat = chatFrame("hello");
+  assert.deepEqual(chat, { v: 1, type: "chat", text: "hello" });
+  assert.equal("trip" in chat, false);
 
   assert.equal(isHello({ v: 1, type: "hello", protocol: PROTOCOL_NAME }), true);
   assert.equal(isHello({ v: 1, type: "hello", protocol: "other" }), false);

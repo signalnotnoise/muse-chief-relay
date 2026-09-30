@@ -45,7 +45,7 @@ const {
   resultSummary,
   channelEl,
   nickEl,
-  passwordEl,
+  tripEl,
   relayUrl,
   transcriptEl,
   messageEl,
@@ -198,21 +198,24 @@ const openTasks = computed(() => {
                     @input="onNickInput"
                   />
                 </label>
-                <!-- No name attribute on purpose: the password must not be able to land in a query string. -->
+                <!-- No name attribute: nothing in this form can land in a query string. -->
                 <label class="grid gap-1.5 text-[0.85rem] text-muted">
                   Public trip (optional)
                   <input
-                    id="password"
-                    ref="passwordEl"
+                    id="trip"
+                    ref="tripEl"
                     :class="field"
-                    type="password"
+                    type="text"
+                    placeholder="Ab12Cd"
                     autocomplete="off"
+                    autocapitalize="off"
+                    autocorrect="off"
                     spellcheck="false"
-                    aria-describedby="password-hint"
+                    aria-describedby="trip-hint"
                   />
                 </label>
-                <p id="password-hint" class="-mt-1.5 text-[0.78rem] leading-snug text-muted">
-                  A public trip id, sent as <code class="rounded bg-panel-2 px-1 py-px font-mono text-[0.78rem]">trip</code> on join. This relay does not hash a password. A value with <code class="rounded bg-panel-2 px-1 py-px font-mono text-[0.78rem]">#</code> is not sent. The field is cleared on Connect and is never logged or saved by this page.
+                <p id="trip-hint" class="-mt-1.5 text-[0.78rem] leading-snug text-muted">
+                  The public trip code only, like <code class="rounded bg-panel-2 px-1 py-px font-mono text-[0.78rem]">Ab12Cd</code> (!XXXX without the !). Not your password. This page does not hash a password. Anything else is not sent.
                 </p>
                 <button :class="[button, 'mt-1 w-full py-3 text-[0.95rem]']" type="submit">Connect</button>
               </form>
