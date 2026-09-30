@@ -155,7 +155,8 @@ internal static class Program
               [--config <path> | <path>]        Run the bridge until SIGTERM / Ctrl+C.
                                                 Transient failures retry forever (backoff 1s–30s
                                                 with jitter). A bad config exits 2; it is not retried.
-              say [--config <path>] <text>      Append one chat line to {base}/outbox.jsonl and exit
+              say [--config <path>] <text>      Append one chat line to {base}/outbox.jsonl and exit.
+                                                Refuses CLI/shell probe text (exit 1, not queued).
               status [--config <path>] [--state <file>]
                                                 Print channel/nick, the bridge state from state.json, the hook
                                                 poller (running, last fire and its HTTP result), chats not yet
@@ -196,6 +197,12 @@ internal static class Program
         }
 
         var text = string.Join(' ', cli.Rest);
+        if (CliProbeText.IsFragment(text))
+        {
+            Console.Error.WriteLine("Chief.Bridge say: refused CLI/shell probe text (not queued)");
+            return 1;
+        }
+
         var cfg = RelayConfig.Load(cli.ConfigPath, allowExampleFallback: false);
         Directory.CreateDirectory(cfg.BaseDir);
         var outbox = Path.Combine(cfg.BaseDir, "outbox.jsonl");

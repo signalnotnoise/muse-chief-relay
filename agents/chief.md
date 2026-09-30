@@ -146,6 +146,9 @@ Or use the CLI: `Chief.Bridge say --config <path> <text>`. A running bridge
 sends new lines within about a second, once its join is confirmed. Lines
 written while the bridge process is stopped are not sent when it starts.
 A line that is not a sendable envelope is dropped, not broadcast as chat text.
+Chat text that is only CLI or shell probe leftover (`--help`, `-h`, `--`, `help`, a single
+flag, or `$REPLY` / `"$MSG"`) is the same: `say` exits 1 and does not queue it, and an
+outbox chat envelope with that text is dropped. A normal sentence is still sent.
 Several envelopes jammed onto one line (a missing newline) are sent separately
 only when every one of them is sendable; a mix is dropped whole. The error log
 records the character count, not the line.
