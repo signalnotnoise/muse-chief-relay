@@ -4,6 +4,7 @@ import { chatFrame, isHello, joinFrame, publicTrip } from "./relayProtocol.js";
 import { resolveRelayUrl } from "./relayUrl.js";
 import { createRoomBoard } from "./roomBoard.js";
 import { isNearBottom } from "./scroll.js";
+import { createComposerHistory } from "./composerHistory.js";
 import { formatTrip } from "./watchFormat.js";
 
 function resolveRelay() {
@@ -150,6 +151,19 @@ export function useChat() {
   let followTail = true;
   let scrollingProgrammatically = false;
 
+  // Rows that arrived while the reader was scrolled up. Mirrors the watch
+  // client's unseen counter; cleared on any return to the tail.
+  const unreadCount = ref(0);
+  const firstUnreadId = ref(0);
+  // Sent-message history for the composer (ArrowUp/ArrowDown). Tab memory
+  // only — the client never persists anything.
+  const composerHistory = createComposerHistory(50);
+
+  function clearUnread() {
+    unreadCount.value = 0;
+    firstUnreadId.value = 0;
+  }
+
   function setStatus(text, kind) {
     statusText.value = text;
     statusKind.value = kind || "off";
@@ -183,6 +197,7 @@ export function useChat() {
     scrollingProgrammatically = true;
     node.scrollTop = node.scrollHeight;
     followTail = true;
+    clearUnread();
     queueMicrotask(() => {
       scrollingProgrammatically = false;
     });
@@ -191,13 +206,15 @@ export function useChat() {
   function onTranscriptScroll() {
     if (scrollingProgrammatically) return;
     followTail = isNearBottom(metricsOf(transcriptEl.value));
+    if (followTail) clearUnread();
   }
 
   function appendRow(fields) {
     const stick = followTail;
     const who = fields.nick || "";
+    const id = ++rowSeq;
     messages.value.push({
-      id: ++rowSeq,
+      id,
       nick: who,
       text: fields.text,
       kind: fields.kind || "",
@@ -205,6 +222,10 @@ export function useChat() {
       time: nowStamp(),
       me: !!who && who === nick.value,
     });
+    if (!stick) {
+      if (unreadCount.value === 0) firstUnreadId.value = id;
+      unreadCount.value += 1;
+    }
     if (stick) nextTick(scrollToEnd);
   }
 
@@ -354,7 +375,10 @@ export function useChat() {
         setStatus("connected", "on");
         const first = !hasJoinedOnce;
         inChat.value = true;
-        if (first) messages.value = [];
+        if (first) {
+          messages.value = [];
+          clearUnread();
+        }
         online = new Set();
         syncUsers();
         awaitingJoin = true;
@@ -490,6 +514,58 @@ export function useChat() {
 
   function onMessageInput(ev) {
     message.value = ev.target.value;
+    // Typing abandons history browsing: ArrowDown no longer has a draft to
+    // restore, and the next ArrowUp starts fresh from the newest send.
+    composerHistory.cancel();
+  }
+
+  // Clicking a transcript nick drops "@nick " into the composer at the
+  // caret and focuses it, so a reply can start mid-thought.
+  function mentionNick(name) {
+    const who = String(name || "").trim();
+    if (!who) return;
+    const tag = "@" + who + " ";
+    const el = messageEl.value;
+    const cur = String(message.value || "");
+    let caret = -1;
+    if (el && typeof el.selectionStart === "number") {
+      const pos = el.selectionStart;
+      const before = cur.slice(0, pos);
+      const after = cur.slice(pos);
+      const sep = before === "" || /\s$/.test(before) ? "" : " ";
+      message.value = before + sep + tag + after;
+      caret = before.length + sep.length + tag.length;
+    } else {
+      const sep = cur === "" || /\s$/.test(cur) ? "" : " ";
+      message.value = cur + sep + tag;
+    }
+    nextTick(() => {
+      const node = messageEl.value;
+      if (!node) return;
+      node.focus();
+      if (caret >= 0) {
+        try { node.setSelectionRange(caret, caret); } catch (_) { /* ignore */ }
+      }
+    });
+  }
+
+  function jumpToLatest() {
+    scrollToEnd();
+  }
+
+  function onComposerKeydown(ev) {
+    if (ev.key !== "ArrowUp" && ev.key !== "ArrowDown") return;
+    const next = composerHistory.step(ev.key === "ArrowUp" ? -1 : 1, message.value);
+    if (next === null) return;
+    ev.preventDefault();
+    message.value = next;
+    nextTick(() => {
+      const node = messageEl.value;
+      if (!node) return;
+      node.focus();
+      const end = next.length;
+      try { node.setSelectionRange(end, end); } catch (_) { /* ignore */ }
+    });
   }
 
   function onJoin() {
@@ -531,6 +607,7 @@ export function useChat() {
     }
     followTail = true;
     if (sendChatText(text)) {
+      composerHistory.push(text);
       message.value = "";
       nextTick(scrollToEnd);
     }
@@ -627,6 +704,11 @@ export function useChat() {
     relayUrl: RELAY_URL,
     boardView,
     reloadBoard,
+    unreadCount,
+    firstUnreadId,
+    mentionNick,
+    jumpToLatest,
+    onComposerKeydown,
     onTranscriptScroll,
     onNickInput,
     onChannelInput,

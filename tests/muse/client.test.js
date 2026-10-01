@@ -32,8 +32,11 @@ test("join fields have no name attribute", () => {
   assert.ok(start > 0 && end > start);
   const form = vue.slice(start, end);
   assert.doesNotMatch(form, /\sname\s*=/);
-  assert.doesNotMatch(form, /type="password"/);
+  // The join form intentionally has a masked password field now (join
+  // passwords, voizle#7): its id is "join-password", never "password".
   assert.doesNotMatch(form, /id="password"/);
+  assert.match(form, /id="join-password"/);
+  assert.match(form, /type="password"/);
   assert.match(form, /id="trip"/);
   assert.match(form, /type="text"/);
   assert.match(form, /Not your password/);
@@ -144,3 +147,54 @@ test("sidebar board link hides on narrow widths (nothing board-like above phone 
   assert.match(app.slice(linkAt - 500, linkAt), /max-\[820px\]:hidden/);
 });
 
+test("clicking a transcript nick mentions it in the composer", () => {
+  const app = fs.readFileSync(appVue, "utf8");
+  // The nick is a real button now (focusable, keyboard-operable), wired to
+  // the mention handler; sys rows (no nick) still render no button.
+  assert.match(app, /@click="mentionNick\(row\.nick\)"/);
+  assert.match(app, /:title="'Mention ' \+ row\.nick"/);
+  assert.match(app, /mentionNick,/);
+  const chat = fs.readFileSync(useChat, "utf8");
+  assert.match(chat, /function mentionNick\(name\)/);
+  assert.match(chat, /from\s+"\.\/composerHistory\.js"/);
+  // The mention inserts "@nick " at the caret and focuses the composer.
+  assert.match(chat, /"@" \+ who \+ " "/);
+  assert.match(chat, /setSelectionRange\(caret, caret\)/);
+});
+
+test("chat transcript shows an unread divider and a jump pill when scrolled up", () => {
+  const app = fs.readFileSync(appVue, "utf8");
+  assert.match(app, /unreadCount/);
+  assert.match(app, /firstUnreadId/);
+  assert.match(app, /v-if="row\.id === firstUnreadId && unreadCount > 0"/);
+  assert.match(app, /New messages/);
+  assert.match(app, /@click="jumpToLatest"/);
+  assert.match(app, /\{\{ unreadCount \}\} new/);
+  assert.match(app, /jumpToLatest,/);
+  const chat = fs.readFileSync(useChat, "utf8");
+  // Rows arriving while the reader is up the transcript count as unread;
+  // any return to the tail (scroll, send, pill tap, fresh join) clears.
+  assert.match(chat, /unreadCount\.value \+= 1/);
+  assert.match(chat, /firstUnreadId\.value = id/);
+  assert.match(chat, /function clearUnread\(\)/);
+  assert.match(chat, /function jumpToLatest\(\)/);
+  // The published fallback bundle carries the new affordance.
+  const published = readPublished();
+  assert.match(published, /New messages/);
+});
+
+test("composer recalls sent messages with ArrowUp/ArrowDown", () => {
+  const app = fs.readFileSync(appVue, "utf8");
+  assert.match(app, /@keydown="onComposerKeydown"/);
+  assert.match(app, /onComposerKeydown,/);
+  const chat = fs.readFileSync(useChat, "utf8");
+  assert.match(chat, /function onComposerKeydown\(ev\)/);
+  assert.match(chat, /composerHistory\.step\(ev\.key === "ArrowUp" \? -1 : 1/);
+  // Sends are recorded; typing abandons an in-progress browse.
+  assert.match(chat, /composerHistory\.push\(text\)/);
+  assert.match(chat, /composerHistory\.cancel\(\)/);
+  // History never touches browser storage (the suite's guardrail covers src,
+  // and the module itself must stay DOM-free and console-free).
+  const hist = fs.readFileSync(path.join(srcDir, "composerHistory.js"), "utf8");
+  assert.doesNotMatch(hist, /localStorage|sessionStorage|document|window|console\./);
+});
