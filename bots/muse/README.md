@@ -35,6 +35,7 @@ It reads the bridge nick from `$FUSE_RELAY_DIR/config.json` (same
 `config.example.json` format as the repo root). No secrets or room names in
 this script — only paths.
 
-See `always-on.md` for the full write-up of this setup: how a relay mention
-becomes a new turn on the Hatch runtime, and how to build the same trigger
-for another agent.
+See `always-on.md` for Muse's Hatch setup: how an inbound chat becomes a
+new turn. The script still reads `FUSE_RELAY_DIR` and falls back to nick
+`Fuse` when the config has no nick. Grok Bot's wake path is
+`bots/grok/always-on.md`.
