@@ -113,10 +113,10 @@ internal static class OutboxPayload
     /// as is; an object with a string <c>text</c> becomes a chat. A line may hold several
     /// concatenated JSON objects (two appends that lost the newline between them); each one becomes
     /// its own frame, but only when every top-level value is an accepted envelope. One non-sendable
-    /// value — plain text, a protocol object, an array, a bare value, truncated input, or trailing
-    /// garbage — drops the whole line, including any valid envelopes beside it. Fail closed: the
-    /// channel must never see raw outbox bytes, and a mixed line must not send a partial result.
-    /// Blank lines give no frames (nothing to send).
+    /// value — plain text, a protocol object, an array, a bare value, truncated input, trailing
+    /// garbage, or a chat whose text is CLI/shell probe leftover — drops the whole line, including
+    /// any valid envelopes beside it. Fail closed: the channel must never see raw outbox bytes, and
+    /// a mixed line must not send a partial result. Blank lines give no frames (nothing to send).
     /// </summary>
     public static IReadOnlyList<JsonObject> BuildAll(string line)
     {
@@ -235,11 +235,97 @@ internal static class OutboxPayload
 
     private static JsonObject? FromObject(JsonObject o)
     {
-        if (Json.Str(o, "cmd") is not null)
+        // A string cmd is sent as-is, except a chat whose text is probe leftover: that envelope
+        // is not sendable, so the caller fail-closes the whole line. Other commands (emote, join)
+        // are unchanged even when their text looks like a flag.
+        if (Json.Str(o, "cmd") is { } cmd)
+        {
+            if (cmd == "chat" && CliProbeText.IsFragment(Json.Str(o, "text")))
+                return null;
             return o;
+        }
         if (Json.Str(o, "text") is { } text)
+        {
+            if (CliProbeText.IsFragment(text))
+                return null;
             return new JsonObject { ["cmd"] = "chat", ["text"] = text };
+        }
         return null;
+    }
+}
+
+/// <summary>
+/// Accidental CLI and shell probe text that wake hooks have posted as chat
+/// (<c>hc say --help</c>, bad quoting). A normal sentence that mentions a flag or a price is not a fragment.
+/// </summary>
+internal static class CliProbeText
+{
+    /// <summary>
+    /// True when <paramref name="text"/> is probe leftover rather than a chat message.
+    /// Null, blank, and ordinary sentences are not fragments.
+    /// </summary>
+    public static bool IsFragment(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+            return false;
+
+        var s = StripOneQuoteLayer(text.Trim());
+        if (s.Length == 0)
+            return false;
+
+        if (s is "--help" or "-h" or "--" or "help")
+            return true;
+
+        return IsSingleFlagToken(s) || IsBareShellLeftover(s);
+    }
+
+    /// <summary>One matching pair of <c>'</c> or <c>"</c> around the whole string, then trim again.</summary>
+    private static string StripOneQuoteLayer(string s)
+    {
+        if (s.Length >= 2 && s[0] == s[^1] && s[0] is '"' or '\'')
+            return s[1..^1].Trim();
+        return s;
+    }
+
+    /// <summary>
+    /// One flag token: a leading <c>-</c> or <c>--</c>, no spaces or tabs, and a non-empty body of
+    /// letters, digits, <c>-</c>, and <c>_</c>. A lone <c>-</c> is not a flag. <c>--</c> is an exact
+    /// match in <see cref="IsFragment"/>, not this rule (its body is empty).
+    /// </summary>
+    private static bool IsSingleFlagToken(string s)
+    {
+        if (s.Length < 2 || s[0] != '-')
+            return false;
+        if (s.Contains(' ') || s.Contains('\t'))
+            return false;
+
+        var body = s.StartsWith("--", StringComparison.Ordinal) ? s[2..] : s[1..];
+        if (body.Length == 0)
+            return false;
+
+        foreach (var c in body)
+        {
+            if (!IsFlagBodyChar(c))
+                return false;
+        }
+        return true;
+    }
+
+    private static bool IsFlagBodyChar(char c) =>
+        c is (>= 'a' and <= 'z') or (>= 'A' and <= 'Z') or (>= '0' and <= '9') or '-' or '_';
+
+    /// <summary><c>$</c> plus only letters, digits, and <c>_</c>, such as <c>$REPLY</c> or <c>$1</c>.</summary>
+    private static bool IsBareShellLeftover(string s)
+    {
+        if (s.Length < 2 || s[0] != '$')
+            return false;
+        for (var i = 1; i < s.Length; i++)
+        {
+            var c = s[i];
+            if (c is not ((>= 'a' and <= 'z') or (>= 'A' and <= 'Z') or (>= '0' and <= '9') or '_'))
+                return false;
+        }
+        return true;
     }
 }
 
