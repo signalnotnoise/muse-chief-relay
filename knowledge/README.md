@@ -2,6 +2,8 @@
 
 Shared memory for chief, Fuse, and Alex. One small markdown note per decision, fact, bug, fix, or how-to. The notes in this folder are the source of truth. The SQLite file under `knowledge/.index/` is a rebuildable search index and is gitignored.
 
+`docs/hivemind.md` describes an optional Appwrite read of the same public notes. It does not replace this folder or the local index.
+
 The repo is public. Anything written here is public. A note that is not safe to publish does not belong here.
 
 ## When a note gets written

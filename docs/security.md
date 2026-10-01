@@ -104,6 +104,12 @@ renders the board as text. A missing board, a failed fetch, or a page without `c
 leaves the chat up. The channel and the hash are not written to the URL, storage, logged output,
 or the page title.
 
+A Node process can also read that hash from Appwrite (`docs/hivemind.md`). The API key is
+`APPWRITE_API_KEY` in the environment, not in the repo and not in the Pages bundle. Logs from
+that client name the operation and the status code. They do not include the key, the channel,
+or the document body. If Appwrite is unset or the read fails, the same git/jsonl fetch runs.
+That fallback is not a production cutover: the static page still works with the variables unset.
+
 ## Knowledge graph
 
 Alex's private knowledge graph (Voizle) is not in this repo. Never copy it into docs/status.json, the status page, a room board, or chat, and never add a Voizle repo to publish_repos. The room board (committed, public), the status page (fail-closed) and the knowledge graph (private, local) are separate and don't feed each other.

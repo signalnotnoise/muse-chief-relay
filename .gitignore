@@ -1,5 +1,7 @@
 # Local config & runtime (never commit)
 config.json
+.env
+.env.local
 inbox.jsonl
 outbox.jsonl
 unread.jsonl

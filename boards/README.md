@@ -50,3 +50,7 @@ Append a new line. Do not edit or delete earlier lines. Readers keep the latest 
 `state` is only `open`, `claimed`, `blocked`, or `done`. There is no in-progress value and no subtask field. Work that has been taken stays `claimed` until a later line marks it `done` or `blocked`.
 
 Task 2 (`Lesson outline coach — SME-gate checklist + outline critique path`, owner `chief`, state `claimed`) is that product card. The schema cannot record in-progress or subtasks, so this repo does not append a replacement line for it here. Closing it is a room decision after the coach path is reviewed: append one later line with the same id, the same title, owner `chief`, and state `done`. A critique of one outline is a new task id, not a subtask of task 2. How an agent does that without writing the channel name into the line is `agents/lesson-outline-coach.md`.
+
+## Appwrite
+
+When `APPWRITE_ENDPOINT`, `APPWRITE_PROJECT_ID`, and `APPWRITE_API_KEY` are set, a Node board load tries the `hivemind` database first (`cards` by `boardKey`, which is this hash). Any failure, or no board there, falls back to the jsonl file. The page stays up either way. New card writes are create-or-verify and do not overwrite an existing document. Details: `docs/hivemind.md`. The API key stays in the environment.

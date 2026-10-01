@@ -35,7 +35,55 @@ export function createRoomBoard(options = {}) {
 
   let boardLoadGen = 0;
   let boardHash = null;
+  let envReader;
   const state = blankState();
+
+  // Prefer HIVEMIND when a reader is passed in, or when this process is Node
+  // and APPWRITE_* is set. The browser bundle does not statically import the
+  // server SDK. A miss, a bad env, or a thrown read falls through to git/jsonl.
+  function runningInNode() {
+    const proc = globalThis.process;
+    return !!(proc && proc.versions && proc.versions.node && proc.env);
+  }
+
+  function reader() {
+    if (options.hivemind === null) return Promise.resolve(null);
+    if (options.hivemind && typeof options.hivemind.readBoard === "function") {
+      return Promise.resolve(options.hivemind);
+    }
+    if (!runningInNode()) return Promise.resolve(null);
+    const env = globalThis.process.env;
+    if (!env.APPWRITE_ENDPOINT || !env.APPWRITE_PROJECT_ID || !env.APPWRITE_API_KEY) {
+      return Promise.resolve(null);
+    }
+    if (!envReader) {
+      const load = new Function("m", "return import(m)");
+      envReader = load("node:module").then((nodeModule) => {
+        const require = nodeModule.createRequire(import.meta.url);
+        const mod = require("../hivemindClient.js");
+        if (!mod || typeof mod.createHivemind !== "function") return null;
+        return mod.createHivemind({ env: env });
+      }).catch(() => null);
+    }
+    return envReader;
+  }
+
+  async function readHive(hash) {
+    let hive;
+    try {
+      hive = await reader();
+    } catch (e) {
+      return null;
+    }
+    if (!hive || typeof hive.readBoard !== "function") return null;
+    try {
+      const result = await hive.readBoard(hash);
+      if (!result || result.status !== "ok" || !result.board || !Array.isArray(result.board.tasks)) return null;
+      return result;
+    } catch (e) {
+      return null;
+    }
+  }
 
   function snapshot() {
     return {
@@ -78,6 +126,17 @@ export function createRoomBoard(options = {}) {
   }
 
   async function renderLoaded(gen, hash, cacheBust) {
+    const hive = await readHive(hash);
+    if (gen !== boardLoadGen) return snapshot();
+    if (hive) {
+      state.board = hive.board;
+      state.message = "";
+      state.viaText = " · " + (hive.via || "Appwrite") + " · " + hash.slice(0, 8);
+      state.statusText = "read-only";
+      state.statusKind = "ok";
+      publish();
+      return snapshot();
+    }
     let sources;
     try {
       sources = api.boardSources(hash, pageUrl(), cacheBust || 0);

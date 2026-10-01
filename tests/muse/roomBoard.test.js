@@ -131,6 +131,125 @@ test("a loaded board is parsed, Reload refetches, and Disconnect clears it", asy
   assert.equal(urls.length, afterClear);
 });
 
+test("Appwrite is preferred, and a miss or a throw falls back to git", async () => {
+  const urls = [];
+  const hiveBoard = {
+    tasks: [{ type: "task", id: 9, title: "from appwrite", owner: "Alex", state: "open" }],
+    decisions: [],
+    scratch: [],
+    skipped: 0,
+  };
+  const preferred = roomBoard.createRoomBoard({
+    pageUrl: () => "http://127.0.0.1:8080/docs/muse/",
+    hivemind: {
+      async readBoard(hash) {
+        assert.equal(hash, HASH);
+        return { status: "ok", board: hiveBoard, via: "Appwrite" };
+      },
+    },
+    fetchImpl: async (url) => {
+      urls.push(String(url));
+      return response(200, jsonl(), "text/plain");
+    },
+  });
+  const state = await preferred.startBoard("abc");
+  assert.equal(urls.length, 0);
+  assert.equal(state.board.tasks[0].title, "from appwrite");
+  assert.match(state.viaText, /Appwrite/);
+  assert.equal(state.statusText, "read-only");
+  assert.equal(JSON.stringify(state).includes("abc"), false);
+
+  const thrown = roomBoard.createRoomBoard({
+    pageUrl: () => "http://127.0.0.1:8080/docs/muse/",
+    hivemind: {
+      async readBoard() { throw new Error("offline"); },
+    },
+    fetchImpl: async (url) => {
+      urls.push(String(url));
+      return response(200, jsonl(), "text/plain");
+    },
+  });
+  const fellBack = await thrown.startBoard("abc");
+  assert.equal(fellBack.board.tasks[0].title, "teaching card");
+  assert.match(fellBack.viaText, /this repo/);
+  assert.equal(urls.length > 0, true);
+
+  const before = urls.length;
+  const empty = roomBoard.createRoomBoard({
+    pageUrl: () => "http://127.0.0.1:8080/docs/muse/",
+    hivemind: {
+      async readBoard() { return { status: "empty", board: null, via: "" }; },
+    },
+    fetchImpl: async (url) => {
+      urls.push(String(url));
+      return response(404, "nope", "text/plain");
+    },
+  });
+  const missing = await empty.startBoard("abc");
+  assert.equal(missing.message, "No board for this channel yet.");
+  assert.ok(urls.length > before);
+});
+
+test("a non-https Appwrite env falls back and does not fetch that endpoint", async () => {
+  const prev = {
+    APPWRITE_ENDPOINT: process.env.APPWRITE_ENDPOINT,
+    APPWRITE_PROJECT_ID: process.env.APPWRITE_PROJECT_ID,
+    APPWRITE_API_KEY: process.env.APPWRITE_API_KEY,
+  };
+  process.env.APPWRITE_ENDPOINT = "http://127.0.0.1/v1";
+  process.env.APPWRITE_PROJECT_ID = "fixture-project";
+  process.env.APPWRITE_API_KEY = "fixture-key";
+  const urls = [];
+  try {
+    const room = roomBoard.createRoomBoard({
+      pageUrl: () => "http://127.0.0.1:8080/docs/muse/index.html",
+      fetchImpl: async (url) => {
+        urls.push(String(url));
+        return response(200, jsonl(), "text/plain");
+      },
+    });
+    const state = await room.startBoard("abc");
+    assert.equal(state.board.tasks[0].title, "teaching card");
+    assert.match(state.viaText, /this repo/);
+    assert.equal(urls.some((url) => url.includes("fixture-key")), false);
+    assert.equal(urls.some((url) => url.startsWith("http://127.0.0.1/v1")), false);
+    assert.equal(JSON.stringify(state).includes("fixture-key"), false);
+  } finally {
+    for (const key of Object.keys(prev)) {
+      if (prev[key] === undefined) delete process.env[key];
+      else process.env[key] = prev[key];
+    }
+  }
+});
+
+test("an Appwrite load that finishes after Disconnect does not replace the placeholder", async () => {
+  let releaseLoad;
+  let markEntered;
+  const entered = new Promise((resolve) => { markEntered = resolve; });
+  const room = roomBoard.createRoomBoard({
+    hivemind: {
+      readBoard() {
+        markEntered();
+        return new Promise((resolve) => { releaseLoad = resolve; });
+      },
+    },
+    fetchImpl: async () => response(200, jsonl(), "text/plain"),
+  });
+  const pending = room.startBoard("abc");
+  await entered;
+  room.showBoardPlaceholder();
+  releaseLoad({
+    status: "ok",
+    via: "Appwrite",
+    board: { tasks: [{ id: 1, title: "late", owner: "Alex", state: "open" }], decisions: [], scratch: [], skipped: 0 },
+  });
+  await pending;
+  const state = room.getState();
+  assert.equal(state.message, "Join a channel to see its room board.");
+  assert.equal(state.board, null);
+  assert.equal(state.reloadDisabled, true);
+});
+
 test("a load that finishes after Disconnect does not replace the placeholder", async () => {
   let releaseLoad;
   let markEntered;
