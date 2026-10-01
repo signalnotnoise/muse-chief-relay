@@ -1,5 +1,6 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import AttentionQueue from "./AttentionQueue.vue";
 import RoomBoard from "./RoomBoard.vue";
 import SiteHeader from "./SiteHeader.vue";
 import { useChat } from "./useChat.js";
@@ -53,12 +54,13 @@ const {
   messageEl,
   boardView,
   reloadBoard,
+  attentionItems,
+  clearAttentionItem,
   unreadCount,
   firstUnreadId,
   mentionNick,
   jumpToLatest,
-  onComposerKeydown,
-  onTranscriptScroll,
+  onComposerKeydown,  onTranscriptScroll,
   onNickInput,
   onChannelInput,
   onMessageInput,
@@ -290,6 +292,15 @@ const openTasks = computed(() => {
 
             <main class="flex min-h-0 min-w-0 flex-col overflow-hidden">
               <h1 class="sr-only">Relay chat</h1>
+              <!-- The room's hard blocks on Alex: blocked board tasks waiting
+                   on him. Hidden entirely when the queue is empty. -->
+              <div v-if="attentionItems.length" class="shrink-0 px-4 pt-3.5">
+                <AttentionQueue
+                  :items="attentionItems"
+                  :pulls-url="GITHUB_URL + '/pulls'"
+                  @clear="clearAttentionItem"
+                />
+              </div>
               <div
                 id="transcript"
                 ref="transcriptEl"

@@ -1,8 +1,9 @@
-import { nextTick, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 import { onSocketClose, recordJoinWarn } from "./reconnect.js";
 import { chatFrame, isHello, joinFrame, publicTrip } from "./relayProtocol.js";
 import { resolveRelayUrl } from "./relayUrl.js";
 import { createRoomBoard } from "./roomBoard.js";
+import { deriveAttentionItems } from "./attentionQueue.js";
 import { isNearBottom } from "./scroll.js";
 import { createComposerHistory } from "./composerHistory.js";
 import { formatTrip } from "./watchFormat.js";
@@ -114,6 +115,27 @@ export function useChat() {
 
   function reloadBoard() {
     Promise.resolve(room.reloadBoard()).then(syncBoard, syncBoard);
+  }
+
+  // Attention queue: the room's hard blocks on Alex, derived from the parsed
+  // board (works whether the board came from Appwrite or git). Cleared keys
+  // are session-scoped: the board file is the persistent store, so nothing
+  // is written to browser storage. A cleared item stays hidden until the
+  // task leaves the blocked state.
+  const clearedAttention = ref(new Set());
+  const attentionItems = computed(() => {
+    const view = boardView.value;
+    const board = view && view.board;
+    const cleared = clearedAttention.value;
+    const items = deriveAttentionItems(board);
+    if (!cleared.size) return items;
+    return items.filter((item) => !cleared.has(item.key));
+  });
+  function clearAttentionItem(item) {
+    if (!item || !item.key) return;
+    const next = new Set(clearedAttention.value);
+    next.add(item.key);
+    clearedAttention.value = next;
   }
 
   let ws = null;
@@ -704,6 +726,8 @@ export function useChat() {
     relayUrl: RELAY_URL,
     boardView,
     reloadBoard,
+    attentionItems,
+    clearAttentionItem,
     unreadCount,
     firstUnreadId,
     mentionNick,
