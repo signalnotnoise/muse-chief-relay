@@ -1,81 +1,65 @@
 # Always-on wake for Grok Bot (chief)
 
-How a relay message wakes **Grok Bot** — chief, the Chief of Staff on the
-desktop bridge. The long-lived pieces are `Chief.Bridge` and its `hook`
-poller. The operator's webhook routine, which is outside this repo, starts
-the Grok Bot turn.
+How a relay message wakes **Grok Bot** — chief, the Chief of Staff. Two
+box-local processes stay up: `Chief.Bridge` on the socket, and
+`Chief.Bridge hook` posting to a webhook. The webhook starts a new Chief
+turn. Muse's Hatch hook is a different runtime (`bots/muse/always-on.md`).
 
-Muse does not use this path. Muse's Hatch hook is `bots/muse/always-on.md`.
+Real `url`, channel, nick, trip, webhook URL, and bearer key stay in
+gitignored config and in the box environment. This file uses placeholders.
 
-The bridge program is `Chief.Bridge` in `src/Chief.Bridge`, or the
-`chief-bridge` tool. This directory does not ship a second channel client.
+## How a message gets there
 
-## The primitive: `Chief.Bridge hook`
-
-Grok Bot runs when the webhook fires. The loop is two always-on processes
-and a fresh turn per fire:
+1. **The bridge stays joined.** Box-local `Chief.Bridge` (C#, `src/Chief.Bridge`) holds the owned `voizle-text-relay` WebSocket. `config.json` supplies `url`, `channel`, `nick`, and `trip`. Commit none of those values. The shape to copy is `config.example.json` (`wss://…` placeholder, `your-channel-name`, nick `chief`, trip `Ab12Cd`). On this relay a `trip` is a public code, not a password.
+2. **Every inbound frame is logged.** The bridge appends JSONL to `{base}/inbox.jsonl` (`base` is the config field, or the config file's directory). Each line is one object. Outbound copies land in the same file; the hook does not forward them.
+3. **A second process polls that inbox.** `Chief.Bridge hook` POSTs new inbound chats to the Grok Bot webhook. On the box it is started from the local runner `hook/run-hook.py`. That file is not in this repo. `bots/grok/` is the pattern for what it starts, not a copy of the runner. Do not commit a runner that contains the webhook URL or key.
+4. **The `hook` block names the secrets. It does not hold them.** `hook.url_env` and `hook.auth_env` are variable names. The defaults are `CHIEF_HOOK_URL` and `CHIEF_HOOK_AUTH`. `hook.auth_scheme` defaults to `Bearer`, sent as `Authorization: Bearer <key>`. The values live only in the poller's environment (box secrets). `config.example.json` shows the names. See `docs/security.md`, "Wake-up webhook secret".
+5. **The webhook opens a Chief turn.** It wakes the Grok Bot routine named `hack.chat message hook`. That routine starts a new turn with the chat payload. The POST is the wake-up. The turn still drains the inbox with `watch` (below). The payload shape is in `docs/protocol.md`, "Local wake-up webhook": `source`, `channel`, `chats` of `{nick, trip, text, ts}`. Use that doc's placeholder channel. Do not paste a real channel name into a commit.
+6. **Only trusted trips are forwarded.** On this box `hook.trips` is the trusted-trip list, so other room traffic does not wake Grok Bot or spend API credits. A mention of `@chief` from a sender on that list is forwarded with the rest of that sender's chats. The hook matches the trip, not the mention text. A leading `!` is dropped. Put the real codes only in gitignored `config.json`. The committed example leaves `trips` as `[]`, and an empty list forwards every nick except the bridge — that setting does not save credits. The turn still applies the trust rules in `agents/chief.md`.
 
 ```
-relay ─► Chief.Bridge (always on) ─► inbox.jsonl ─► Chief.Bridge hook (always on) ─POST─► webhook routine ─► Grok Bot wakes
-                ▲                                                                                         │
-                └──────── outbox.jsonl ◄── say ◄── reply ◄── drain with `watch` ◄─────────────────────────┘
+voizle-text-relay ─► Chief.Bridge ─► {base}/inbox.jsonl ─► Chief.Bridge hook ─POST─► "hack.chat message hook" ─► new Chief turn
+                                              ▲                              │
+                                              └── hook/run-hook.py (on the box, not in git)
 ```
 
-- **The bridge** holds the WebSocket and appends every frame to `<base>/inbox.jsonl`. It is the only process on the socket. It reconnects on its own.
-- **The hook poller**, `Chief.Bridge hook --config <path>`, watches that file (file-system events, plus a poll every `hook.poll_s`, default 5 s). A qualifying chat is POSTed as JSON. After a fire it waits `hook.cooldown_s` (default 15 s). Chats that arrive in the gap go out together in the next fire.
-- **The webhook routine** is the URL the operator put in the poller's environment. That call is what wakes Grok Bot. The URL and the key are not stored in this repo.
-- **The woken turn** drains with `Chief.Bridge watch --config <path>` (no `--wait`) and replies with `say` or one line on `outbox.jsonl`, inside the `hook/reply.lock` flock, then stops. The next qualifying chat wakes it again.
+Check the path without printing secrets:
 
-`watch --wait` is not this loop. On 2026-09-27 a background `watch --wait` exited and the wake never reached chief. See `agents/chief.md`.
+```bash
+Chief.Bridge hook --config /path/to/config.json --test
+# prints e.g. "hook test: HTTP 200", never the URL or the key
+```
 
-## The concrete setup
+## Offset discipline
 
-Paths are under the bridge `base` directory: the `base` field in `config.json`, or the config file's directory when `base` is omitted. `config.json`, the inbox, and the offset files stay uncommitted. The channel name, a trip password, and the webhook URL and key stay in the operator's config and environment, not in this file.
+Same idea as Muse's hook (`bots/muse/always-on.md`): a durable offset file, a silent first run, and a rotation reset. The file is `{base}/.hook.offset` unless `hook.state` overrides it. The status file is that path plus `.status`. `watch` uses a different file, `{base}/.inbox_watch.offset`.
 
-| Piece | Where it comes from |
-|---|---|
-| Hook command | `Chief.Bridge hook --config <path>` (installed tool: `chief-bridge hook --config <path>`) |
-| Config | Gitignored `config.json`. The `hook` block's shape is `config.example.json`. Field list: README, "Webhook poller". |
-| Inbox | `<base>/inbox.jsonl` |
-| Hook offset | `<base>/.hook.offset`, unless `hook.state` overrides it. The status file is that path plus `.status`. |
-| Watch offset | `<base>/.inbox_watch.offset` (a different file from the hook offset) |
-| Reply lock | `<base>/hook/reply.lock` |
-| Webhook URL | The environment variable named by `hook.url_env` (default name `CHIEF_HOOK_URL`). `config.json` stores the name only. |
-| Webhook key | The environment variable named by `hook.auth_env` (default name `CHIEF_HOOK_AUTH`). `hook.auth_scheme` defaults to `Bearer`. `auth_env` of `""` sends no `Authorization` header. |
-| Own nick | `nick` in `config.json`. The example file uses `chief`. |
-| Trip filter | `hook.trips`. `[]` (the example default) means every sender except the bridge's own nick. A non-empty list fires only for those trips. A leading `!` is dropped. |
-| One-shot check | `Chief.Bridge hook --config <path> --test` posts one fake chat and prints a status such as `hook test: HTTP 200`. The line does not include the URL or the key. |
+- **First run is a silent catch-up.** No offset file yet: record the end of the inbox and deliver nothing, so history does not fire. If the inbox file is not there yet, record 0 so lines that show up later are new.
+- **Advance before a fire, or with a successful one.** New lines that contain no chat to POST move the offset immediately. A batch that is POSTed moves the offset only after HTTP 2xx. A non-2xx, a timeout, or a network error leaves the offset put, and the chats stay queued. Redirects are not followed.
+- **Log rotation is detected.** A shorter file, or a file whose first bytes changed, resets the read to 0 so the new log is not treated as already consumed. Only complete lines are read.
+- One poller per offset file. A second `hook` on that offset exits 4.
 
-The POST is `Content-Type: application/json` with `source` (default `chief-bridge-hook`), `channel` (the channel in that bridge's config), and `chats` (`nick`, `trip`, `text`, `ts`). `omitted` appears only when the batch was capped. The field list is in `docs/protocol.md` ("Local wake-up webhook"). Use the placeholder channel from that doc. Do not paste a real channel name into a commit.
+Muse writes its offset before `wake()` because that call exits the script. This poller keeps running, so a posted batch is committed with the 2xx, not before the POST.
 
-Log lines name the HTTP status or the error kind (`timeout`, `error ConnectionError`). They do not name the host.
+## When chief looks gone
 
-## The pattern
+A quiet socket is normal. After the join is confirmed, `receive_idle_s` (default 300) with no inbound frame cancels that session, sets `state.json` to `reconnecting: true` with a `reason` starting `receive_idle`, and backs off. The process stays up and rejoins. An external watchdog should wait longer than that timer (360 s when the timer stays 300 s). See `knowledge/receive-idle-watchdog.md`.
 
-1. **The bridge is the listener.** `hook` reads `inbox.jsonl` with the same line rules as `watch`. There is no Hatch script and no `$HATCH_HOOK_RUNTIME`.
-2. **What qualifies.** An inbound chat from a nick other than the bridge. Other frames, outbound copies, and malformed lines are skipped. When `hook.trips` is non-empty, a sender whose trip is not listed is skipped too. An empty list is not a trust decision: untripped senders can fire the webhook, and the turn still applies `agents/chief.md`.
-3. **Offset discipline.** This is the opposite of Muse's hook, because the poller is still alive after the POST:
-   - **Deliver first, save second.** The offset moves past a batch only after a **2xx**. A non-2xx, a timeout, or a network error leaves the chats on disk and retries with backoff. Redirects are not followed, so the key is not sent to another host.
-   - Leave Muse's "write the offset before `wake()`" on Muse's hook. Writing the offset first here drops chats that never got a 2xx.
-   - A crash between the 2xx and the save can deliver one batch twice. The turn treats the POST as a wake-up and reads the room with `watch`.
-   - The first run starts at the end of the inbox, so history does not fire.
-   - A truncated or rotated inbox starts over from 0. A half-written line waits for its newline.
-   - One poller per offset file. A second `hook` on that offset exits **4**.
-4. **Drain after the wake.** `watch` prints a JSON array of new inbound chats. That array is the source of truth. An empty array means another wake already drained them. Run one drain at a time per watch-offset file.
-5. **Reply under the lock, then stop.** The flock is `<base>/hook/reply.lock`. Restart the bridge only from a shell that does not hold it. See README, "Reply lock", and `agents/chief.md`.
+The nick can also look absent while the WebSocket join is healthy. Those are different failures:
 
-## Why it stays up
+- **The wake hook stalled.** `Chief.Bridge status` shows `hook: NOT RUNNING` or `hook: FAILING`. Chats are still appended to `inbox.jsonl`. Nothing POSTs, so Grok Bot does not start. When `auto_ack` is on, the bridge says the wake-up hook is not working instead of promising a reply. Restarting the poller needs `CHIEF_HOOK_URL` and `CHIEF_HOOK_AUTH` in the environment. That is an operator step. The box starter is `hook/run-hook.py`.
+- **The agent is out of API credits.** The join can stay up and the hook can still POST, but the new Chief turn does not run. The room then looks empty on chief's side even though the bridge is connected.
 
-- The bridge process reconnects by itself (backoff, and the receive-idle timer). A quiet socket is not, by itself, a stopped wake path. An external process watchdog should use a longer clock than `receive_idle_s` (360 s when that timer stays 300 s). See `knowledge/receive-idle-watchdog.md`.
-- `hook` runs until SIGTERM or Ctrl+C. Chats not yet delivered stay in `inbox.jsonl` for the next start.
-- `Chief.Bridge status` reports `running`, `FAILING`, or `NOT RUNNING`, and how many chats `watch` has not read (`undrained`). A poller that is not running still logs chats. It does not wake Grok Bot. Restarting it needs the webhook variables in the environment, so that restart is an operator step.
+`status` separates them: bridge pid and `reconnecting`, versus hook `running` / `FAILING` / `NOT RUNNING` and `undrained` chats `watch` has not read.
 
-When `auto_ack` is on, the bridge may send a short `(auto)` line before Grok Bot is awake. That line is a receipt. If the poller is `NOT RUNNING` or `FAILING`, the offline text says the wake-up hook is not working. See README, "Auto-acknowledgement".
+## After the wake
+
+The routine's payload is the wake-up, not the whole transcript. The turn runs `Chief.Bridge watch --config <path>` (no `--wait`), replies with `say` or one `outbox.jsonl` line inside `{base}/hook/reply.lock`, then stops. The next qualifying chat wakes it again. `watch --wait` is not this loop. See `agents/chief.md`.
 
 ## Boundary
 
-The POST starts a Grok Bot turn through the webhook configured for this bridge. It does not call Hatch `wake()`, and it does not start one of Muse's workers.
+This POST starts a Grok Bot turn through `hack.chat message hook`. It does not call Hatch `wake()`, and it does not start one of Muse's workers.
 
 - Webhook secret handling: `docs/security.md`, "Wake-up webhook secret".
-- The loop the agent runs: `agents/chief.md`, "How you get woken".
-- Wire protocol versus this local POST: `docs/protocol.md`, "Local wake-up webhook".
+- Field list for the POST: `docs/protocol.md`, "Local wake-up webhook".
+- Poller defaults: README, "Webhook poller".

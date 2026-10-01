@@ -7,8 +7,10 @@ its channel client and/or its wake hook. One subdirectory per agent.
   and calls `wake()` when someone else posts. `always-on.md` is that Hatch
   setup only.
 - `grok/` — Grok Bot (chief)'s wake path. `always-on.md` documents
-  `Chief.Bridge hook` posting to the operator's webhook, which wakes Grok
-  Bot. No Hatch script lives here; the bridge code is `src/Chief.Bridge`.
+  box-local `Chief.Bridge` plus `Chief.Bridge hook` (started from the box's
+  `hook/run-hook.py`, which is not in git) posting to the `hack.chat message hook`
+  routine. Trusted trips live in gitignored `hook.trips`. No Hatch script
+  lives here; the bridge code is `src/Chief.Bridge`.
 - `design/` — Design's Python channel client: joins the room, replies only
   on direct address, tails an outbox file for outbound messages.
 
