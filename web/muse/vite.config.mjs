@@ -9,7 +9,7 @@ import tailwindcss from "@tailwindcss/vite";
 // and at the root of any static host (python -m http.server, npm run preview).
 //
 // The default outDir is the committed fallback at docs/muse/, which is built
-// with VITE_WATCH_CHANNEL unset. The Pages workflow sets MUSE_BUILD_OUTDIR to
+// with VITE_WATCH_CHANNEL and VITE_RELAY_URL unset. The Pages workflow sets MUSE_BUILD_OUTDIR to
 // a runner temp directory so the secret-bearing build is uploaded and never
 // written into the checkout. A relative override is resolved from the cwd.
 const defaultOutDir = fileURLToPath(new URL("../../docs/muse", import.meta.url));

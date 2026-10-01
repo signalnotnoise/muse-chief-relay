@@ -29,6 +29,9 @@ test("watch format helpers", async () => {
   assert.equal(f.parseEnvelope(""), null);
 
   assert.match(f.spectatorNick(), /^spectator_[a-z0-9]{4}$/);
+  assert.equal(f.formatTrip("!Ab12Cd"), "!Ab12Cd");
+  assert.equal(f.formatTrip("Ab12Cd"), "!Ab12Cd");
+  assert.equal(f.formatTrip(""), "");
 });
 
 test("watch route wiring", async () => {
@@ -62,8 +65,16 @@ test("watch view joins the relay channel from build config as a read-only specta
   const w = fs.readFileSync(path.join(srcDir, "useWatch.js"), "utf8");
   assert.match(w, /resolveWatchChannel/);
   assert.match(w, /VITE_WATCH_CHANNEL/);
+  assert.match(w, /VITE_RELAY_URL/);
   assert.match(w, /watch channel not configured/);
+  const joinAt = w.indexOf("sock.send(JSON.stringify(joinFrame(");
+  const joinCall = w.slice(joinAt, w.indexOf(");", joinAt));
+  assert.match(joinCall, /joinFrame\(\{ room: CHANNEL, nick \}\)/);
+  assert.doesNotMatch(joinCall, /trip|password/);
+  assert.match(w, /isHello/);
   assert.doesNotMatch(w, /VITE_RELAY_CHANNEL/);
+  assert.doesNotMatch(w, /hack\.chat/);
+  assert.doesNotMatch(w, /cmd:\s*"join"/);
   assert.doesNotMatch(w, /location\.search/);
   assert.match(w, /spectatorNick/);
   assert.doesNotMatch(w, /console\./);
@@ -85,43 +96,40 @@ test("watch view joins the relay channel from build config as a read-only specta
   assert.doesNotMatch(root[1], /\bmin-h-dvh\b/);
 });
 
-test("a pre-join warn is a rejected join; live only after onlineSet", async () => {
+test("a pre-join error is a rejected join; live only after welcome", async () => {
   const { onWatchFrame } = await import("../../web/muse/src/watchSession.js");
 
-  const taken = onWatchFrame({ cmd: "warn", text: "Nickname taken" }, false);
+  const taken = onWatchFrame({ v: 1, type: "error", code: "nick_taken", text: "nick is in use" }, false);
   assert.equal(taken.action, "retry");
   assert.equal(taken.live, false);
   assert.equal(taken.joined, false);
   assert.equal(taken.rotateNick, true);
 
-  const format = onWatchFrame(
-    { cmd: "warn", text: "Nickname must consist of up to 24 letters, numbers, and underscores" },
-    false,
-  );
+  const format = onWatchFrame({ v: 1, type: "error", code: "invalid_nick", text: "nick must be 1-24 characters" }, false);
   assert.equal(format.action, "giveup");
   assert.equal(format.live, false);
   assert.equal(format.rotateNick, false);
 
-  const rate = onWatchFrame({ cmd: "warn", text: "You are joining channels too fast. Wait a moment." }, false);
+  const rate = onWatchFrame({ v: 1, type: "error", code: "rate_limited", text: "too many chat lines" }, false);
   assert.equal(rate.action, "retry");
   assert.equal(rate.live, false);
   assert.equal(rate.rotateNick, false);
 
-  const info = onWatchFrame({ cmd: "info", text: "hello" }, false);
-  assert.equal(info.action, "stay");
-  assert.equal(info.live, false);
+  const hello = onWatchFrame({ v: 1, type: "hello", protocol: "voizle-text-relay" }, false);
+  assert.equal(hello.action, "stay");
+  assert.equal(hello.live, false);
 
-  const joined = onWatchFrame({ cmd: "onlineSet", nicks: ["spectator-ab12"] }, false);
+  const joined = onWatchFrame({ v: 1, type: "welcome", users: [{ nick: "spectator_ab12" }] }, false);
   assert.equal(joined.action, "joined");
   assert.equal(joined.live, true);
   assert.equal(joined.joined, true);
 
-  const later = onWatchFrame({ cmd: "warn", text: "Nickname taken" }, true);
+  const later = onWatchFrame({ v: 1, type: "error", code: "nick_taken", text: "nick is in use" }, true);
   assert.equal(later.action, "stay");
   assert.equal(later.live, true);
   assert.equal(later.rotateNick, false);
 
-  const chat = onWatchFrame({ cmd: "chat", nick: "Fuse", text: "hi" }, true);
+  const chat = onWatchFrame({ v: 1, type: "chat", nick: "Fuse", text: "hi" }, true);
   assert.equal(chat.action, "stay");
   assert.equal(chat.live, true);
 });
@@ -142,5 +150,9 @@ test("the Pages build includes the watch-live view", async () => {
   assert.match(text, /#\/watch/);
   assert.match(text, /watch channel not configured/);
   assert.match(text, /VITE_WATCH_CHANNEL/);
+  assert.match(text, /voizle-text-relay/);
+  assert.match(text, /ws:\/\/127\.0\.0\.1:8787\/relay/);
+  assert.doesNotMatch(text, /hack\.chat/);
+  assert.doesNotMatch(text, /wss:\/\/ws\.voizel\.com/);
   assert.doesNotMatch(text, /startsWith\("#\/watch"\)|startsWith\('#\/watch'\)/);
 });

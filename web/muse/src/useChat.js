@@ -1,26 +1,30 @@
 import { nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 import { onSocketClose, recordJoinWarn } from "./reconnect.js";
+import { chatFrame, isHello, joinFrame, publicTrip } from "./relayProtocol.js";
+import { resolveRelayUrl } from "./relayUrl.js";
 import { createRoomBoard } from "./roomBoard.js";
 import { isNearBottom } from "./scroll.js";
+import { formatTrip } from "./watchFormat.js";
 
-const WS_URL = "wss://hack.chat/chat-ws";
+function resolveRelay() {
+  const env = import.meta.env && import.meta.env.VITE_RELAY_URL;
+  return resolveRelayUrl(env);
+}
+const RELAY_URL = resolveRelay();
 const DEFAULT_NICK = "Muse";
 const BACKOFF_BASE_MS = 1000;
 const BACKOFF_MAX_MS = 30000;
 
-// Fields that must never be rendered. hack.chat's "session" frame carries a
-// resumable session token: anyone holding it can restore a session with our
-// nick and trip without knowing the password, so it's as sensitive as the
-// password itself.
+// Fields that must never be rendered. A session token can restore a nick
+// without the secret that produced a trip, so it is treated like a password.
 const SECRET_KEYS = new Set(["token", "pass", "password"]);
 
 function redact(key, value) {
   return SECRET_KEYS.has(key) ? "<redacted>" : value;
 }
 
-// hack.chat's legacy join takes "name#password" in the nick field and splits
-// at the first "#". People still type that into the Nick box, so do the same
-// split here: the name is the only part that is ever displayed.
+// A legacy "name#password" nick is split so the secret is never displayed
+// and never sent. This relay does not hash a password into a trip.
 function splitNick(raw) {
   const s = String(raw || "");
   const i = s.indexOf("#");
@@ -81,7 +85,7 @@ export function useChat() {
 
   const channelEl = ref(null);
   const nickEl = ref(null);
-  const passwordEl = ref(null);
+  const tripEl = ref(null);
   const transcriptEl = ref(null);
   const messageEl = ref(null);
 
@@ -108,13 +112,13 @@ export function useChat() {
 
   let ws = null;
   let myChannel = "";
-  // The trip password. It lives only in this closure variable, not in Vue
-  // state, so it is not on the component instance. An automatic rejoin keeps
-  // the same trip. It is never logged and never written to browser storage
-  // or the address bar. The password field is cleared as soon as Connect is
+  // The public trip code (!XXXX), only after publicTrip() accepts it. A
+  // password is never stored here and never sent. An automatic rejoin sends
+  // the same public trip. The field is cleared as soon as Connect is
   // pressed. Disconnect, a first join that is rejected for good, or closing
   // the tab forgets it. A drop after a successful join keeps it.
-  let myPassword = "";
+  let myPublicTrip = "";
+  let tripOmitted = false;
   let myTrip = "";
   let online = new Set();
 
@@ -138,16 +142,13 @@ export function useChat() {
 
   function setTrip(trip) {
     myTrip = trip || "";
-    metaTrip.value = myTrip ? "!" + myTrip : "none";
+    metaTrip.value = myTrip ? formatTrip(myTrip) : "none";
   }
 
-  function forgetPassword() {
-    myPassword = "";
-    if (passwordEl.value) passwordEl.value.value = "";
-  }
-
-  function joinNick() {
-    return myPassword ? nick.value + "#" + myPassword : nick.value;
+  function forgetTrip() {
+    myPublicTrip = "";
+    tripOmitted = false;
+    if (tripEl.value) tripEl.value.value = "";
   }
 
   function syncUsers() {
@@ -194,52 +195,71 @@ export function useChat() {
   function sendChatText(text) {
     const t = (text || "").trim();
     if (!t) return true;
-    if (sendRaw({ cmd: "chat", text: t })) return true;
+    if (sendRaw(chatFrame(t))) return true;
     appendRow({ text: "not connected, message not sent (it's still in the box)", kind: "sys" });
     return false;
   }
 
-  function handleMessage(data) {
-    const cmd = data && data.cmd;
-    if (cmd === "session") {
-      return;
+  function applyUsers(list) {
+    online = new Set();
+    if (Array.isArray(list)) {
+      for (const u of list) {
+        if (u && u.nick) online.add(u.nick);
+      }
     }
-    if (cmd === "onlineSet") {
-      online = new Set(Array.isArray(data.nicks) ? data.nicks : []);
-      syncUsers();
+    syncUsers();
+  }
+
+  function appendChat(data) {
+    const who = data.nick || "?";
+    const text = data.text || "";
+    const proto = tryParseProtocol(text);
+    if (proto) {
+      appendRow({
+        nick: who,
+        text: JSON.stringify(proto, null, 2),
+        kind: "proto",
+        tag: proto.type || "protocol",
+      });
+    } else {
+      appendRow({ nick: who, text });
+    }
+  }
+
+  function handleMessage(data) {
+    const type = data && data.type;
+    if (type === "hello" || type === "pong") return;
+    if (type === "welcome") {
+      applyUsers(data.users);
+      const replay = Array.isArray(data.replay) ? data.replay : [];
+      for (const line of replay) {
+        if (line && line.type === "chat") appendChat(line);
+      }
       appendRow({ text: `online: ${[...online].join(", ") || "(nobody)"}`, kind: "sys" });
       return;
     }
-    if (cmd === "onlineAdd") {
-      if (data.nick) online.add(data.nick);
-      syncUsers();
-      appendRow({ text: `${data.nick} joined`, kind: "sys" });
-      return;
-    }
-    if (cmd === "onlineRemove") {
-      if (data.nick) online.delete(data.nick);
-      syncUsers();
-      appendRow({ text: `${data.nick} left`, kind: "sys" });
-      return;
-    }
-    if (cmd === "info" || cmd === "warn") {
-      appendRow({ text: data.text || JSON.stringify(data, redact), kind: "sys" });
-      return;
-    }
-    if (cmd === "chat") {
-      const who = data.nick || "?";
-      const text = data.text || "";
-      const proto = tryParseProtocol(text);
-      if (proto) {
-        appendRow({
-          nick: who,
-          text: JSON.stringify(proto, null, 2),
-          kind: "proto",
-          tag: proto.type || "protocol",
-        });
-      } else {
-        appendRow({ nick: who, text });
+    if (type === "presence") {
+      if (Array.isArray(data.users)) applyUsers(data.users);
+      if (data.event === "join" && data.nick) appendRow({ text: `${data.nick} joined`, kind: "sys" });
+      else if (data.event === "leave" && data.nick) appendRow({ text: `${data.nick} left`, kind: "sys" });
+      else if (data.event === "nick") {
+        appendRow({ text: `${data.previousNick || "someone"} is now ${data.nick || "?"}`, kind: "sys" });
       }
+      return;
+    }
+    if (type === "error") {
+      appendRow({ text: data.text || data.code || "error", kind: "sys" });
+      return;
+    }
+    if (type === "chat") {
+      appendChat(data);
+      return;
+    }
+    if (type === "bye") {
+      appendRow({
+        text: data.reason === "replaced" ? "this connection was replaced" : "left the room",
+        kind: "sys",
+      });
       return;
     }
     appendRow({ text: JSON.stringify(data, redact), kind: "sys" });
@@ -279,27 +299,22 @@ export function useChat() {
   function openSocket() {
     clearRetry();
     dropSocket();
+    if (!RELAY_URL) {
+      wantConnected = false;
+      setStatus("relay URL not configured", "err");
+      appendRow({ text: "relay URL not configured", kind: "sys" });
+      return;
+    }
     setStatus(hasJoinedOnce ? "reconnecting…" : "connecting…", "off");
 
-    const sock = new WebSocket(WS_URL);
+    const sock = new WebSocket(RELAY_URL);
     ws = sock;
+    let helloSeen = false;
 
     sock.onopen = () => {
       if (sock !== ws) return;
-      setStatus("connected", "on");
-      const first = !hasJoinedOnce;
-      inChat.value = true;
-      if (first) messages.value = [];
-      online = new Set();
-      syncUsers();
-      awaitingJoin = true;
-      sendRaw({ cmd: "join", channel: myChannel, nick: joinNick() });
-      appendRow({
-        text: `${hasJoinedOnce ? "rejoining" : "joining"} #${myChannel} as ${nick.value}` +
-          (myPassword ? " (with a trip password)" : ""),
-        kind: "sys",
-      });
-      if (first) nextTick(() => messageEl.value && messageEl.value.focus());
+      helloSeen = false;
+      setStatus("connecting…", "off");
     };
 
     sock.onmessage = (ev) => {
@@ -307,8 +322,37 @@ export function useChat() {
       let data;
       try { data = JSON.parse(ev.data); }
       catch { appendRow({ text: String(ev.data), kind: "sys" }); return; }
+      if (!helloSeen) {
+        if (!isHello(data)) {
+          dropSocket();
+          scheduleReconnect();
+          return;
+        }
+        helloSeen = true;
+        setStatus("connected", "on");
+        const first = !hasJoinedOnce;
+        inChat.value = true;
+        if (first) messages.value = [];
+        online = new Set();
+        syncUsers();
+        awaitingJoin = true;
+        sendRaw(joinFrame({ room: myChannel, nick: nick.value, trip: myPublicTrip }));
+        appendRow({
+          text: `${hasJoinedOnce ? "rejoining" : "joining"} #${myChannel} as ${nick.value}` +
+            (myPublicTrip ? " (with a public trip)" : ""),
+          kind: "sys",
+        });
+        if (tripOmitted && !hasJoinedOnce) {
+          appendRow({
+            text: "trip not sent — enter the public trip code only (like Ab12Cd), not a password",
+            kind: "sys",
+          });
+        }
+        if (first) nextTick(() => messageEl.value && messageEl.value.focus());
+        return;
+      }
       let joinedNow = false;
-      if (data && data.cmd === "onlineSet") {
+      if (data && data.type === "welcome") {
         awaitingJoin = false;
         retryAttempt = 0;
         firstJoinWarns = 0;
@@ -318,14 +362,13 @@ export function useChat() {
       if (joinedNow) {
         const rejoin = hasJoinedOnce;
         hasJoinedOnce = true;
-        const me = Array.isArray(data.users) ? data.users.find((u) => u && u.isme) : null;
-        setTrip(me && typeof me.trip === "string" ? me.trip : "");
-        const who = myTrip ? `${nick.value} !${myTrip}` : `${nick.value} (no trip)`;
+        setTrip(typeof data.trip === "string" ? data.trip : "");
+        const who = myTrip ? `${nick.value} ${formatTrip(myTrip)}` : `${nick.value} (no trip)`;
         appendRow({ text: `${rejoin ? "rejoined" : "joined"} as ${who}`, kind: "sys" });
       }
-      if (awaitingJoin && data && data.cmd === "warn") {
+      if (awaitingJoin && data && data.type === "error") {
         awaitingJoin = false;
-        const warned = recordJoinWarn(data.text || "", hasJoinedOnce, firstJoinWarns);
+        const warned = recordJoinWarn(data.text || "", hasJoinedOnce, firstJoinWarns, data.code);
         firstJoinWarns = warned.firstJoinWarns;
         if (warned.decision === "retry") {
           dropSocket();
@@ -333,7 +376,7 @@ export function useChat() {
         } else {
           wantConnected = false;
           dropSocket();
-          forgetPassword();
+          forgetTrip();
           setStatus("join rejected", "err");
         }
       }
@@ -357,11 +400,13 @@ export function useChat() {
     };
   }
 
-  function connect(channel, rawNick, password) {
+  function connect(channel, rawNick, tripRaw) {
     const { name, secret } = splitNick(rawNick);
     myChannel = channel;
     nick.value = name || DEFAULT_NICK;
-    myPassword = password || secret;
+    const typed = String(tripRaw || "");
+    myPublicTrip = publicTrip(typed);
+    tripOmitted = !!secret || (typed.trim() !== "" && !myPublicTrip);
     metaChannel.value = myChannel;
     metaNick.value = nick.value;
     myTrip = "";
@@ -393,12 +438,11 @@ export function useChat() {
       nick.value = v;
       return;
     }
-    const rest = v.slice(i + 1);
+    // Drop the secret. Do not copy it into the trip field: that field is
+    // sent as a public id, and this relay does not hash passwords.
     const name = v.slice(0, i);
     ev.target.value = name;
     nick.value = name;
-    if (rest && passwordEl.value) passwordEl.value.value = rest;
-    if (passwordEl.value) passwordEl.value.focus();
   }
 
   function onChannelInput(ev) {
@@ -422,8 +466,8 @@ export function useChat() {
       return;
     }
     channelError.value = false;
-    const typed = passwordEl.value ? passwordEl.value.value : "";
-    if (passwordEl.value) passwordEl.value.value = "";
+    const typed = tripEl.value ? tripEl.value.value : "";
+    if (tripEl.value) tripEl.value.value = "";
     const rawNick = nickEl.value ? nickEl.value.value : nick.value;
     connect(nextChannel, rawNick, typed);
   }
@@ -432,7 +476,7 @@ export function useChat() {
     wantConnected = false;
     clearRetry();
     dropSocket();
-    forgetPassword();
+    forgetTrip();
     inChat.value = false;
     setStatus("disconnected", "off");
     showBoardPlaceholder();
@@ -534,9 +578,10 @@ export function useChat() {
     resultSummary,
     channelEl,
     nickEl,
-    passwordEl,
+    tripEl,
     transcriptEl,
     messageEl,
+    relayUrl: RELAY_URL,
     boardView,
     reloadBoard,
     onTranscriptScroll,

@@ -1,6 +1,7 @@
 # Publishes GitHub Pages from an Actions artifact.
-# The Muse build inlines the VITE_WATCH_CHANNEL repository secret.
-# That build is not committed. docs/muse/ on main stays the unconfigured fallback.
+# The Muse build inlines the VITE_WATCH_CHANNEL and VITE_RELAY_URL repository
+# secrets. That build is not committed. docs/muse/ on main stays the
+# unconfigured fallback (local relay URL, no watch channel).
 #
 # Repository Settings → Pages → Build and deployment → Source must be
 # "GitHub Actions". Until that switch, deploy-pages cannot publish and the
@@ -49,20 +50,53 @@ jobs:
           cp -a docs/. "$site/"
           rm -rf "$site/muse"
 
-      - name: Build Muse with the watch channel
+      - name: Build Muse with the watch channel and relay URL
         working-directory: web/muse
         env:
           VITE_WATCH_CHANNEL: ${{ secrets.VITE_WATCH_CHANNEL }}
+          VITE_RELAY_URL: ${{ secrets.VITE_RELAY_URL }}
           MUSE_BUILD_OUTDIR: ${{ runner.temp }}/pages/muse
         run: |
-          # Presence check only. Do not echo the secret.
+          # Presence checks only. Do not echo the secrets.
           if [ -z "$(printf '%s' "$VITE_WATCH_CHANNEL" | tr -d '[:space:]')" ]; then
             echo "::error::VITE_WATCH_CHANNEL secret is empty or unset"
             exit 1
           fi
+          if [ -z "$(printf '%s' "$VITE_RELAY_URL" | tr -d '[:space:]')" ]; then
+            echo "::error::VITE_RELAY_URL secret is empty or unset"
+            exit 1
+          fi
+          case "$VITE_RELAY_URL" in
+            wss://*) ;;
+            *) echo "::error::VITE_RELAY_URL must be a wss:// URL"; exit 1 ;;
+          esac
+          case "$VITE_RELAY_URL" in
+            *@*) echo "::error::VITE_RELAY_URL must not contain credentials"; exit 1 ;;
+            *\?*) echo "::error::VITE_RELAY_URL must not contain a query"; exit 1 ;;
+            *#*) echo "::error::VITE_RELAY_URL must not contain a fragment"; exit 1 ;;
+          esac
           npm run build
-          python3 -c 'import os, sys; from pathlib import Path; root = Path(os.environ["MUSE_BUILD_OUTDIR"]); blob = "".join(p.read_text(encoding="utf-8", errors="replace") for p in root.rglob("*.js")); channel = os.environ["VITE_WATCH_CHANNEL"].strip(); sys.exit(0 if channel and channel in blob else "Muse build did not inline VITE_WATCH_CHANNEL")'
-          echo "Muse build inlined VITE_WATCH_CHANNEL"
+          python3 - <<'PY'
+          import os, sys
+          from pathlib import Path
+          root = Path(os.environ["MUSE_BUILD_OUTDIR"])
+          blob = "".join(
+              p.read_text(encoding="utf-8", errors="replace")
+              for p in root.rglob("*")
+              if p.suffix in {".js", ".html", ".css"}
+          )
+          channel = os.environ["VITE_WATCH_CHANNEL"].strip()
+          url = os.environ["VITE_RELAY_URL"].strip()
+          if not channel or channel not in blob:
+              sys.exit("Muse build did not inline VITE_WATCH_CHANNEL")
+          if not url or url not in blob:
+              sys.exit("Muse build did not inline VITE_RELAY_URL")
+          if "hack.chat" in blob:
+              sys.exit("Muse build still references hack.chat")
+          if "voizle-text-relay" not in blob:
+              sys.exit("Muse build is not speaking voizle-text-relay")
+          print("Muse build inlined VITE_WATCH_CHANNEL and VITE_RELAY_URL")
+          PY
 
       - name: Confirm the checkout was not rewritten
         run: |

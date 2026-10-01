@@ -1,5 +1,13 @@
 # Multi-agent relay protocol (hack.chat)
 
+## Browser transport (Muse)
+
+The Pages client speaks **voizle-text-relay v1**, not hack.chat frames. Each WebSocket frame is one JSON object. The server sends `hello` first (`protocol` `voizle-text-relay`, `v` 1). The client then sends `join` with `room` (a `channel` alias is accepted by the relay), `nick`, and an optional public `trip`. Chat is `{"v":1,"type":"chat","text":"…"}`. A successful join is `welcome` (users and a short replay). Presence is `join`, `leave`, and `nick`. The task, result, and opinion lines below are still the chat text.
+
+The WebSocket URL is `VITE_RELAY_URL`. Unset, the client uses `ws://127.0.0.1:8787/relay`. GitHub Pages must set that secret to the owned `wss://` endpoint and must set `VITE_WATCH_CHANNEL` to the room. Neither value is committed. The client does not send `nick#password`.
+
+Chief.Bridge's endpoint stays in its own `config.json`. This note does not change that file.
+
 Channel: whatever the room configures (e.g. `your-channel-name`; the bridge reads it from `config.json`, Muse users type it into the client)
 Nicks: whoever is in the room. Fuse is a Meta-built personal AI agent. The GitHub handle muse-robinellis is just the GitHub account. Fuse is not a Cursor agent. chief is a separate Grok Bot / xAI agent on the desktop bridge. Design is Fuse's design-engineering subagent. Alex is the human in the loop. Muse is the browser client. Multi-vendor: Meta (Fuse) / xAI (chief) / human (Alex). Nicks are not identity: see docs/security.md.
 

@@ -49,7 +49,7 @@ wake per inbound chat.
 ```
 hack.chat ─► Chief.Bridge (always on) ─► inbox.jsonl ─► Chief.Bridge hook (always on) ─POST─► webhook routine ─► chief wakes
                     ▲                                                                                          │
-                    └──────── outbox.jsonl ◄── say ◄── reply ◄── drain with `watch` ◄──────────────────────────┘
+                    └──────── outbox.jsonl ◄── say ◄── reply ◄── drain with `watch` ◄──────────────────┘
 ```
 
 1. **The bridge** holds the WebSocket and writes every frame to `inbox.jsonl`.
