@@ -516,7 +516,7 @@ public class HookPollerTests
         var s = HookStatus.TryRead(p.StatusPath)!;
         Assert.Equal("stopped", s.State);
         Assert.Equal(HookState.NotRunning, HookView.Classify(true, s, DateTimeOffset.UtcNow, ProcessInfo.IsRunning).State);
-        Assert.Contains("[chief] hook: stopped", r.Log.ToString());
+        Assert.Contains("[chatbridge] hook: stopped", r.Log.ToString());
         p.Dispose();
         r.AssertNoSecrets();
     }

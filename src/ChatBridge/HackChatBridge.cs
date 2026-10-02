@@ -3,7 +3,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 
-namespace Chief.Bridge;
+namespace ChatBridge;
 
 internal sealed class HackChatBridge
 {
@@ -18,6 +18,7 @@ internal sealed class HackChatBridge
     private readonly OutboxReader _outbox;
     private readonly object _fileLock = new();
     private readonly AutoAcker _acker;
+    private readonly MentionRouter? _mentions;
     private readonly bool _voizle;
     // Auto-acks waiting to go out. Filled by the receive loop, drained by the send loop ahead of the outbox,
     // which _sendWake wakes early so an ack doesn't wait out the outbox poll.
@@ -43,6 +44,9 @@ internal sealed class HackChatBridge
         _outbox = OutboxReader.AtEnd(Path.Combine(cfg.BaseDir, "outbox.jsonl"));
         _acker = new AutoAcker(cfg.AutoAck, cfg.Nick);
         _voizle = cfg.SpeaksVoizle;
+        // Mention inboxes sit beside inbox.jsonl. Off unless mentions.enabled, so a current
+        // deployment keeps the jsonl bridge and does not grow an agents/ tree.
+        _mentions = cfg.MentionRouting.Enabled ? MentionRouter.Open(cfg) : null;
     }
 
     private sealed class Session
@@ -110,25 +114,25 @@ internal sealed class HackChatBridge
             }
             catch (Exception ex)
             {
-                TryStderr($"[chief] couldn't log disconnect: {Redact(ex.Message)}");
+                TryStderr($"[chatbridge] couldn't log disconnect: {Redact(ex.Message)}");
             }
 
             TryStderr(
-                $"[chief] disconnect: {reason} (joined: {(session.Confirmed ? "yes" : "no")}, up {(long)uptime.TotalSeconds}s, attempt {attempt})");
+                $"[chatbridge] disconnect: {reason} (joined: {(session.Confirmed ? "yes" : "no")}, up {(long)uptime.TotalSeconds}s, attempt {attempt})");
             try
             {
                 WriteState(alive: false, connected: false, reconnecting: true, reason);
             }
             catch (Exception ex)
             {
-                TryStderr($"[chief] couldn't write state.json: {Redact(ex.Message)}");
+                TryStderr($"[chatbridge] couldn't write state.json: {Redact(ex.Message)}");
             }
 
             // stdout can be a closed pipe. That is not a reason to give up on the channel.
             // receive-idle is disarmed for this entire wait. RunOnceAsync arms it only after
             // onlineSet and disarms it before returning, including when the socket went quiet.
             // It must not fire during backoff (a maintenance window would otherwise pile reconnects).
-            TryStdout($"[chief] reconnect in {delay.TotalSeconds:0.#}s (attempt {attempt})…");
+            TryStdout($"[chatbridge] reconnect in {delay.TotalSeconds:0.#}s (attempt {attempt})…");
             try
             {
                 await _runtime.Delay(delay, ct);
@@ -139,7 +143,7 @@ internal sealed class HackChatBridge
             }
             catch (Exception ex)
             {
-                TryStderr($"[chief] delay failed: {Redact(ex.Message)}");
+                TryStderr($"[chatbridge] delay failed: {Redact(ex.Message)}");
             }
         }
 
@@ -149,10 +153,10 @@ internal sealed class HackChatBridge
         }
         catch (Exception ex)
         {
-            TryStderr($"[chief] couldn't write state.json: {Redact(ex.Message)}");
+            TryStderr($"[chatbridge] couldn't write state.json: {Redact(ex.Message)}");
         }
 
-        TryStdout("[chief] stopped");
+        TryStdout("[chatbridge] stopped");
     }
 
     private double SafeJitter()
@@ -244,7 +248,7 @@ internal sealed class HackChatBridge
             if (_runtime.ConnectTimeout > TimeSpan.Zero && _runtime.ConnectTimeout != Timeout.InfiniteTimeSpan)
                 connectCts.CancelAfter(_runtime.ConnectTimeout);
 
-            Console.WriteLine($"[chief] connecting {RelayUrl.ForLog(_cfg.Url)} (attempt {attempt})…");
+            Console.WriteLine($"[chatbridge] connecting {RelayUrl.ForLog(_cfg.Url)} (attempt {attempt})…");
             try
             {
                 await ws.ConnectAsync(new Uri(_cfg.Url), connectCts.Token);
@@ -278,14 +282,14 @@ internal sealed class HackChatBridge
         if (_voizle)
         {
             recvTask = ReceiveLoopAsync(ws, s, joinResult, sessionCts.Token);
-            Console.WriteLine("[chief] connected; waiting for voizle-text-relay hello");
+            Console.WriteLine("[chatbridge] connected; waiting for voizle-text-relay hello");
             var helloWait = await Task.WhenAny(s.Hello.Task, recvTask, joinTimeout);
             if (helloWait == s.Hello.Task && s.Hello.Task.Result is null)
             {
                 await SendVoizleJoinAsync(ws, sendLock, ct);
                 if (!s.Confirmed)
                     WriteState(alive: true, connected: false, reconnecting: false);
-                Console.WriteLine($"[chief] join sent for #{_cfg.Channel} as {_cfg.Nick}; waiting for welcome");
+                Console.WriteLine($"[chatbridge] join sent for #{_cfg.Channel} as {_cfg.Nick}; waiting for welcome");
             }
             else if (helloWait == s.Hello.Task)
             {
@@ -300,7 +304,7 @@ internal sealed class HackChatBridge
         {
             await SendHackChatJoinAsync(ws, sendLock, ct);
             WriteState(alive: true, connected: false, reconnecting: false);
-            Console.WriteLine($"[chief] join sent for #{_cfg.Channel} as {_cfg.Nick}; waiting for onlineSet");
+            Console.WriteLine($"[chatbridge] join sent for #{_cfg.Channel} as {_cfg.Nick}; waiting for onlineSet");
             recvTask = ReceiveLoopAsync(ws, s, joinResult, sessionCts.Token);
         }
 
@@ -310,7 +314,7 @@ internal sealed class HackChatBridge
 
         if (first == joinResult.Task && joinResult.Task.Result is null)
         {
-            Console.WriteLine($"[chief] joined #{_cfg.Channel} as {_cfg.Nick}");
+            Console.WriteLine($"[chatbridge] joined #{_cfg.Channel} as {_cfg.Nick}");
             // The outbox is drained only after the join is confirmed, so no line is spent on a socket
             // that isn't in the channel yet. The quiet-socket watchdog starts at the same moment:
             // not while the join is still unconfirmed, and not during reconnect backoff.
@@ -543,6 +547,9 @@ internal sealed class HackChatBridge
                 break;
 
             case "chat":
+                if (_mentions is not null && !MentionIngress.TryAccept(_mentions, RoomMessage.FromFrame(obj, _cfg.Channel), out var routeError))
+                    LogEvent("err", new JsonObject { ["error"] = "mention route: " + routeError });
+
                 var nick = Json.Str(obj, "nick");
                 if (!string.IsNullOrEmpty(nick) && !string.Equals(nick, _cfg.Nick, StringComparison.Ordinal))
                 {

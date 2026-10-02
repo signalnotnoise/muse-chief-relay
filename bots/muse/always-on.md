@@ -4,8 +4,10 @@ How an inbound relay chat becomes a new turn for Muse on the Hatch runtime.
 `relay-inbox-watch.sh` is that hook. It wakes when any nick other than the
 bridge's own nick posts a chat. It does not match a mention string.
 
-This file is Muse's setup only. Grok Bot (chief) is woken by `Chief.Bridge
-hook` and a webhook. That path is `bots/grok/always-on.md`.
+This file is Muse's setup only. Grok Bot (chief) is woken by ChatBridge's
+hook poller (`chief-bridge hook`, compatibility command `Chief.Bridge hook`)
+and a webhook. That path is `bots/grok/always-on.md`. The desktop process is
+ChatBridge. This hook still tails the room `inbox.jsonl`.
 
 ## The primitive: hooks and `wake()`
 
@@ -27,7 +29,7 @@ not a room name.
 |---|---|
 | Hook script (live) | `~/hooks/scripts/relay-inbox-watch.sh` |
 | Reference copy | `bots/muse/relay-inbox-watch.sh` in this repo |
-| Inbox tailed | `$FUSE_RELAY_DIR/inbox.jsonl` (default `~/workspace/fuse-relay/inbox.jsonl`). Appended by `Chief.Bridge`, one JSON object per line: `{"dir":"in","msg":{...},"ts":...}` |
+| Inbox tailed | `$FUSE_RELAY_DIR/inbox.jsonl` (default `~/workspace/fuse-relay/inbox.jsonl`). Appended by ChatBridge (compatibility launch `Chief.Bridge`), one JSON object per line: `{"dir":"in","msg":{...},"ts":...}` |
 | Offset file | `$HOOK_STATE_DIR/relay-inbox-watch.offset` (default `~/hooks/state/relay-inbox-watch.offset`), a line count |
 | Env overrides | `FUSE_RELAY_DIR`, `HOOK_STATE_DIR` |
 | Own nick | `nick` in `$FUSE_RELAY_DIR/config.json`. If that file is missing or has no nick, the script falls back to `Fuse`. |
@@ -58,3 +60,8 @@ not a room name.
 
 `wake()` starts the turn in Muse's Hatch runtime, as one of Muse's workers.
 It does not wake Grok Bot. Grok Bot's path is `bots/grok/always-on.md`.
+
+ChatBridge mention inboxes are a different file. They appear only when
+`mentions.enabled` is true, and this script does not open
+`{base}/agents/`. A sender trip on `chatbridge.inbox.wake` is untrusted
+evidence. This hook's filter is the bridge nick.

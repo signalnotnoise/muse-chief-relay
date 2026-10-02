@@ -2,7 +2,7 @@ using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json.Nodes;
 
-namespace Chief.Bridge;
+namespace ChatBridge;
 
 /// <summary>Outcome of one POST. <see cref="Result"/> is safe to log: an HTTP status or an error kind, never a
 /// message that could echo the URL.</summary>
@@ -84,7 +84,7 @@ internal sealed class HookPoller : IDisposable
     /// <summary>Run until <paramref name="ct"/> is cancelled, then write <c>stopped</c>.</summary>
     public async Task RunAsync(CancellationToken ct)
     {
-        _log.WriteLine($"[chief] hook: watching {_inbox} as {_cfg.Nick}; poll {_h.PollSeconds:0.#}s, cooldown {_h.CooldownSeconds:0.#}s, " +
+        _log.WriteLine($"[chatbridge] hook: watching {_inbox} as {_cfg.Nick}; poll {_h.PollSeconds:0.#}s, cooldown {_h.CooldownSeconds:0.#}s, " +
                        $"{(_trips.Count > 0 ? $"{_trips.Count} trusted trip(s)" : "all senders")}; URL from ${_h.UrlEnv}");
         Heartbeat();
         using var changed = new SemaphoreSlim(0, 1);
@@ -103,7 +103,7 @@ internal sealed class HookPoller : IDisposable
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
-                _log.WriteLine($"[chief] hook: inbox read failed ({ex.GetType().Name}); retrying");
+                _log.WriteLine($"[chatbridge] hook: inbox read failed ({ex.GetType().Name}); retrying");
             }
 
             Heartbeat();
@@ -129,7 +129,7 @@ internal sealed class HookPoller : IDisposable
         var now = _clock().ToUnixTimeSeconds();
         _s = _s with { State = HookStatus.Stopped, StoppedAt = now, HeartbeatAt = now };
         _status.Write(_s);
-        _log.WriteLine($"[chief] hook: stopped{(_s.Pending > 0 ? $"; {_s.Pending} chat(s) not yet delivered stay queued in the inbox for the next start" : "")}");
+        _log.WriteLine($"[chatbridge] hook: stopped{(_s.Pending > 0 ? $"; {_s.Pending} chat(s) not yet delivered stay queued in the inbox for the next start" : "")}");
     }
 
     /// <summary>One poll: consume what doesn't qualify, and fire the qualifying chats if the cooldown allows.</summary>
@@ -139,7 +139,7 @@ internal sealed class HookPoller : IDisposable
         if (_watcher.Warning is { } w && !_warned)
         {
             _warned = true;
-            _log.WriteLine($"[chief] hook: warning: {w}");
+            _log.WriteLine($"[chatbridge] hook: warning: {w}");
         }
 
         var chats = poll.Chats.Where(Qualifies).ToList();
@@ -181,7 +181,7 @@ internal sealed class HookPoller : IDisposable
             };
         }
 
-        _log.WriteLine($"[chief] hook: fired {chats.Count} chat(s) -> {result.Result}" +
+        _log.WriteLine($"[chatbridge] hook: fired {chats.Count} chat(s) -> {result.Result}" +
                        (result.Ok ? "" : $"; retry in {(_nextAllowed - now).TotalSeconds:0}s"));
         Heartbeat(force: true);
         return result.Ok ? HookStep.Fired : HookStep.Failed;

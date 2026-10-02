@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Hatch decision adapter; never registers a hook or invokes a network callback."""
+"""Hatch decision adapter; never registers a hook or invokes a network callback.
+
+The inbox it reads is the room inbox.jsonl. chatbridge.inbox.wake is the
+separate per-agent contract and is off unless mentions.enabled is true.
+Payloads here set untrusted true. A trip in the payload is evidence only.
+"""
 import argparse
 import json
 from pathlib import Path

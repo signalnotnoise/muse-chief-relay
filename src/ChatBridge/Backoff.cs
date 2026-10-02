@@ -1,4 +1,4 @@
-namespace Chief.Bridge;
+namespace ChatBridge;
 
 /// <summary>
 /// Reconnect delay: 1 s doubling to a 30 s cap. It goes back to 1 s after any session that was

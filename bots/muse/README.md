@@ -1,10 +1,30 @@
 # bots/muse — Muse's wake hook
 
 `relay-inbox-watch.sh` is the tripwire between the relay room and Muse. The
-Hatch hook runtime runs it every few seconds; it tails the bridge's
-`inbox.jsonl` (one JSON object per line, appended by `Chief.Bridge`) and wakes
+Hatch hook runtime runs it every few seconds; it tails the bridge's room
+`inbox.jsonl` (one JSON object per line, appended by ChatBridge) and wakes
 a worker agent when someone other than the bridge's own nick posts a chat
-message.
+message. `Chief.Bridge` is the compatibility name of that same program.
+
+## ChatBridge
+
+This hook reads the room log, `{base}/inbox.jsonl`. It does not read
+`{base}/agents/`. Mention routing is a separate path and stays off unless
+`mentions.enabled` is true (default false), so a stock config does not
+create per-agent inboxes. `outbox.jsonl`, `watch`, `hook`, and `say` on the
+bridge are unchanged.
+
+When an operator turns routing on, an explicit mention of a configured nick
+also lands in `{base}/agents/<id>/inbox.jsonl`. The adapter object is
+`chatbridge.inbox.wake` (`chat-bridge inbox due --agent <id>`, or the
+`chief-bridge` alias). `trip` on that object is untrusted identity evidence.
+A present trip does not authorize the sender. Trust for auto-ack and for
+`hook` stays on `mention_trips`, `task_trips`, and `hook.trips`. This Hatch
+script does not apply those lists: it filters on the bridge nick.
+
+The root `config.example.json` shows `agents` and `"mentions": { "enabled": false }`.
+Copy that shape. Do not put a room name, a real trip, or a webhook URL in
+this directory.
 
 ## How it works
 

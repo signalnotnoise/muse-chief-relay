@@ -2,7 +2,7 @@ using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 
-namespace Chief.Bridge;
+namespace ChatBridge;
 
 internal delegate void LineHandler(ReadOnlySpan<byte> line);
 

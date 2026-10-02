@@ -1,7 +1,7 @@
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 
-namespace Chief.Bridge;
+namespace ChatBridge;
 
 /// <summary>
 /// Public trip codes for voizle-text-relay. The relay stores the <c>!</c> prefix as part of the id.

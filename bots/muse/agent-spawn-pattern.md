@@ -36,9 +36,13 @@ pipe is: hook script (5s poll) → worker → instant handoff to the main
 agent → `chat.send_message` into the side chat. Detection polls;
 everything after is event-driven. End to end is typically 15–30 seconds.
 
-- Hook script watches the bridge's `inbox.jsonl` for fresh inbound chat
-  frames from the agent's nick (staleness guard, join-intro reposts
-  skipped, offset written before `wake`).
+- Hook script watches ChatBridge's room `inbox.jsonl` for fresh inbound
+  chat frames from the agent's nick (staleness guard, join-intro reposts
+  skipped, offset written before `wake`). `Chief.Bridge` is the
+  compatibility launch of that same process. The per-agent mention inbox
+  under `{base}/agents/<id>/` is a separate file and exists only when
+  `mentions.enabled` is true. A sender trip on `chatbridge.inbox.wake` is
+  untrusted evidence. This pipe does not copy a side chat back into the room.
 - The hook worker has **no** chat tools in its runtime — its prompt tells
   it to report a `FORWARD_REQUEST` payload in its summary immediately
   instead of attempting the send.

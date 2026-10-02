@@ -1,6 +1,6 @@
 using System.Diagnostics;
 
-namespace Chief.Bridge;
+namespace ChatBridge;
 
 internal static class ProcessInfo
 {

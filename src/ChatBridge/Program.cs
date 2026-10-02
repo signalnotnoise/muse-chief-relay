@@ -3,7 +3,7 @@ using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 
-namespace Chief.Bridge;
+namespace ChatBridge;
 
 internal static class JsonUtil
 {
@@ -30,13 +30,14 @@ internal static class Program
                 "status" => CmdStatus(cli),
                 "watch" => await CmdWatchAsync(cli),
                 "hook" => await CmdHookAsync(cli),
+                "inbox" => CmdInbox(cli),
                 "help" => CmdHelp(),
                 _ => await RunAsync(cli)
             };
         }
         catch (Exception ex) when (ex is ConfigException or ArgumentException)
         {
-            Console.Error.WriteLine($"[chief] {ex.Message}");
+            Console.Error.WriteLine($"[chatbridge] {ex.Message}");
             return 2;
         }
     }
@@ -47,10 +48,10 @@ internal static class Program
         using var cts = new CancellationTokenSource();
         // SIGTERM / SIGINT: cancel and let RunForeverAsync finish, so the final state.json write
         // (alive=false) and the "stopped" line happen.
-        using var signals = new ShutdownSignals(cts, sig => Console.WriteLine($"[chief] {sig} received, shutting down…"));
+        using var signals = new ShutdownSignals(cts, sig => Console.WriteLine($"[chatbridge] {sig} received, shutting down…"));
 
         Console.WriteLine(
-            $"[chief] config={cfg.ConfigPath} ({cfg.Source}) channel={cfg.Channel} nick={cfg.Nick} base={cfg.BaseDir}");
+            $"[chatbridge] config={cfg.ConfigPath} ({cfg.Source}) channel={cfg.Channel} nick={cfg.Nick} base={cfg.BaseDir}");
         var bridge = new HackChatBridge(cfg);
         await bridge.RunForeverAsync(cts.Token);
         return 0;
@@ -75,11 +76,11 @@ internal static class Program
             // A torn read here used to crash with a stack trace; report it as a clean error instead.
             if (!watcher.TryPoll(out var poll, out var error) || poll is null)
             {
-                Console.Error.WriteLine($"[chief] watch: cannot read the inbox ({error})");
+                Console.Error.WriteLine($"[chatbridge] watch: cannot read the inbox ({error})");
                 return 2;
             }
             if (watcher.Warning is { } w)
-                Console.Error.WriteLine($"[chief] warning: {w}");
+                Console.Error.WriteLine($"[chatbridge] warning: {w}");
             Print(poll.Chats); // printed before the offset is saved: a crash repeats, never loses
             watcher.Commit(poll);
             return 0;
@@ -89,7 +90,7 @@ internal static class Program
         using var signals = new ShutdownSignals(cts, null);
         var outcome = await watcher.WaitAsync(opts.Timeout, Print, cts.Token);
         if (watcher.Warning is { } warn)
-            Console.Error.WriteLine($"[chief] warning: {warn}");
+            Console.Error.WriteLine($"[chatbridge] warning: {warn}");
 
         switch (outcome)
         {
@@ -120,7 +121,7 @@ internal static class Program
             var r = await poller.FireAsync(
                 [new WatchedChat("Chief.Bridge", null, "(hook connectivity test, ignore)", JsonValue.Create(DateTimeOffset.UtcNow.ToUnixTimeSeconds()))],
                 CancellationToken.None);
-            Console.WriteLine($"[chief] hook test: {r.Result}");
+            Console.WriteLine($"[chatbridge] hook test: {r.Result}");
             return r.Ok ? 0 : HookOptions.ExitTestFailed;
         }
 
@@ -132,14 +133,14 @@ internal static class Program
         {
             var other = cfg.ReadHook(DateTimeOffset.UtcNow).Status;
             var who = other is { } s && s.Pid != Environment.ProcessId ? $" (status last wrote pid {s.Pid})" : "";
-            Console.Error.WriteLine($"[chief] hook: another poller already holds {HookInstanceLock.PathFor(statePath)}{who}; not starting");
+            Console.Error.WriteLine($"[chatbridge] hook: another poller already holds {HookInstanceLock.PathFor(statePath)}{who}; not starting");
             return HookOptions.ExitAlreadyRunning;
         }
 
         using (gate)
         {
             using var cts = new CancellationTokenSource();
-            using var signals = new ShutdownSignals(cts, sig => Console.WriteLine($"[chief] hook: {sig} received, stopping…"));
+            using var signals = new ShutdownSignals(cts, sig => Console.WriteLine($"[chatbridge] hook: {sig} received, stopping…"));
             await poller.RunAsync(cts.Token);
         }
 
@@ -150,7 +151,12 @@ internal static class Program
     {
         Console.WriteLine(
             """
-            Chief.Bridge — Muse↔Chief hack.chat WSS relay (desktop)
+            ChatBridge — agent-agnostic room relay (desktop)
+
+            Launch aliases that still run this program: Chief.Bridge, chief-bridge,
+            dotnet run --project src/Chief.Bridge, and dotnet Chief.Bridge.dll.
+            The new names are ChatBridge, chat-bridge, and dotnet run --project src/ChatBridge.
+            Agent nicks come from config (agents[]). None are built into the program.
 
               [--config <path> | <path>]        Run the bridge until SIGTERM / Ctrl+C.
                                                 Transient failures retry forever (backoff 1s–30s
@@ -177,29 +183,104 @@ internal static class Program
                                                 --test sends one fake chat and prints the HTTP result. Exit codes:
                                                 0 stopped cleanly or test OK, 2 usage/config error, 4 another hook
                                                 poller is already running, 5 test failed.
+              inbox due --agent <id>           Print due room wake events for one agent (JSON array, seq order).
+              inbox pending --agent <id>       Print every unacked room event, including those in backoff.
+              inbox ack --agent <id> <event>   Acknowledge one event. Idempotent. Exit 1 if the id is unknown.
+              inbox fail --agent <id> <event>  Record a soft adapter failure and its backoff. Exit 1 if unknown.
               help                              This text
 
+            The inbox commands are the adapter contract (docs/chatbridge.md). They do not call a model.
             Config for the bridge run: --config or the first argument, then MUSE_RELAY_CONFIG, then
-            ./config.json, then ./config.example.json (with a warning).
-            Config for say/status/watch/hook: --config, then MUSE_RELAY_CONFIG, then ./config.json. No other fallback.
+            CHATBRIDGE_CONFIG, then ./config.json, then ./config.example.json (with a warning).
+            Config for say/status/watch/hook/inbox: --config, then MUSE_RELAY_CONFIG, then
+            CHATBRIDGE_CONFIG, then ./config.json. No other fallback.
             An explicit path that doesn't exist is an error; it never falls through to another file.
             Use -- to end options, e.g. say -- --config is literal text.
             """);
         return 0;
     }
 
+    private static int CmdInbox(CliArgs cli)
+    {
+        string? agent = null;
+        string? eventId = null;
+        string? command = null;
+        for (var i = 0; i < cli.Rest.Count; i++)
+        {
+            var a = cli.Rest[i];
+            if (a == "--agent" && i + 1 < cli.Rest.Count && !string.IsNullOrWhiteSpace(cli.Rest[i + 1]))
+                agent = cli.Rest[++i];
+            else if (a.StartsWith("--agent=", StringComparison.Ordinal) && a.Length > "--agent=".Length)
+                agent = a["--agent=".Length..];
+            else if (command is null && a is "due" or "pending" or "ack" or "fail")
+                command = a;
+            else if (eventId is null && command is "ack" or "fail")
+                eventId = a;
+            else
+                throw new ArgumentException($"inbox: unknown argument '{a}'");
+        }
+
+        if (command is null || string.IsNullOrWhiteSpace(agent))
+            throw new ArgumentException("usage: ChatBridge inbox due|pending|ack|fail --agent <id> [event-id]");
+        if (!AgentPath.IsSafeId(agent))
+            throw new ArgumentException("inbox: agent id must be a single path segment");
+        if (command is "ack" or "fail" && string.IsNullOrWhiteSpace(eventId))
+            throw new ArgumentException($"usage: ChatBridge inbox {command} --agent <id> <event-id>");
+
+        var cfg = RelayConfig.Load(cli.ConfigPath, allowExampleFallback: false);
+        var agentsRoot = Path.Combine(cfg.BaseDir, "agents");
+        var inbox = AgentInbox.Open(Path.Combine(agentsRoot, agent));
+        inbox.OnFiled = new ConversationStore(agentsRoot).AppendRoom;
+        var now = DateTimeOffset.UtcNow;
+        switch (command)
+        {
+            case "due":
+                PrintWakes(inbox.Due(now));
+                return 0;
+            case "pending":
+                PrintWakes(inbox.Pending());
+                return 0;
+            case "ack":
+                if (!inbox.Ack(eventId!, now))
+                {
+                    Console.Error.WriteLine($"{ProductInfo.Prefix("inbox")} unknown event {eventId}");
+                    return 1;
+                }
+
+                Console.WriteLine($"acked {eventId}");
+                return 0;
+            default:
+                if (!inbox.RecordFailure(eventId!, "adapter", now))
+                {
+                    Console.Error.WriteLine($"{ProductInfo.Prefix("inbox")} unknown event {eventId}");
+                    return 1;
+                }
+
+                var pending = inbox.Pending().FirstOrDefault(v => v.Event.Id == eventId);
+                Console.WriteLine($"retry {eventId} next_unix {pending?.NextUnix}");
+                return 0;
+        }
+    }
+
+    private static void PrintWakes(IReadOnlyList<InboxView> views)
+    {
+        var requests = views.Select(InboxWakeRequest.Create).ToList();
+        Console.Out.WriteLine(System.Text.Json.JsonSerializer.Serialize(requests, JsonUtil.Opts));
+        Console.Out.Flush();
+    }
+
     private static async Task<int> CmdSayAsync(CliArgs cli)
     {
         if (cli.Rest.Count == 0)
         {
-            Console.Error.WriteLine("usage: Chief.Bridge say [--config <path>] <text>");
+            Console.Error.WriteLine($"usage: {ProductInfo.Name} say [--config <path>] <text>");
             return 1;
         }
 
         var text = string.Join(' ', cli.Rest);
         if (CliProbeText.IsFragment(text))
         {
-            Console.Error.WriteLine("Chief.Bridge say: refused CLI/shell probe text (not queued)");
+            Console.Error.WriteLine($"{ProductInfo.Name} say: refused CLI/shell probe text (not queued)");
             return 1;
         }
 
@@ -245,6 +326,9 @@ internal static class Program
         Console.WriteLine(ack.Enabled
             ? $"auto-ack: on (mentions+tasks from {ack.MentionTrips.Count} trip(s), tasks only from {ack.TaskTrips.Count}, cooldown {ack.CooldownSeconds:0.#}s, max {ack.MaxPerHour}/h)"
             : "auto-ack: off");
+        Console.WriteLine(cfg.MentionRouting.Enabled
+            ? $"mentions: on ({cfg.Roster.Agents.Count} agent(s), max fan-out hop {cfg.MentionRouting.MaxFanoutHop})"
+            : "mentions: off");
         return 0;
     }
 

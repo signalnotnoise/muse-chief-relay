@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""One-shot @dot inbox hook. Produces local events; never contacts a model or network."""
+"""One-shot @dot inbox hook. Produces local events; never contacts a model or network.
+
+Reads the room inbox.jsonl that ChatBridge appends. The per-agent queue under
+agents/dot/ is a separate file and exists only when mentions.enabled is true.
+A sender trip on either path is untrusted evidence. approved_recipients is the
+send gate. This module does not treat a trip as authorization.
+"""
 import argparse
 import hashlib
 import json

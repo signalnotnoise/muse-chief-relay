@@ -57,7 +57,7 @@ unless `auto_ack` is enabled in the bridge's `config.json` (README, "Auto-acknow
   the nick. Neither do untripped senders, unlisted trips, the bridge's own nick, or its own trip.
 - **What it looks like.** Plain chat from the bridge's nick and trip, starting with `(auto)` by default:
   `(auto) got it, thinking…`, or for a task `(auto) got task <id>, thinking…`. If the bridge side's
-  wake-up hook poller is stopped or failing, it says so instead: `(auto) got it, but chief's wake-up
+  wake-up hook poller is stopped or failing, it says so instead: `(auto) got it, but the wake-up
   hook isn't working right now, so the reply may be late`.
 - **What it isn't.** It's not a protocol `ack` and not a `result`. It doesn't change a task's state and
   never appears in the status view. The agent still sends its own `{"type":"ack",…}` when it starts
@@ -67,11 +67,17 @@ unless `auto_ack` is enabled in the bridge's `config.json` (README, "Auto-acknow
 - **Rate.** At most one per `cooldown_s` (default 60 s, minimum 10) and `max_per_hour` (default 20),
   across all senders.
 
+## Per-agent inboxes (not on the wire)
+
+ChatBridge files explicit @mentions into a durable inbox per configured agent when `mentions.enabled` is true. The default is false. The room `inbox.jsonl`, `outbox.jsonl`, `watch`, `hook`, and `say` paths stay in place either way. `src/Chief.Bridge`, `Chief.Bridge.dll`, and `chief-bridge` launch the same program as `chat-bridge`.
+
+The adapter object is `chatbridge.inbox.wake`. Its `trip` is the sender trip from the room line, or null when that line had none. That field is untrusted identity evidence. A value there does not authorize the sender. Auto-ack and the hook still decide trust from `mention_trips`, `task_trips`, and `hook.trips`. Scope is always `room`. Side-chat history is not copied into the wake. The field list, ack, and retry are in [chatbridge.md](chatbridge.md). The packages under `bots/` keep consuming the room log or their own socket, and they keep trip-as-evidence separate from those allowlists.
+
 ## Local wake-up webhook (not on the wire)
 
 This isn't part of the channel protocol; nothing here is ever sent to hack.chat. It documents the
-local call `Chief.Bridge hook` makes so the webhook routine that wakes an agent knows what to expect
-(README, "Webhook poller").
+local call `chat-bridge hook` makes (compatibility command `Chief.Bridge hook`) so the webhook routine that wakes an agent knows what to expect
+(README, "Webhook poller"). This POST is the room-inbox hook. Its trip filter is `hook.trips`. It is a different object from `chatbridge.inbox.wake`.
 
 - **Request:** `POST` to the URL in the environment variable named by `hook.url_env`, with
   `Content-Type: application/json` and, unless `hook.auth_env` is `""`,

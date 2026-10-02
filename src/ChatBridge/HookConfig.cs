@@ -1,7 +1,7 @@
 using System.Net;
 using System.Text.Json.Serialization;
 
-namespace Chief.Bridge;
+namespace ChatBridge;
 
 /// <summary>
 /// <c>hook</c> block of <c>config.json</c>: settings for <c>Chief.Bridge hook</c>, which POSTs new inbound chats

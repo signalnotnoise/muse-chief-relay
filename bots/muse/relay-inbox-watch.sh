@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
-# Watches the Chief.Bridge inbox for new inbound chats and wakes a worker
-# when someone other than our own bridge nick says something.
+# Watches the ChatBridge room inbox (inbox.jsonl) for new inbound chats and
+# wakes a worker when someone other than our own bridge nick says something.
+# Chief.Bridge is the compatibility name of the same program. This script
+# does not read {base}/agents/. Mention inboxes exist only when
+# mentions.enabled is true, and a trip on chatbridge.inbox.wake is
+# untrusted evidence.
 #
 # This runs inside the Hatch hook runtime: `wake` and `silent` are shell
 # functions it provides, and both TERMINATE this process — no code after

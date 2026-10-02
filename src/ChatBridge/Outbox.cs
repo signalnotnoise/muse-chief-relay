@@ -1,6 +1,6 @@
 using System.Text;
 
-namespace Chief.Bridge;
+namespace ChatBridge;
 
 internal sealed record OutboxLine(string Text, long EndOffset);
 

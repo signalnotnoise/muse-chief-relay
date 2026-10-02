@@ -3,7 +3,7 @@ using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 
-namespace Chief.Bridge;
+namespace ChatBridge;
 
 /// <summary>
 /// <c>auto_ack</c> block of <c>config.json</c>. Off unless <c>enabled</c> is true. See README, "Auto-acknowledgement".
@@ -39,7 +39,7 @@ internal sealed class AutoAckConfig
     /// <summary>Sent instead when the hook poller's status says it is not running or its fires are failing, so the
     /// ack never promises a reply that nothing is going to wake chief for.</summary>
     [JsonPropertyName("offline_text")] public string OfflineText { get; set; } =
-        "(auto) got it, but chief's wake-up hook isn't working right now, so the reply may be late";
+        "(auto) got it, but the wake-up hook isn't working right now, so the reply may be late";
 
     /// <summary>Normalise trips (trim, drop a leading '!') and reject a config that could spam.</summary>
     public void Validate(string configPath)

@@ -86,7 +86,7 @@ public class CliProbeTextTests
         var (code, _, err) = await RunAsync("say", "--config", cfg, text);
 
         Assert.Equal(1, code);
-        Assert.Contains("Chief.Bridge say: refused CLI/shell probe text (not queued)", err);
+        Assert.Contains("ChatBridge say: refused CLI/shell probe text (not queued)", err);
         Assert.False(File.Exists(Path.Combine(dir.Path, "outbox.jsonl")));
     }
 
@@ -98,7 +98,7 @@ public class CliProbeTextTests
         var (code, _, err) = await RunAsync("say", "--config", cfg, "--", "\"$MSG\"");
 
         Assert.Equal(1, code);
-        Assert.Contains("Chief.Bridge say: refused CLI/shell probe text (not queued)", err);
+        Assert.Contains("ChatBridge say: refused CLI/shell probe text (not queued)", err);
         Assert.False(File.Exists(Path.Combine(dir.Path, "outbox.jsonl")));
     }
 

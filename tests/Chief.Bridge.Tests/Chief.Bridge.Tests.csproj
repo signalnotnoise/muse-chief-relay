@@ -17,10 +17,11 @@
 
   <ItemGroup>
     <Using Include="Xunit" />
+    <Using Include="ChatBridge" />
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\..\src\Chief.Bridge\Chief.Bridge.csproj" />
+    <ProjectReference Include="..\..\src\ChatBridge\ChatBridge.csproj" />
   </ItemGroup>
 
 </Project>

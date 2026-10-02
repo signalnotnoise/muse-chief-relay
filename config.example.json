@@ -17,6 +17,14 @@
     "task_trips": [],
     "cooldown_s": 60
   },
+  "agents": [
+    { "id": "dot", "nicks": ["dot"] },
+    { "id": "muse", "nicks": ["muse"] }
+  ],
+  "mentions": {
+    "enabled": false,
+    "max_fanout_hop": 1
+  },
   "hook": {
     "url_env": "CHIEF_HOOK_URL",
     "auth_env": "CHIEF_HOOK_AUTH",

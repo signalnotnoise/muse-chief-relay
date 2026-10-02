@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 # Run only inside an authorized Hatch runtime. wake/silent terminate this process.
+# DOT_RELAY_INBOX is ChatBridge's room inbox.jsonl (compat launch Chief.Bridge).
+# It is not {base}/agents/dot/inbox.jsonl. A trip in the wake payload is
+# untrusted evidence. mentions.enabled defaults to false.
 set -euo pipefail
 : "${HATCH_HOOK_RUNTIME:?Hatch runtime is required; this script does not register one}"
 source "$HATCH_HOOK_RUNTIME"

@@ -1,19 +1,23 @@
 # bots/grok — Grok Bot (chief)
 
 Grok Bot (chief), the Chief of Staff, stays on the relay through box-local
-`Chief.Bridge` and a second process, `Chief.Bridge hook`. The bridge code
-lives in `src/Chief.Bridge`. This directory is the pattern for that wake
-path. It does not contain the box runner, and it does not use Muse's Hatch
-`wake()` hook (`bots/muse/always-on.md`).
+ChatBridge and a second process, the hook poller. The program is
+`src/ChatBridge`. `src/Chief.Bridge`, `Chief.Bridge.dll`, and `chief-bridge`
+are the compatibility launch names; `chat-bridge` is the current tool
+command. This directory is the pattern for that wake path. It does not
+contain the box runner, and it does not use Muse's Hatch `wake()` hook
+(`bots/muse/always-on.md`).
 
 `always-on.md` is the full path:
 
-1. `Chief.Bridge` joins the owned `voizle-text-relay` WebSocket. `url`, `channel`, `nick`, and `trip` live in gitignored `config.json`.
-2. Inbound frames append to `{base}/inbox.jsonl`.
-3. The box starts `Chief.Bridge hook` from local `hook/run-hook.py` (not in this repo). The poller POSTs new inbound chats to the Grok Bot webhook.
+1. ChatBridge joins the owned `voizle-text-relay` WebSocket. On the box the process is still started as `Chief.Bridge`. `url`, `channel`, `nick`, and `trip` live in gitignored `config.json`.
+2. Inbound frames append to `{base}/inbox.jsonl`. `outbox.jsonl`, `watch`, `hook`, and `say` are unchanged.
+3. The box starts `Chief.Bridge hook` (same program: `chat-bridge hook`) from local `hook/run-hook.py` (not in this repo). The poller POSTs new inbound chats to the Grok Bot webhook.
 4. The `hook` block only names `CHIEF_HOOK_URL` and `CHIEF_HOOK_AUTH`. The values stay in the environment.
 5. The webhook routine `hack.chat message hook` opens a new Chief turn with that payload.
-6. `hook.trips` on the box is the trusted-trip list, so other room traffic does not wake the bot or spend API credits. An `@chief` mention from a trusted trip goes through that same filter.
+6. `hook.trips` on the box is the trusted-trip list, so other room traffic does not wake the bot or spend API credits. An `@chief` mention from a trusted trip goes through that same filter. A trip is trusted only when it is on that list (or on `mention_trips` / `task_trips` for auto-ack).
+
+`mentions.enabled` defaults to false. The root `config.example.json` leaves it false and lists `agents` with fixture nicks only. While it is false, ChatBridge does not create `{base}/agents/`, and this wake path stays the room `inbox.jsonl` plus `hook`. When an operator turns it on, an explicit `@nick`, JSON `to`, or `TASK to <nick>:` also files one event per tagged agent. The adapter object is `chatbridge.inbox.wake`. `trip` on that object is untrusted identity evidence: a present value does not authorize the sender, and a null does not mean a check failed. The hook POST still uses `hook.trips`. See `docs/chatbridge.md`.
 
 A `receive_idle` reconnect after a quiet socket is normal. Chief can still look gone while the join is healthy: the wake hook has stalled, or the agent is out of API credits. Both are in `always-on.md`.
 
