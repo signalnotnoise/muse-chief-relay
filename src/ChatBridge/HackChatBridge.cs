@@ -55,7 +55,7 @@ internal sealed class HackChatBridge
             _v2.Consumers = new V2WakeQueue(cfg, _fileLock);
         // Room-chat mirror into HIVEMIND. Off unless HIVEMIND_MESSAGE_MIRROR=1.
         // Offer only enqueues; a failure must not affect this session.
-        _mirror = HivemindMirror.Open(_runtime, line => TryStderr("[chatbridge] " + line));
+        _mirror = HivemindMirror.Open(_runtime, line => TryStderr("[chatbridge] " + line), _cfg.BaseDir);
     }
 
     private sealed class Session

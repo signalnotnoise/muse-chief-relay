@@ -20,7 +20,7 @@ internal interface IHivemindMirror
 
 internal static class HivemindMirror
 {
-    public static IHivemindMirror? Open(BridgeRuntime runtime, Action<string> log)
+    public static IHivemindMirror? Open(BridgeRuntime runtime, Action<string> log, string? queueDirectory = null)
     {
         var env = runtime.Env ?? Environment.GetEnvironmentVariable;
         var flag = env("HIVEMIND_MESSAGE_MIRROR");
@@ -28,7 +28,10 @@ internal static class HivemindMirror
             return null;
         if (runtime.MirrorOffer is { } offer)
             return new DelegateHivemindMirror(offer, log);
-        return NodeHivemindMirror.Start(env, log);
+        var spill = string.IsNullOrWhiteSpace(queueDirectory)
+            ? null
+            : Path.Combine(queueDirectory, NodeHivemindMirror.SpillFileName);
+        return NodeHivemindMirror.Start(env, log, spill);
     }
 }
 
@@ -160,30 +163,71 @@ internal sealed class DelegateHivemindMirror(Action<string> offer, Action<string
 
 internal sealed class NodeHivemindMirror : IHivemindMirror
 {
-    private const int MaxQueued = 32;
+    /// <summary>
+    /// In-memory offers waiting on the helper. A full queue is not dropped:
+    /// the payload is appended to <see cref="SpillFileName"/> and drained
+    /// when a slot is free. Only a spill that cannot be written is refused.
+    /// </summary>
+    internal const int MaxQueued = 32;
+
+    /// <summary>Durable overflow beside inbox.jsonl. One helper JSON object per line.</summary>
+    internal const string SpillFileName = "hivemind-mirror-queue.jsonl";
+
     private readonly Func<string, string?> _env;
     private readonly Action<string> _log;
     private readonly string? _script;
+    private readonly string? _spillPath;
+    private readonly Action<string>? _runOne;
     private readonly ConcurrentQueue<string> _pending = new();
     private readonly SemaphoreSlim _signal = new(0);
     private readonly object _gate = new();
     private int _scriptMissing;
+    private int _threadStarted;
+    private long _spillOffset;
+    private long _spillReadTo;
+    private bool _tookSpill;
 
-    private NodeHivemindMirror(Func<string, string?> env, Action<string> log, string? script)
+    private NodeHivemindMirror(
+        Func<string, string?> env,
+        Action<string> log,
+        string? script,
+        string? spillPath,
+        Action<string>? runOne,
+        bool start)
     {
         _env = env;
         _log = log;
         _script = script;
+        _spillPath = spillPath;
+        _runOne = runOne;
+        if (start)
+            Start();
+    }
+
+    public static NodeHivemindMirror Start(Func<string, string?> env, Action<string> log, string? spillPath = null) =>
+        new(env, log, FindScript(env), spillPath, null, start: true);
+
+    /// <summary>
+    /// Test stand-in. <paramref name="runOne"/> receives the helper JSON.
+    /// Pass <paramref name="start"/> false to fill the queue before the worker runs.
+    /// </summary>
+    internal static NodeHivemindMirror StartForTest(Action<string> log, string? spillPath, Action<string> runOne, bool start = true) =>
+        new(_ => null, log, null, spillPath, runOne, start);
+
+    /// <summary>Starts the worker once. A second call does nothing.</summary>
+    internal void Start()
+    {
+        if (Interlocked.Exchange(ref _threadStarted, 1) != 0)
+            return;
         var thread = new Thread(Loop)
         {
             IsBackground = true,
             Name = "hivemind-mirror"
         };
         thread.Start();
+        if (SpillPending())
+            _signal.Release();
     }
-
-    public static NodeHivemindMirror Start(Func<string, string?> env, Action<string> log) =>
-        new(env, log, FindScript(env));
 
     public void Offer(JsonObject chat, string channelFallback)
     {
@@ -194,18 +238,28 @@ internal sealed class NodeHivemindMirror : IHivemindMirror
             return;
         }
 
+        var kept = false;
+        var deferred = false;
         lock (_gate)
         {
-            if (_pending.Count >= MaxQueued)
+            if (_pending.Count < MaxQueued)
             {
-                _log("hivemind message mirror refused (queue)");
-                return;
+                _pending.Enqueue(built.Json);
+                kept = true;
             }
-
-            _pending.Enqueue(built.Json);
+            else if (TryAppendSpill(built.Json))
+            {
+                kept = true;
+                deferred = true;
+            }
         }
 
-        _signal.Release();
+        if (kept)
+            _signal.Release();
+        if (deferred)
+            _log("hivemind message mirror deferred (queue)");
+        else if (!kept)
+            _log("hivemind message mirror refused (queue)");
     }
 
     private void Loop()
@@ -221,16 +275,223 @@ internal sealed class NodeHivemindMirror : IHivemindMirror
                 return;
             }
 
-            if (!_pending.TryDequeue(out var json))
-                continue;
             try
             {
-                RunOne(json);
+                while (TryTake(out var json))
+                {
+                    try
+                    {
+                        if (_runOne is not null)
+                            _runOne(json);
+                        else
+                            RunOne(json);
+                    }
+                    catch (Exception)
+                    {
+                        _log("hivemind message mirror failed (error)");
+                    }
+
+                    CommitSpillTake();
+                }
             }
             catch (Exception)
             {
                 _log("hivemind message mirror failed (error)");
             }
+        }
+    }
+
+    private bool TryTake(out string json)
+    {
+        lock (_gate)
+        {
+            _tookSpill = false;
+            if (_pending.TryDequeue(out var queued) && queued is not null)
+            {
+                json = queued;
+                return true;
+            }
+
+            while (TryReadSpillLine(out var line, out var next))
+            {
+                if (line.Length == 0 || !SpillLineOk(line))
+                {
+                    if (line.Length > 0)
+                        _log("hivemind message mirror refused (json)");
+                    _spillOffset = next;
+                    TryDeleteSpillIfDrained();
+                    continue;
+                }
+
+                json = line;
+                _tookSpill = true;
+                _spillReadTo = next;
+                return true;
+            }
+
+            json = "";
+            return false;
+        }
+    }
+
+    private void CommitSpillTake()
+    {
+        if (!_tookSpill)
+            return;
+        lock (_gate)
+        {
+            if (!_tookSpill)
+                return;
+            _spillOffset = _spillReadTo;
+            _tookSpill = false;
+            TryDeleteSpillIfDrained();
+        }
+    }
+
+    private bool SpillPending()
+    {
+        if (string.IsNullOrEmpty(_spillPath))
+            return false;
+        try
+        {
+            return File.Exists(_spillPath) && new FileInfo(_spillPath).Length > _spillOffset;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Append one helper JSON line. A torn tail gets its own newline first so
+    /// the next record stays a separate line. False when there is no path or
+    /// the write fails. The caller logs that as a queue refuse.
+    /// </summary>
+    private bool TryAppendSpill(string json)
+    {
+        if (string.IsNullOrEmpty(_spillPath))
+            return false;
+        try
+        {
+            var dir = Path.GetDirectoryName(_spillPath);
+            if (!string.IsNullOrEmpty(dir))
+                Directory.CreateDirectory(dir);
+            // Same durability as inbox.jsonl (append, no fsync). Offer runs on the
+            // receive path; a disk flush here would stall the socket during a burst.
+            using var fs = new FileStream(
+                _spillPath,
+                FileMode.OpenOrCreate,
+                FileAccess.ReadWrite,
+                FileShare.Read);
+            if (fs.Length > 0)
+            {
+                fs.Position = fs.Length - 1;
+                var last = fs.ReadByte();
+                if (last != '\n')
+                    fs.WriteByte((byte)'\n');
+            }
+
+            var bytes = Encoding.UTF8.GetBytes(json + "\n");
+            fs.Write(bytes);
+            fs.Flush();
+            return true;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
+    private bool TryReadSpillLine(out string line, out long nextOffset)
+    {
+        line = "";
+        nextOffset = _spillOffset;
+        if (string.IsNullOrEmpty(_spillPath))
+            return false;
+
+        byte[] chunk;
+        try
+        {
+            using var fs = new FileStream(_spillPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            if (fs.Length < _spillOffset)
+                _spillOffset = 0;
+            var available = fs.Length - _spillOffset;
+            if (available <= 0)
+                return false;
+            var take = (int)Math.Min(available, 256 * 1024);
+            chunk = new byte[take];
+            fs.Position = _spillOffset;
+            fs.ReadExactly(chunk);
+        }
+        catch (FileNotFoundException)
+        {
+            return false;
+        }
+        catch (Exception)
+        {
+            _log("hivemind message mirror failed (spill)");
+            return false;
+        }
+
+        var nl = Array.IndexOf(chunk, (byte)'\n');
+        if (nl < 0)
+        {
+            // A mirror payload is one short JSON line. A chunk this large with
+            // no newline is corrupt. Hand back a non-empty stand-in so the
+            // caller logs refused (json) and skips it. The stand-in is not
+            // file bytes, and the log line does not include them.
+            if (chunk.Length < 256 * 1024)
+                return false;
+            nextOffset = _spillOffset + chunk.Length;
+            line = " ";
+            return true;
+        }
+
+        nextOffset = _spillOffset + nl + 1;
+        line = Encoding.UTF8.GetString(chunk, 0, nl).TrimEnd('\r');
+        return true;
+    }
+
+    private void TryDeleteSpillIfDrained()
+    {
+        if (string.IsNullOrEmpty(_spillPath) || !File.Exists(_spillPath))
+        {
+            _spillOffset = 0;
+            return;
+        }
+
+        long length;
+        try
+        {
+            length = new FileInfo(_spillPath).Length;
+        }
+        catch (Exception)
+        {
+            return;
+        }
+
+        if (length != _spillOffset)
+            return;
+        try
+        {
+            File.Delete(_spillPath);
+            _spillOffset = 0;
+        }
+        catch (Exception)
+        {
+            _log("hivemind message mirror failed (spill)");
+        }
+    }
+
+    private static bool SpillLineOk(string line)
+    {
+        try
+        {
+            return JsonNode.Parse(line) is JsonObject;
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return false;
         }
     }
 

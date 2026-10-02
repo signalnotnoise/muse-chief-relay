@@ -3,6 +3,7 @@ config.json
 .env
 .env.local
 inbox.jsonl
+hivemind-mirror-queue.jsonl
 outbox.jsonl
 unread.jsonl
 control.jsonl
