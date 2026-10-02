@@ -191,7 +191,9 @@ internal static class Program
               reconcile --id <client_msg_id> requeue|drop
                                                 Operator path for one uncertain v2 send. Does not connect
                                                 and does not turn protocol_v2 on. drop does not send.
-                                                requeue may duplicate on the server. A sent row is never
+                                                requeue may duplicate on the server. A running bridge
+                                                drops that socket before the next chat, so a late accepted
+                                                cannot complete a different row. A sent row is never
                                                 resent until this command (or a later accepted). Exit 1
                                                 when that id is not an uncertain send.
               help                              This text

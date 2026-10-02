@@ -343,11 +343,15 @@ public class ChatBridgeV2Tests
         var finished = client.NextChat();
         Assert.Equal("partial", finished.Frame!["text"]!.GetValue<string>());
         Assert.True(client.ResolveUncertain(finished.ClientMsgId!, "drop"));
-        Assert.False(client.NextChat().Send);
-
+        var cleared = client.NextChat();
+        Assert.False(cleared.Send);
+        Assert.NotNull(cleared.EndSession);
         File.AppendAllText(outbox, """{"text":"in flight"}""" + "\n");
+        Assert.False(client.NextChat().Send);
+        client.BeginDeployed(outbox);
         var inflight = client.NextChat();
         Assert.Equal("in flight", inflight.Frame!["text"]!.GetValue<string>());
+        Assert.Null(inflight.EndSession);
         File.AppendAllText(outbox, """{"text":"behind"}""" + "\n");
 
         var reopened = V2Client.Open(dir.Path);
@@ -358,8 +362,13 @@ public class ChatBridgeV2Tests
         Assert.Contains("behind", File.ReadAllText(reopened.OutboundPath), StringComparison.Ordinal);
 
         Assert.True(reopened.ResolveUncertain(held.ClientMsgId!, "drop"));
+        var fenced = reopened.NextChat();
+        Assert.False(fenced.Send);
+        Assert.NotNull(fenced.EndSession);
+        reopened.BeginDeployed(outbox);
         var next = reopened.NextChat();
         Assert.Equal("behind", next.Frame!["text"]!.GetValue<string>());
+        Assert.Null(next.EndSession);
 
         using var retryDir = new TempDir();
         var retryBox = retryDir.File("outbox.jsonl");
@@ -369,9 +378,184 @@ public class ChatBridgeV2Tests
         File.AppendAllText(retryBox, """{"text":"retry me"}""" + "\n");
         var once = retry.NextChat();
         Assert.True(retry.ResolveUncertain(once.ClientMsgId!, "requeue"));
+        var fencedRetry = retry.NextChat();
+        Assert.False(fencedRetry.Send);
+        Assert.NotNull(fencedRetry.EndSession);
+        var stale = retry.OnFrame(Fixture("deployed", "accepted"));
+        Assert.False(stale.WakeOutbox);
+        Assert.DoesNotContain("\"op\":\"accepted\"", File.ReadAllText(retry.OutboundPath), StringComparison.Ordinal);
+        retry.BeginDeployed(retryBox);
         var again = retry.NextChat();
         Assert.Equal("retry me", again.Frame!["text"]!.GetValue<string>());
         Assert.Equal(once.ClientMsgId, again.ClientMsgId);
+        Assert.Null(again.EndSession);
+    }
+
+    [Fact]
+    public void Late_accepted_after_live_drop_does_not_complete_the_next_open_row()
+    {
+        using var dir = new TempDir();
+        var outbox = dir.File("outbox.jsonl");
+        File.WriteAllText(outbox, "");
+        var client = V2Client.Open(dir.Path);
+        client.BeginDeployed(outbox);
+        var alpha = client.EnqueueLocal("alpha");
+        var beta = client.EnqueueLocal("beta");
+
+        var first = client.NextChat();
+        Assert.True(first.Send);
+        Assert.Equal(alpha, first.ClientMsgId);
+        Assert.Equal("alpha", first.Frame!["text"]!.GetValue<string>());
+
+        // Operator reconcile appends the drop. The live client sees it on the next pump step.
+        var drop = new JsonObject
+        {
+            ["op"] = "resolve",
+            ["client_msg_id"] = alpha,
+            ["decision"] = "drop"
+        };
+        File.AppendAllText(client.OutboundPath, drop.ToJsonString(JsonUtil.Opts) + "\n");
+
+        var fenced = client.NextChat();
+        Assert.False(fenced.Send);
+        Assert.False(fenced.Hold);
+        Assert.NotNull(fenced.EndSession);
+        Assert.NotEqual(beta, fenced.ClientMsgId);
+
+        var late = client.OnFrame(Fixture("deployed", "accepted"));
+        Assert.False(late.WakeOutbox);
+        Assert.NotNull(late.EndSession);
+        var log = File.ReadAllText(client.OutboundPath);
+        Assert.DoesNotContain("\"op\":\"accepted\"", log, StringComparison.Ordinal);
+        Assert.Contains("\"decision\":\"drop\"", log, StringComparison.Ordinal);
+
+        client.BeginDeployed(outbox);
+        var second = client.NextChat();
+        Assert.True(second.Send);
+        Assert.Equal(beta, second.ClientMsgId);
+        Assert.Equal("beta", second.Frame!["text"]!.GetValue<string>());
+        Assert.Null(second.EndSession);
+
+        var stored = client.OnFrame(Fixture("deployed", "accepted"));
+        Assert.True(stored.WakeOutbox);
+        Assert.Null(stored.EndSession);
+        var after = File.ReadAllText(client.OutboundPath);
+        var acceptedLine = after.Split('\n').First(line => line.Contains("\"op\":\"accepted\"", StringComparison.Ordinal));
+        Assert.Contains(beta, acceptedLine, StringComparison.Ordinal);
+        Assert.DoesNotContain(alpha, acceptedLine, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Live_drop_reconnects_before_the_next_chat_and_ignores_a_late_accepted()
+    {
+        await using var fx = new RelayFixture
+        {
+            Url = "ws://127.0.0.1:8787/relay",
+            ProtocolV2 = true
+        };
+        fx.Script.Enqueue(Attempt.HoldBeforeJoin(), Attempt.HoldBeforeJoin());
+        var phase = 0;
+        var secondHello = false;
+        var pushedLate = false;
+        ScriptedSocket? first = null;
+        await fx.RunUntil(() =>
+        {
+            if (fx.Script.Latest is null)
+                return false;
+
+            if (phase == 0 && fx.Script.Created == 1 && fx.Script.Sent.Count == 0)
+            {
+                fx.Script.Latest.Push(DeployedHello);
+                phase = 1;
+                return false;
+            }
+
+            if (phase == 1 && fx.Script.Sent.Count >= 1)
+            {
+                fx.Script.Latest.Push(Welcome);
+                phase = 2;
+                return false;
+            }
+
+            if (phase == 2 && fx.Script.Sent.Any(IsType("pull")))
+            {
+                File.AppendAllText(
+                    Path.Combine(fx.Dir.Path, "outbox.jsonl"),
+                    """{"text":"alpha"}""" + "\n" + """{"text":"beta"}""" + "\n");
+                phase = 3;
+                return false;
+            }
+
+            if (phase == 3)
+            {
+                var chats = Chats(fx);
+                if (chats.Count == 0)
+                    return false;
+                Assert.Equal("alpha", chats[0]["text"]!.GetValue<string>());
+                first = fx.Script.Latest;
+                var outboundPath = Path.Combine(fx.Dir.Path, V2Client.OutboundName);
+                var drop = new JsonObject
+                {
+                    ["op"] = "resolve",
+                    ["client_msg_id"] = EnqueuedId(outboundPath, "alpha"),
+                    ["decision"] = "drop"
+                };
+                File.AppendAllText(outboundPath, drop.ToJsonString(JsonUtil.Opts) + "\n");
+                phase = 4;
+                return false;
+            }
+
+            if (phase == 4)
+            {
+                Assert.Single(Chats(fx));
+                var inbox = Path.Combine(fx.Dir.Path, "inbox.jsonl");
+                if (!File.Exists(inbox) || !File.ReadAllText(inbox).Contains("fenced this socket", StringComparison.Ordinal))
+                    return false;
+                if (!pushedLate)
+                {
+                    first!.Push("""{"type":"accepted","messageId":"late","ingressId":"late"}""");
+                    pushedLate = true;
+                    return false;
+                }
+
+                if (fx.Script.Created < 2)
+                    return false;
+                phase = 5;
+                return false;
+            }
+
+            if (phase == 5)
+            {
+                Assert.Single(Chats(fx));
+                Assert.DoesNotContain(
+                    "\"op\":\"accepted\"",
+                    File.ReadAllText(Path.Combine(fx.Dir.Path, V2Client.OutboundName)),
+                    StringComparison.Ordinal);
+                if (!secondHello)
+                {
+                    fx.Script.Latest.Push(DeployedHello);
+                    secondHello = true;
+                    return false;
+                }
+
+                if (fx.Script.Sent.Count(IsJoin) < 2)
+                    return false;
+                fx.Script.Latest.Push(Welcome);
+                phase = 6;
+                return false;
+            }
+
+            if (phase != 6)
+                return false;
+            var sent = Chats(fx);
+            if (sent.Count < 2)
+                return false;
+            Assert.Equal("beta", sent[1]["text"]!.GetValue<string>());
+            var ledger = File.ReadAllText(Path.Combine(fx.Dir.Path, V2Client.OutboundName));
+            Assert.DoesNotContain("\"op\":\"accepted\"", ledger, StringComparison.Ordinal);
+            Assert.Contains("\"decision\":\"drop\"", ledger, StringComparison.Ordinal);
+            return true;
+        });
     }
 
     [Fact]
@@ -725,6 +909,7 @@ public class ChatBridgeV2Tests
         var after = client.NextChat();
         Assert.False(after.Hold);
         Assert.False(after.Send);
+        Assert.NotNull(after.EndSession);
         Assert.Empty(client.UncertainIds());
     }
 
@@ -903,6 +1088,23 @@ public class ChatBridgeV2Tests
         };
 
     private static bool IsJoin(string json) => Json.Str(Parse(json), "type") == "join";
+
+    private static List<JsonObject> Chats(RelayFixture fx) =>
+        fx.Script.Sent.Select(Parse).Where(o => Json.Str(o, "type") == "chat").ToList();
+
+    private static string EnqueuedId(string path, string text)
+    {
+        foreach (var line in File.ReadAllLines(path))
+        {
+            if (line.Length == 0)
+                continue;
+            var op = JsonNode.Parse(line)!.AsObject();
+            if (Json.Str(op, "op") == "enqueue" && Json.Str(op, "text") == text)
+                return Json.Str(op, "client_msg_id") ?? throw new InvalidOperationException("enqueue has no id");
+        }
+
+        throw new InvalidOperationException("missing enqueue for " + text);
+    }
 
     private static JsonObject Parse(string json) => JsonNode.Parse(json)!.AsObject();
 
