@@ -763,6 +763,48 @@ public class ChatBridgeV2Tests
     }
 
     [Fact]
+    public void Drop_then_sent_B_then_delayed_accepted_does_not_accept_B()
+    {
+        using var dir = new TempDir();
+        var outbox = dir.File("outbox.jsonl");
+        File.WriteAllText(outbox, "");
+        var client = V2Client.Open(dir.Path);
+        client.BeginDeployed(outbox);
+        var alpha = client.EnqueueLocal("alpha");
+        Assert.Equal(alpha, client.NextChat().ClientMsgId);
+        var beta = client.EnqueueLocal("beta");
+        Assert.True(client.ResolveUncertain(alpha, "drop"));
+
+        // The pre-fix pump sent B on this connection, then FirstOpen attached A's accepted to B.
+        File.AppendAllText(client.OutboundPath, new JsonObject
+        {
+            ["op"] = "sent",
+            ["client_msg_id"] = beta
+        }.ToJsonString(JsonUtil.Opts) + "\n");
+        File.AppendAllText(client.OutboundPath, new JsonObject
+        {
+            ["op"] = "accepted",
+            ["client_msg_id"] = beta,
+            ["messageId"] = "<message-id>"
+        }.ToJsonString(JsonUtil.Opts) + "\n");
+
+        var late = client.OnFrame(Fixture("deployed", "accepted"));
+        Assert.False(late.WakeOutbox);
+        Assert.Contains(beta, client.UncertainIds());
+        Assert.DoesNotContain(alpha, client.UncertainIds());
+
+        var reloaded = V2Client.Open(dir.Path);
+        Assert.Contains(beta, reloaded.UncertainIds());
+        Assert.DoesNotContain(alpha, reloaded.UncertainIds());
+        reloaded.BeginDeployed(outbox);
+        var held = reloaded.NextChat();
+        Assert.True(held.Hold);
+        Assert.Equal(beta, held.ClientMsgId);
+        Assert.Null(held.Frame);
+        Assert.Contains(beta, reloaded.UncertainIds());
+    }
+
+    [Fact]
     public void Operator_resolve_line_is_applied_on_the_next_pump_step()
     {
         using var dir = new TempDir();

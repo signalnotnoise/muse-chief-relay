@@ -949,8 +949,15 @@ internal sealed class V2Client
                     sending.State = "sent";
                 break;
             case "accepted":
-                if (Json.Str(op, "client_msg_id") is { } done && _out.TryGetValue(done, out var accepted))
-                    accepted.State = "accepted";
+                // Shared by OnAccepted, Load, and AppendOutbound/CatchUp. A drop fences this
+                // connection, so a late accepted must not complete the dropped row or a later one.
+                if (_acceptFence)
+                    return;
+                if (Json.Str(op, "client_msg_id") is not { } done || !_out.TryGetValue(done, out var acceptedRow))
+                    return;
+                if (acceptedRow.State != "sent")
+                    return;
+                acceptedRow.State = "accepted";
                 break;
             case "resolve":
                 if (Json.Str(op, "client_msg_id") is not { } resolved || !_out.TryGetValue(resolved, out var item))
@@ -1070,6 +1077,7 @@ internal sealed class V2Client
 
     private static void Load(string path, Action<JsonObject> apply)
     {
+        // Replay goes through ApplyOut. A drop earlier in the file fences later accepted lines.
         if (!File.Exists(path))
             return;
         var text = File.ReadAllText(path);
@@ -1178,6 +1186,20 @@ internal sealed class V2Client
     private void AppendOutbound(IReadOnlyList<JsonObject> ops)
     {
         CatchUpOutbound();
+        if (_acceptFence)
+        {
+            // Do not persist an accepted line chosen by FirstOpen after a live drop.
+            var kept = new List<JsonObject>(ops.Count);
+            foreach (var op in ops)
+            {
+                if (Json.Str(op, "op") == "accepted")
+                    continue;
+                kept.Add(op);
+            }
+
+            ops = kept;
+        }
+
         AppendOps(_outboundPath, ops);
         _outboundApplied = CompleteLineEnd(_outboundPath);
         foreach (var op in ops)
