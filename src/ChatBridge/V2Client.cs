@@ -127,11 +127,17 @@ internal static class V2Negotiation
 }
 
 /// <summary>One step of the durable outbound pump.</summary>
-internal readonly record struct V2ChatStep(bool Hold, string? ClientMsgId, JsonObject? Frame)
+internal readonly record struct V2ChatStep(bool Hold, string? ClientMsgId, JsonObject? Frame, bool ResetSession = false)
 {
     public static V2ChatStep Idle { get; } = new(false, null, null);
 
-    public bool Send => Frame is not null;
+    /// <summary>
+    /// A <c>drop</c> invalidated the in-flight send. The deployed <c>accepted</c> frame has no
+    /// client id, so this session must reconnect before another chat is sent.
+    /// </summary>
+    public static V2ChatStep Fenced { get; } = new(false, null, null, true);
+
+    public bool Send => Frame is not null && !ResetSession;
 }
 
 /// <summary>Frames the socket loop should write, plus whether the outbound pump should wake.</summary>
@@ -184,6 +190,9 @@ internal sealed class V2Client
     private bool _pullAgain;
     private int _pulls;
     private string? _ackInFlight;
+    // True after a sent row is dropped, until the next connection. A late accepted on this
+    // socket must not complete a different chat: the frame has no client_msg_id.
+    private bool _acceptFence;
 
     private V2Client(string baseDir)
     {
@@ -221,6 +230,15 @@ internal sealed class V2Client
             _pulls = 0;
             _ackInFlight = null;
             CatchUpOutbound();
+            // New socket. An accepted for a chat dropped on the previous connection cannot arrive here.
+            if (_acceptFence)
+            {
+                AppendOutbound(new[]
+                {
+                    new JsonObject { ["op"] = "accept_open" }
+                });
+            }
+
             if (_cursorSet)
                 return;
             // Snapshot after the last complete line. A tail with no newline is still
@@ -279,6 +297,12 @@ internal sealed class V2Client
         {
             CatchUpOutbound();
             ImportLocked();
+            if (_acceptFence)
+            {
+                _notes.Enqueue("dropped send fenced this session; reconnect before the next chat");
+                return V2ChatStep.Fenced;
+            }
+
             var head = FirstOpen();
             if (head is null)
                 return V2ChatStep.Idle;
@@ -527,10 +551,26 @@ internal sealed class V2Client
 
     private V2InboundResult OnAccepted(JsonObject frame)
     {
+        // A reconcile drop may be on disk already. See it before FirstOpen, or the late
+        // accepted completes whichever row the pump sent next.
+        CatchUpOutbound();
+        if (_acceptFence)
+        {
+            _notes.Enqueue("accepted ignored; dropped send fenced this session");
+            return V2InboundResult.None;
+        }
+
+        var named = Json.Str(frame, "client_msg_id");
         var head = FirstOpen();
         if (head is not { State: "sent" })
         {
             _notes.Enqueue("accepted with no in-flight send; not applied");
+            return V2InboundResult.None;
+        }
+
+        if (named is not null && !string.Equals(named, head.Id, StringComparison.Ordinal))
+        {
+            _notes.Enqueue("accepted names a different client_msg_id; not applied");
             return V2InboundResult.None;
         }
 
@@ -917,7 +957,18 @@ internal sealed class V2Client
                     return;
                 if (item.State != "sent")
                     return;
-                item.State = Json.Str(op, "decision") == "requeue" ? "queued" : "dropped";
+                if (Json.Str(op, "decision") == "requeue")
+                {
+                    item.State = "queued";
+                    return;
+                }
+
+                item.State = "dropped";
+                // Tombstone. Later accepted frames on this connection do not complete another row.
+                _acceptFence = true;
+                break;
+            case "accept_open":
+                _acceptFence = false;
                 break;
         }
     }
