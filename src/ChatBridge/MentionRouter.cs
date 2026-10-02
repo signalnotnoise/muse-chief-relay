@@ -9,8 +9,14 @@ internal enum RouteKind
     ReplySuppressed,
     HopLimited,
     SelfOnly,
-    /// <summary>Durable on deferred.jsonl. The inbox lock timed out, so it is not in inbox.jsonl yet.</summary>
-    Deferred
+    /// <summary>
+    /// Durable, but not in the recipient inbox.jsonl yet. A recipient lock timeout is on that
+    /// agent's deferred.jsonl. A sender lock timeout during fan-out is on ingress.jsonl.
+    /// </summary>
+    Deferred,
+
+    /// <summary>Fan-out parent or root does not match a chain in the sender inbox. Not delivered.</summary>
+    Unresolved
 }
 
 internal sealed record RouteResult(RouteKind Kind, IReadOnlyList<InboxEvent> Delivered)
@@ -23,6 +29,7 @@ internal sealed record RouteResult(RouteKind Kind, IReadOnlyList<InboxEvent> Del
 /// Routes explicit mentions into per-agent inboxes. One delivery per tagged agent.
 /// Agent senders do not fan out again unless the line explicitly requests it, and that
 /// extra hop is capped by <c>mentions.max_fanout_hop</c> inside one causal chain.
+/// A fan-out is journaled to ingress.jsonl before that chain is read from the sender inbox.
 /// </summary>
 internal sealed class MentionRouter : IMentionSink
 {
@@ -31,6 +38,7 @@ internal sealed class MentionRouter : IMentionSink
     private readonly int _maxHop;
     private readonly string _root;
     private readonly ConversationStore _conversations;
+    private readonly IngressJournal _ingress;
     private readonly Dictionary<string, AgentInbox> _inboxes = new(StringComparer.OrdinalIgnoreCase);
 
     private MentionRouter(RelayConfig cfg, TimeSpan? lockBudget)
@@ -40,6 +48,7 @@ internal sealed class MentionRouter : IMentionSink
         _maxHop = cfg.MentionRouting.MaxFanoutHop;
         _root = Path.Combine(cfg.BaseDir, "agents");
         _conversations = new ConversationStore(_root);
+        _ingress = new IngressJournal(Path.Combine(_root, IngressJournal.FileName), lockBudget ?? AgentInbox.DefaultLockBudget);
         Directory.CreateDirectory(_root);
         foreach (var agent in _directory.Agents)
         {
@@ -50,6 +59,7 @@ internal sealed class MentionRouter : IMentionSink
 
         foreach (var inbox in _inboxes.Values)
             inbox.CatchUp();
+        DrainIngress();
     }
 
     public ConversationStore Conversations => _conversations;
@@ -67,6 +77,24 @@ internal sealed class MentionRouter : IMentionSink
 
     public RouteResult Route(RoomMessage message)
     {
+        DrainIngress();
+        return RouteFresh(message);
+    }
+
+    private void DrainIngress()
+    {
+        foreach (var retained in _ingress.Pending())
+        {
+            var result = RouteFresh(retained.Message);
+            if (result.Kind is RouteKind.OwnEcho or RouteKind.NoMention or RouteKind.ReplySuppressed)
+                _ingress.Forget(retained.SourceId);
+            else if (result.Kind == RouteKind.Deferred && _ingress.Pending().Any(p => p.SourceId == retained.SourceId))
+                break;
+        }
+    }
+
+    private RouteResult RouteFresh(RoomMessage message)
+    {
         if (!string.IsNullOrEmpty(_bridgeNick)
             && string.Equals(message.From, _bridgeNick, StringComparison.OrdinalIgnoreCase))
             return RouteResult.Of(RouteKind.OwnEcho);
@@ -83,11 +111,31 @@ internal sealed class MentionRouter : IMentionSink
         string? parentSource = null;
         var root = sourceId;
         var hop = 0;
+        var journaled = false;
         // A human mention starts a chain. An agent fan-out continues one chain: the named parent
-        // or root, otherwise the latest delivery to that sender. A hop of 0 does not clear the
-        // hop already stored for that chain, and a different chain does not inherit it.
-        if (sender is not null && !TryCarry(sender.Id, parsed, sourceId, out parentSource, out root, out hop))
-            return RouteResult.Of(RouteKind.HopLimited);
+        // or root, otherwise the latest delivery to that sender. The line is durable before that
+        // read, so a busy sender lock cannot drop it. A named parent or root that does not match
+        // this sender's inbox does not start a new root. A hop of 0 does not clear the hop already
+        // stored for that chain, and a different chain does not inherit it.
+        if (sender is not null)
+        {
+            _ingress.Retain(message, sourceId);
+            journaled = true;
+            try
+            {
+                var carry = TryCarry(sender.Id, parsed, sourceId, out parentSource, out root, out hop);
+                if (carry != CarryDecision.Ready)
+                {
+                    _ingress.Forget(sourceId);
+                    journaled = false;
+                    return RouteResult.Of(carry == CarryDecision.HopLimited ? RouteKind.HopLimited : RouteKind.Unresolved);
+                }
+            }
+            catch (Exception ex) when (AgentInbox.IsLockBusy(ex))
+            {
+                return RouteResult.Of(RouteKind.Deferred);
+            }
+        }
 
         var delivered = new List<InboxEvent>();
         var duplicates = 0;
@@ -131,6 +179,11 @@ internal sealed class MentionRouter : IMentionSink
             }
         }
 
+        // Recipient deferrals are already on that agent's deferred.jsonl. The ingress row's job was
+        // the gap before the sender inbox could be read.
+        if (journaled)
+            _ingress.Forget(sourceId);
+
         if (delivered.Count > 0)
             return RouteResult.Of(RouteKind.Delivered, delivered);
         if (deferred > 0)
@@ -140,40 +193,42 @@ internal sealed class MentionRouter : IMentionSink
         return RouteResult.Of(RouteKind.SelfOnly);
     }
 
-    private bool TryCarry(string senderId, MentionParseResult parsed, string sourceId, out string? parentSource, out string root, out int hop)
+    private enum CarryDecision
+    {
+        Ready,
+        HopLimited,
+        Unresolved
+    }
+
+    private CarryDecision TryCarry(string senderId, MentionParseResult parsed, string sourceId, out string? parentSource, out string root, out int hop)
     {
         parentSource = null;
         root = sourceId;
         hop = 0;
         if (!_inboxes.TryGetValue(senderId, out var inbox))
         {
+            if (!string.IsNullOrEmpty(parsed.Parent) || !string.IsNullOrEmpty(parsed.Root))
+                return CarryDecision.Unresolved;
             if (parsed.Hop >= _maxHop)
-                return false;
+                return CarryDecision.HopLimited;
             hop = parsed.Hop + 1;
-            return true;
+            return CarryDecision.Ready;
         }
 
-        InboxEvent? parent = null;
-        if (!string.IsNullOrEmpty(parsed.Parent))
-            parent = inbox.Find(parsed.Parent);
-        else if (string.IsNullOrEmpty(parsed.Root))
-            parent = inbox.Latest();
+        var look = inbox.InspectChain(parsed.Parent, parsed.Root);
+        if (look.Unresolved)
+            return CarryDecision.Unresolved;
 
-        if (parent is not null)
-        {
-            parentSource = parent.SourceId;
-            root = AgentInbox.ChainRoot(parent);
-        }
-        else if (!string.IsNullOrEmpty(parsed.Root))
-        {
-            root = parsed.Root;
-        }
+        if (look.Parent is not null)
+            parentSource = look.Parent.SourceId;
+        if (!string.IsNullOrEmpty(look.Root))
+            root = look.Root;
 
-        var carried = Math.Max(parsed.Hop, inbox.HighestFanoutHop(root));
+        var carried = Math.Max(parsed.Hop, look.HighestHop);
         if (carried >= _maxHop)
-            return false;
+            return CarryDecision.HopLimited;
         hop = carried + 1;
-        return true;
+        return CarryDecision.Ready;
     }
 }
 
@@ -184,7 +239,8 @@ internal interface IMentionSink
 
 /// <summary>
 /// Socket-side entry. A failure here is logged and swallowed so mention routing cannot drop the relay.
-/// A busy inbox lock is retried, then the mention is spilled to deferred.jsonl and this returns true.
+/// A busy inbox lock is retried. A recipient that stays busy is spilled to deferred.jsonl. A sender
+/// lock that stays busy during fan-out leaves the line on ingress.jsonl. Either way this returns true.
 /// </summary>
 internal static class MentionIngress
 {
