@@ -1,10 +1,11 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 import AttentionQueue from "./AttentionQueue.vue";
 import RoomBoard from "./RoomBoard.vue";
 import SiteHeader from "./SiteHeader.vue";
 import { useChat } from "./useChat.js";
 import { isBoardRoute } from "./navRoute.js";
+import { buildWorkspaceAsk } from "./workspaceAsk.js";
 
 const field =
   "rounded-lg border border-line bg-panel-2 px-2.5 py-[0.55rem] text-ink outline-none focus:border-focus focus:shadow-[0_0_0_3px_var(--color-focus-ring)] aria-invalid:border-danger";
@@ -78,6 +79,41 @@ const openTasks = computed(() => {
   if (!tasks) return 0;
   return tasks.filter((t) => t.state === "open" || t.state === "claimed").length;
 });
+
+// New-workspace goal sheet: the intuitive way to ask for a workspace is one
+// line, goal first (`workspace: <goal>`). The sheet collects the goal — the
+// only required field — and posts that exact line, so typing and tapping
+// stay the same invocation for the room-side watcher.
+const showWorkspaceSheet = ref(false);
+const workspaceGoal = ref("");
+const workspaceGoalEl = ref(null);
+
+function openWorkspaceSheet() {
+  workspaceGoal.value = "";
+  showWorkspaceSheet.value = true;
+  nextTick(() => {
+    if (workspaceGoalEl.value) workspaceGoalEl.value.focus();
+  });
+}
+function closeWorkspaceSheet() {
+  showWorkspaceSheet.value = false;
+  workspaceGoal.value = "";
+}
+function onWorkspaceCreate() {
+  const line = buildWorkspaceAsk(workspaceGoal.value);
+  if (!line) {
+    if (workspaceGoalEl.value) workspaceGoalEl.value.focus();
+    return;
+  }
+  closeWorkspaceSheet();
+  // Send through the normal composer path so history, scroll, and the
+  // send pipeline behave exactly like a typed message.
+  message.value = line;
+  onSend();
+  nextTick(() => {
+    if (messageEl.value) messageEl.value.focus();
+  });
+}
 </script>
 
 <template>
@@ -395,8 +431,52 @@ const openTasks = computed(() => {
                   @input="onMessageInput"
                   @keydown="onComposerKeydown"
                 />
+                <button
+                  :class="[button, 'shrink-0 px-2.5']"
+                  type="button"
+                  title="Start a new workspace with the room's agents"
+                  @click="openWorkspaceSheet"
+                >+ Workspace</button>
                 <button :class="[button, 'shrink-0']" type="submit">Send</button>
               </form>
+
+              <!-- New-workspace goal sheet: one field (the goal), posts the
+                   canonical `workspace: <goal>` ask line on create. -->
+              <div
+                v-if="showWorkspaceSheet"
+                class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+                @click.self="closeWorkspaceSheet"
+                @keydown.escape="closeWorkspaceSheet"
+              >
+                <div
+                  role="dialog"
+                  aria-modal="true"
+                  aria-labelledby="workspace-sheet-title"
+                  class="w-full max-w-md rounded-xl border border-line bg-panel p-5 shadow-2xl"
+                >
+                  <h2 id="workspace-sheet-title" class="text-lg font-bold tracking-tight text-ink">New workspace</h2>
+                  <p class="mt-1 text-[0.85rem] leading-snug text-muted">
+                    One line is enough. The room's agents pick it up and set the
+                    workspace up around this goal.
+                  </p>
+                  <form class="mt-4" @submit.prevent="onWorkspaceCreate">
+                    <label for="workspace-goal" class="mb-1.5 block text-[0.8rem] font-semibold text-muted">What's the goal?</label>
+                    <textarea
+                      id="workspace-goal"
+                      ref="workspaceGoalEl"
+                      :class="[field, 'w-full']"
+                      v-model="workspaceGoal"
+                      rows="3"
+                      placeholder="e.g. Ship the classroom-agent kit pilot"
+                      required
+                    ></textarea>
+                    <div class="mt-4 flex justify-end gap-2">
+                      <button :class="[button, 'px-3 py-2 text-[0.85rem]']" type="button" @click="closeWorkspaceSheet">Cancel</button>
+                      <button :class="[button, 'px-3 py-2 text-[0.85rem]']" type="submit">Create workspace</button>
+                    </div>
+                  </form>
+                </div>
+              </div>
             </main>
           </section>
         </div>
