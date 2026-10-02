@@ -42,22 +42,29 @@ internal static class InboxBackoff
 /// </summary>
 internal sealed class AgentInbox
 {
+    public static readonly TimeSpan DefaultLockBudget = TimeSpan.FromSeconds(2);
+
     private readonly string _dir;
+    private readonly TimeSpan _lockBudget;
     private readonly List<InboxEvent> _events = new();
     private readonly Dictionary<string, InboxEvent> _byId = new(StringComparer.Ordinal);
     private readonly HashSet<string> _sourceIds = new(StringComparer.Ordinal);
     private readonly HashSet<string> _acked = new(StringComparer.Ordinal);
     private readonly Dictionary<string, AttemptState> _attempts = new(StringComparer.Ordinal);
 
-    private AgentInbox(string dir) => _dir = dir;
+    private AgentInbox(string dir, TimeSpan lockBudget)
+    {
+        _dir = dir;
+        _lockBudget = lockBudget < TimeSpan.Zero ? TimeSpan.Zero : lockBudget;
+    }
 
     public string DirectoryPath => _dir;
     public string InboxPath => Path.Combine(_dir, "inbox.jsonl");
 
-    public static AgentInbox Open(string agentDir)
+    public static AgentInbox Open(string agentDir, TimeSpan? lockBudget = null)
     {
         Directory.CreateDirectory(agentDir);
-        var inbox = new AgentInbox(agentDir);
+        var inbox = new AgentInbox(agentDir, lockBudget ?? DefaultLockBudget);
         inbox.Reload();
         return inbox;
     }
@@ -67,7 +74,7 @@ internal sealed class AgentInbox
         lock (Gate)
         {
             using var _ = Lock();
-            Reload();
+            RepairAndReload();
             if (_byId.TryGetValue(draft.Id, out var existing))
             {
                 stored = existing;
@@ -111,7 +118,7 @@ internal sealed class AgentInbox
         lock (Gate)
         {
             using var _ = Lock();
-            Reload();
+            RepairAndReload();
             return Ordered().ToList();
         }
     }
@@ -135,7 +142,7 @@ internal sealed class AgentInbox
         lock (Gate)
         {
             using var _ = Lock();
-            Reload();
+            RepairAndReload();
             if (!_byId.ContainsKey(id))
                 return false;
             if (_acked.Contains(id))
@@ -151,7 +158,7 @@ internal sealed class AgentInbox
         lock (Gate)
         {
             using var _ = Lock();
-            Reload();
+            RepairAndReload();
             if (!_byId.ContainsKey(id) || _acked.Contains(id))
                 return false;
             var prev = _attempts.GetValueOrDefault(id)?.Count ?? 0;
@@ -181,8 +188,33 @@ internal sealed class AgentInbox
                 return new InboxView(e, attempt?.Count ?? 0, attempt?.NextUnix, attempt?.Error);
             });
 
+    /// <summary>Highest <c>hop</c> on a fan-out row in this inbox, acked or not. Zero when there is none.</summary>
+    public int HighestFanoutHop()
+    {
+        lock (Gate)
+        {
+            using var _ = Lock();
+            RepairAndReload();
+            var max = 0;
+            foreach (var ev in _events)
+            {
+                if (ev.Fanout && ev.Hop > max)
+                    max = ev.Hop;
+            }
+
+            return max;
+        }
+    }
+
     private InboxEvent? FindSource(string sourceId) =>
         _events.FirstOrDefault(e => string.Equals(e.SourceId, sourceId, StringComparison.Ordinal));
+
+    private void RepairAndReload()
+    {
+        RepairTornTail(InboxPath);
+        RepairTornTail(ControlPath);
+        Reload();
+    }
 
     private void Reload()
     {
@@ -216,8 +248,30 @@ internal sealed class AgentInbox
 
     private string ControlPath => Path.Combine(_dir, "control.jsonl");
 
-    private FileStream Lock() =>
-        new(Path.Combine(_dir, "inbox.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+    /// <summary>
+    /// Exclusive lock. A holder (the bridge filing a mention, or <c>inbox ack</c>) is normal contention.
+    /// Wait out <see cref="_lockBudget"/> instead of failing the write on the first busy open.
+    /// </summary>
+    private FileStream Lock()
+    {
+        var path = Path.Combine(_dir, "inbox.lock");
+        var started = System.Diagnostics.Stopwatch.StartNew();
+        Exception? last = null;
+        while (true)
+        {
+            try
+            {
+                return new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                last = ex;
+                if (started.Elapsed >= _lockBudget)
+                    throw new IOException("inbox lock busy", last);
+                Thread.Sleep(TimeSpan.FromMilliseconds(20));
+            }
+        }
+    }
 
     private static void AppendJson<T>(string path, T value)
     {
@@ -242,11 +296,50 @@ internal sealed class AgentInbox
             }
             catch (JsonException)
             {
-                // A torn last line is skipped. The next append continues the log.
+                // A newline-terminated corrupt line is skipped. An unterminated tail is removed
+                // by RepairTornTail before this read, so it cannot glue itself to the next append.
             }
         }
 
         return list;
+    }
+
+    /// <summary>
+    /// The last line of a JSONL file must end with a newline. A crash can leave a partial tail.
+    /// Leaving that tail in place makes the next append share its line, and reload then skips both.
+    /// A partial tail is cut back to the previous newline. A complete JSON value that is only missing
+    /// its newline is terminated.
+    /// </summary>
+    private static void RepairTornTail(string path)
+    {
+        if (!File.Exists(path))
+            return;
+        var text = File.ReadAllText(path);
+        if (text.Length == 0 || text[^1] == '\n')
+            return;
+
+        var nl = text.LastIndexOf('\n');
+        var tail = nl < 0 ? text : text[(nl + 1)..];
+        if (tail.Length == 0)
+            return;
+
+        if (IsCompleteJson(tail))
+            File.WriteAllText(path, text + "\n");
+        else
+            File.WriteAllText(path, nl < 0 ? "" : text[..(nl + 1)]);
+    }
+
+    private static bool IsCompleteJson(string tail)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(tail);
+            return doc.RootElement.ValueKind is JsonValueKind.Object or JsonValueKind.Array;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
     }
 
     private static readonly object Gate = new();

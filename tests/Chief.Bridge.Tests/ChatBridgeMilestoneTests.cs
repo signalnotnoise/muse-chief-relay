@@ -305,7 +305,7 @@ public class ChatBridgeMilestoneTests
         var ok = MentionIngress.TryAccept(new ThrowingSink(), Chat("Alex", "@dot", 1), out var error);
 
         Assert.False(ok);
-        Assert.Equal(nameof(IOException), error);
+        Assert.Equal("not filed: " + nameof(IOException), error);
     }
 
     private static RelayConfig routerConfig(TempDir dir) =>

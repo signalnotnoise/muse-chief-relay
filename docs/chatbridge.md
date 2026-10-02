@@ -62,9 +62,11 @@ For each agent:
 
 Restart reads those files and continues. Pending events stay pending, in `seq` order. An ack stays acked.
 
+A final `inbox.jsonl` or `control.jsonl` line that does not end in a newline is repaired before the next append. A partial tail is cut back to the last complete line. A complete JSON value that is only missing its newline is terminated. The next event or ack is then its own line and is still there after reload. A newline-terminated corrupt line is skipped and does not glue to the following one.
+
 Retry backoff after a recorded failure is 1s, 2s, 4s, 8s, 16s, then 30s. The head of the queue blocks later events until it is due, so a retry does not skip ahead.
 
-A disk error while routing is logged on `inbox.jsonl` as `mention route: <exception type>` and does not end the socket session.
+The per-agent `inbox.lock` is exclusive. The bridge and `inbox ack` can both want it. A busy lock is retried for about 2 seconds. That wait is what keeps a mention from disappearing under ordinary contention. If the lock is still busy after that, or another disk error escapes, the mention is not treated as filed: the room `inbox.jsonl` gets `mention route: not filed: <exception type>` and the socket stays up.
 
 ## Wake contract
 
@@ -113,7 +115,7 @@ A chat whose sender nick is a configured agent is a reply. It is not filed to an
 - a leading `!fanout` token
 - JSON `"fanout": true`
 
-That hop is dropped when the line's `"hop"` is already at `mentions.max_fanout_hop` (default 1). The sender is never a recipient of their own tag. A chat from the bridge's own socket nick is treated as this process's echo and is not routed.
+The hop that counts is the farther of the line's own `"hop"` and the deepest fan-out hop already delivered to that sender. A bare `!fanout` carries hop 0, and `"hop": 0` does not clear a hop the sender has already received. The reply is dropped when that carried hop is already at `mentions.max_fanout_hop` (default 1), so two agents cannot alternate `!fanout` and land each reply at hop 1. The remembered hop is the maximum `hop` on fan-out rows in that agent's inbox, including after a restart. The sender is never a recipient of their own tag. A chat from the bridge's own socket nick is treated as this process's echo and is not routed.
 
 ## Room and side chats
 
