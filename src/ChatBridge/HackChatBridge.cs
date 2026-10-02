@@ -365,8 +365,10 @@ internal sealed class HackChatBridge
             s.EndReason ??= Describe(recvTask, "receive");
         if (outTask.IsCompleted && outTask.IsFaulted)
         {
-            var ended = outTask.Exception?.GetBaseException() as V2SessionEndException;
-            s.EndReason ??= ended is null ? Describe(outTask, "send") : ended.Message;
+            var reason = outTask.Exception!.GetBaseException();
+            s.EndReason ??= reason is V2SessionEndException
+                ? reason.Message
+                : Describe(outTask, "send");
         }
         if (idleTask.IsFaulted)
             s.EndReason ??= Describe(idleTask, "receive-idle");
@@ -672,10 +674,13 @@ internal sealed class HackChatBridge
 
             var step = _v2!.NextChat();
             FlushV2Notes();
-            // A live drop or requeue has no client id on the wire. End this socket
-            // before the next chat so a late accepted cannot complete that row.
-            if (step.EndSession is { } reset)
-                throw new V2SessionEndException(reset);
+            if (step.ResetSession)
+            {
+                // The deployed accepted frame has no client id. Leave this socket before
+                // sending the next chat, so a late accepted cannot complete that chat.
+                throw new V2SessionEndException("dropped send fenced this session; reconnect before the next chat");
+            }
+
             if (step.Hold)
             {
                 // §11: resending after a missed `accepted` creates a second message.

@@ -127,11 +127,17 @@ internal static class V2Negotiation
 }
 
 /// <summary>One step of the durable outbound pump.</summary>
-internal readonly record struct V2ChatStep(bool Hold, string? ClientMsgId, JsonObject? Frame, string? EndSession = null)
+internal readonly record struct V2ChatStep(bool Hold, string? ClientMsgId, JsonObject? Frame, bool ResetSession = false)
 {
     public static V2ChatStep Idle { get; } = new(false, null, null);
 
-    public bool Send => Frame is not null;
+    /// <summary>
+    /// A <c>drop</c> invalidated the in-flight send. The deployed <c>accepted</c> frame has no
+    /// client id, so this session must reconnect before another chat is sent.
+    /// </summary>
+    public static V2ChatStep Fenced { get; } = new(false, null, null, true);
+
+    public bool Send => Frame is not null && !ResetSession;
 }
 
 /// <summary>Frames the socket loop should write, plus whether the outbound pump should wake.</summary>
@@ -153,8 +159,9 @@ internal sealed class V2SessionEndException(string message) : Exception(message)
 /// row with no <c>accepted</c> is uncertain: the pump holds and does not resend it, because
 /// §11 says a retry after a missed <c>accepted</c> creates a second message. The local id is
 /// <c>client_msg_id</c>. It is not put on the deployed chat frame — the server has no
-/// idempotency key. A live <c>reconcile</c> therefore fences the open socket before
-/// another chat is sent, so a late <c>accepted</c> cannot complete the next row.
+/// idempotency key. A live <c>drop</c> fences this connection, including load and
+/// catch-up, so a late <c>accepted</c> cannot complete the next row. The next chat
+/// waits for a new socket. <c>requeue</c> does not fence.
 /// Inbound: a delivery is fsynced as <c>seen</c> with its payload, then handed to
 /// <see cref="Consumers"/>, then fsynced as <c>handed_off</c> and <c>ack_pending</c>
 /// before the ack frame is returned. A failed handoff stays <c>seen</c> and is not acked.
@@ -185,14 +192,9 @@ internal sealed class V2Client
     private bool _pullAgain;
     private int _pulls;
     private string? _ackInFlight;
-    // True only after BeginDeployed has caught up. A resolve applied while this is
-    // set may still have its accepted frame on the open socket.
-    private bool _socketLive;
-    // Set when a live resolve retires a sent row. Cleared on the next socket.
-    private bool _acceptFenced;
-
-    private const string AcceptFenceReason =
-        "v2 reconcile fenced the socket; reconnecting before the next send";
+    // True after a sent row is dropped, until the next connection. A late accepted on this
+    // socket must not complete a different chat: the frame has no client_msg_id.
+    private bool _acceptFence;
 
     private V2Client(string baseDir)
     {
@@ -229,13 +231,16 @@ internal sealed class V2Client
             _pullAgain = false;
             _pulls = 0;
             _ackInFlight = null;
-            // This hello is a new socket. Catch-up runs before the socket is live so a
-            // resolve written while the previous connection was already gone does not
-            // fence the new one. A fence from the previous socket ends here.
-            _socketLive = false;
-            _acceptFenced = false;
             CatchUpOutbound();
-            _socketLive = true;
+            // New socket. An accepted for a chat dropped on the previous connection cannot arrive here.
+            if (_acceptFence)
+            {
+                AppendOutbound(new[]
+                {
+                    new JsonObject { ["op"] = "accept_open" }
+                });
+            }
+
             if (_cursorSet)
                 return;
             // Snapshot after the last complete line. A tail with no newline is still
@@ -294,8 +299,12 @@ internal sealed class V2Client
         {
             CatchUpOutbound();
             ImportLocked();
-            if (_acceptFenced)
-                return new V2ChatStep(false, null, null, AcceptFenceReason);
+            if (_acceptFence)
+            {
+                _notes.Enqueue("dropped send fenced this session; reconnect before the next chat");
+                return V2ChatStep.Fenced;
+            }
+
             var head = FirstOpen();
             if (head is null)
                 return V2ChatStep.Idle;
@@ -315,8 +324,8 @@ internal sealed class V2Client
     /// (may duplicate on the server) or <c>drop</c> (do not send). Only a <c>sent</c> row can
     /// be resolved. This does not send by itself. The operator command is
     /// <c>reconcile --id &lt;client_msg_id&gt; requeue|drop</c>. A <c>sent</c> row is never resent
-    /// until that explicit decision. On a live socket the decision fences the connection:
-    /// the next chat waits until the process opens a new one.
+    /// until that explicit decision. A <c>drop</c> fences this connection until the next
+    /// socket. <c>requeue</c> does not.
     /// </summary>
     public bool ResolveUncertain(string clientMsgId, string decision)
     {
@@ -545,20 +554,26 @@ internal sealed class V2Client
 
     private V2InboundResult OnAccepted(JsonObject frame)
     {
-        // The deployed frame has no client id. Match only the row this socket still
-        // has in flight. A resolve already on disk has to win before FirstOpen, or a
-        // late accepted for the retired row sticks to whatever is sent next.
+        // A reconcile drop may be on disk already. See it before FirstOpen, or the late
+        // accepted completes whichever row the pump sent next.
         CatchUpOutbound();
-        if (_acceptFenced)
+        if (_acceptFence)
         {
-            _notes.Enqueue("accepted ignored; socket fenced after live reconcile");
-            return new V2InboundResult(Array.Empty<JsonObject>(), false, AcceptFenceReason);
+            _notes.Enqueue("accepted ignored; dropped send fenced this session");
+            return V2InboundResult.None;
         }
 
+        var named = Json.Str(frame, "client_msg_id");
         var head = FirstOpen();
         if (head is not { State: "sent" })
         {
             _notes.Enqueue("accepted with no in-flight send; not applied");
+            return V2InboundResult.None;
+        }
+
+        if (named is not null && !string.Equals(named, head.Id, StringComparison.Ordinal))
+        {
+            _notes.Enqueue("accepted names a different client_msg_id; not applied");
             return V2InboundResult.None;
         }
 
@@ -937,17 +952,33 @@ internal sealed class V2Client
                     sending.State = "sent";
                 break;
             case "accepted":
-                if (Json.Str(op, "client_msg_id") is { } done && _out.TryGetValue(done, out var accepted))
-                    accepted.State = "accepted";
+                // Shared by OnAccepted, Load, and AppendOutbound/CatchUp. A drop fences this
+                // connection, so a late accepted must not complete the dropped row or a later one.
+                if (_acceptFence)
+                    return;
+                if (Json.Str(op, "client_msg_id") is not { } done || !_out.TryGetValue(done, out var acceptedRow))
+                    return;
+                if (acceptedRow.State != "sent")
+                    return;
+                acceptedRow.State = "accepted";
                 break;
             case "resolve":
                 if (Json.Str(op, "client_msg_id") is not { } resolved || !_out.TryGetValue(resolved, out var item))
                     return;
                 if (item.State != "sent")
                     return;
-                item.State = Json.Str(op, "decision") == "requeue" ? "queued" : "dropped";
-                if (_socketLive)
-                    FenceAccept();
+                if (Json.Str(op, "decision") == "requeue")
+                {
+                    item.State = "queued";
+                    return;
+                }
+
+                item.State = "dropped";
+                // Tombstone. Later accepted frames on this connection do not complete another row.
+                _acceptFence = true;
+                break;
+            case "accept_open":
+                _acceptFence = false;
                 break;
         }
     }
@@ -1049,6 +1080,7 @@ internal sealed class V2Client
 
     private static void Load(string path, Action<JsonObject> apply)
     {
+        // Replay goes through ApplyOut. A drop earlier in the file fences later accepted lines.
         if (!File.Exists(path))
             return;
         var text = File.ReadAllText(path);
@@ -1154,22 +1186,23 @@ internal sealed class V2Client
         }
     }
 
-    /// <summary>
-    /// The open socket may still deliver <c>accepted</c> for the row just resolved.
-    /// That frame cannot name a client id, so another send on this socket would let
-    /// <see cref="OnAccepted"/> complete the wrong row.
-    /// </summary>
-    private void FenceAccept()
-    {
-        if (_acceptFenced)
-            return;
-        _acceptFenced = true;
-        _notes.Enqueue("live reconcile fenced this socket; reconnect before the next send");
-    }
-
     private void AppendOutbound(IReadOnlyList<JsonObject> ops)
     {
         CatchUpOutbound();
+        if (_acceptFence)
+        {
+            // Do not persist an accepted line chosen by FirstOpen after a live drop.
+            var kept = new List<JsonObject>(ops.Count);
+            foreach (var op in ops)
+            {
+                if (Json.Str(op, "op") == "accepted")
+                    continue;
+                kept.Add(op);
+            }
+
+            ops = kept;
+        }
+
         AppendOps(_outboundPath, ops);
         _outboundApplied = CompleteLineEnd(_outboundPath);
         foreach (var op in ops)
