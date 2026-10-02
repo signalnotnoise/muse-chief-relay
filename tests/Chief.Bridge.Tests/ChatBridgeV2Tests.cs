@@ -83,7 +83,7 @@ public class ChatBridgeV2Tests
     public void Binding_token_is_not_ownership_and_a_trip_does_not_gate_ack()
     {
         using var dir = new TempDir();
-        var client = V2Client.Open(dir.Path);
+        var client = Ready(dir.Path);
         var bound = Fixture("unresolved", "designed-bound");
         var ignored = client.OnFrame(bound);
         Assert.Empty(ignored.Send);
@@ -96,6 +96,8 @@ public class ChatBridgeV2Tests
 
         var delivery = Fixture("deployed", "delivery");
         delivery["trip"] = "Zz99Yy";
+        delivery["text"] = "hello from fixture";
+        delivery["nick"] = "alex";
         var acked = client.OnFrame(delivery);
         Assert.Equal("<delivery-id>", acked.Send.Single()["deliveryId"]!.GetValue<string>());
     }
@@ -124,11 +126,26 @@ public class ChatBridgeV2Tests
         Assert.NotNull(step.ClientMsgId);
         Assert.Contains(step.ClientMsgId, queued, StringComparison.Ordinal);
 
-        var delivery = client.OnFrame(Fixture("deployed", "delivery"));
+        AcceptQueue? queue = null;
+        queue = new AcceptQueue
+        {
+            OnEnqueue = () =>
+            {
+                var mid = File.ReadAllText(client.InboundPath);
+                Assert.Contains("\"op\":\"seen\"", mid, StringComparison.Ordinal);
+                Assert.Contains("hello from fixture", mid, StringComparison.Ordinal);
+                Assert.DoesNotContain("\"op\":\"handed_off\"", mid, StringComparison.Ordinal);
+                Assert.DoesNotContain("\"op\":\"ack_pending\"", mid, StringComparison.Ordinal);
+            }
+        };
+        client.Consumers = queue;
+        var delivery = client.OnFrame(Delivery(1));
+        Assert.Equal(1, queue.Calls);
         var inbound = File.ReadAllText(client.InboundPath);
         var seenAt = inbound.IndexOf("\"op\":\"seen\"", StringComparison.Ordinal);
+        var handAt = inbound.IndexOf("\"op\":\"handed_off\"", StringComparison.Ordinal);
         var pendingAt = inbound.IndexOf("\"op\":\"ack_pending\"", StringComparison.Ordinal);
-        Assert.True(seenAt >= 0 && pendingAt > seenAt);
+        Assert.True(seenAt >= 0 && handAt > seenAt && pendingAt > handAt);
         Assert.Equal("ack", delivery.Send.Single()["type"]!.GetValue<string>());
         Assert.Equal(1, Num(delivery.Send.Single()["leaseGeneration"]));
     }
@@ -137,12 +154,15 @@ public class ChatBridgeV2Tests
     public void Processed_generation_is_deduped_and_seen_or_fenced_can_be_released()
     {
         using var dir = new TempDir();
-        var client = V2Client.Open(dir.Path);
+        var queue = new AcceptQueue();
+        var client = Ready(dir.Path, queue);
 
         var first = client.OnFrame(Delivery(1));
         Assert.Single(first.Send);
+        Assert.Equal(1, queue.Calls);
         var again = client.OnFrame(Delivery(1));
         Assert.Empty(again.Send);
+        Assert.Equal(1, queue.Calls);
         Assert.DoesNotContain("\"op\":\"processed\"", File.ReadAllText(client.InboundPath), StringComparison.Ordinal);
 
         var done = client.OnFrame(Fixture("deployed", "ack_result_processed"));
@@ -151,18 +171,21 @@ public class ChatBridgeV2Tests
 
         var next = client.OnFrame(Delivery(2));
         Assert.Equal(2, Num(next.Send.Single()["leaseGeneration"]));
+        Assert.Equal(2, queue.Calls);
 
         using var fencedDir = new TempDir();
-        var fenced = V2Client.Open(fencedDir.Path);
+        var fencedQueue = new AcceptQueue();
+        var fenced = Ready(fencedDir.Path, fencedQueue);
         Assert.Single(fenced.OnFrame(Delivery(1)).Send);
         var fencedResult = fenced.OnFrame(Fixture("deployed", "lease_fenced"));
         Assert.Empty(fencedResult.Send);
         Assert.DoesNotContain("\"op\":\"processed\"", File.ReadAllText(fenced.InboundPath), StringComparison.Ordinal);
         var redelivered = fenced.OnFrame(Delivery(1));
         Assert.Equal(1, Num(redelivered.Send.Single()["leaseGeneration"]));
+        Assert.Equal(2, fencedQueue.Calls);
 
         using var idemDir = new TempDir();
-        var idem = V2Client.Open(idemDir.Path);
+        var idem = Ready(idemDir.Path);
         Assert.Single(idem.OnFrame(Delivery(4)).Send);
         idem.OnFrame(Fixture("deployed", "ack_result_idempotent"));
         Assert.Contains("\"how\":\"idempotent\"", File.ReadAllText(idem.InboundPath), StringComparison.Ordinal);
@@ -173,7 +196,7 @@ public class ChatBridgeV2Tests
     public void Second_delivery_waits_until_the_in_flight_ack_settles()
     {
         using var dir = new TempDir();
-        var client = V2Client.Open(dir.Path);
+        var client = Ready(dir.Path);
         Assert.Single(client.OnFrame(Delivery(1, "a")).Send);
         Assert.Empty(client.OnFrame(Delivery(1, "b")).Send);
         var settled = client.OnFrame(Fixture("deployed", "ack_result_processed"));
@@ -186,14 +209,15 @@ public class ChatBridgeV2Tests
         using var dir = new TempDir();
         var outbox = dir.File("outbox.jsonl");
         File.WriteAllText(outbox, "");
-        var client = V2Client.Open(dir.Path);
+        var client = Ready(dir.Path);
         client.BeginDeployed(outbox);
         File.AppendAllText(outbox, """{"text":"keep me"}""" + "\n");
         var sent = client.NextChat();
         Assert.True(sent.Send);
         Assert.Single(client.OnFrame(Delivery(3, "keep")).Send);
 
-        var reopened = V2Client.Open(dir.Path);
+        var replayQueue = new AcceptQueue();
+        var reopened = Ready(dir.Path, replayQueue);
         reopened.BeginDeployed(outbox);
         var hold = reopened.NextChat();
         Assert.True(hold.Hold);
@@ -205,6 +229,7 @@ public class ChatBridgeV2Tests
         Assert.Equal("ack", replay["type"]!.GetValue<string>());
         Assert.Equal("keep", replay["deliveryId"]!.GetValue<string>());
         Assert.Equal(3, Num(replay["leaseGeneration"]));
+        Assert.Equal(0, replayQueue.Calls);
 
         reopened.OnFrame(Fixture("deployed", "ack_result_processed"));
         var third = V2Client.Open(dir.Path);
@@ -322,6 +347,8 @@ public class ChatBridgeV2Tests
             Assert.Equal("join", join["type"]!.GetValue<string>());
             Assert.False(join.ContainsKey("pass"));
             Assert.False(File.Exists(Path.Combine(fx.Dir.Path, V2Client.OutboundName)));
+            Assert.False(File.Exists(Path.Combine(fx.Dir.Path, V2Client.InboundName)));
+            Assert.False(Directory.Exists(Path.Combine(fx.Dir.Path, "agents")));
             return true;
         });
     }
@@ -364,7 +391,7 @@ public class ChatBridgeV2Tests
 
             if (phase == 2 && fx.Script.Sent.Any(IsType("pull")))
             {
-                fx.Script.Latest.Push("""{"type":"delivery","deliveryId":"d1","leaseGeneration":1,"trip":"Zz99Yy"}""");
+                fx.Script.Latest.Push("""{"type":"delivery","deliveryId":"d1","leaseGeneration":1,"nick":"alex","text":"hello from fixture","trip":"Zz99Yy"}""");
                 phase = 3;
                 return false;
             }
@@ -372,8 +399,16 @@ public class ChatBridgeV2Tests
             if (phase == 3 && fx.Script.Sent.Any(IsType("ack")))
             {
                 var inbound = File.ReadAllText(Path.Combine(fx.Dir.Path, V2Client.InboundName));
-                Assert.True(inbound.IndexOf("\"op\":\"seen\"", StringComparison.Ordinal) <
-                            inbound.IndexOf("\"op\":\"ack_pending\"", StringComparison.Ordinal));
+                var seenAt = inbound.IndexOf("\"op\":\"seen\"", StringComparison.Ordinal);
+                var handAt = inbound.IndexOf("\"op\":\"handed_off\"", StringComparison.Ordinal);
+                var pendingAt = inbound.IndexOf("\"op\":\"ack_pending\"", StringComparison.Ordinal);
+                Assert.True(seenAt >= 0 && handAt > seenAt && pendingAt > handAt);
+                Assert.Contains("hello from fixture", inbound, StringComparison.Ordinal);
+                var room = File.ReadAllText(Path.Combine(fx.Dir.Path, "inbox.jsonl"));
+                Assert.Contains("\"v2_handoff\":\"d1\"", room, StringComparison.Ordinal);
+                var agentInbox = File.ReadAllText(Path.Combine(fx.Dir.Path, "agents", "n", "inbox.jsonl"));
+                Assert.Contains("hello from fixture", agentInbox, StringComparison.Ordinal);
+                Assert.Contains("\"source_id\":\"v2:d1\"", agentInbox, StringComparison.Ordinal);
                 var ack = fx.Script.Sent.Select(Parse).Last(o => Json.Str(o, "type") == "ack");
                 Assert.Equal("d1", ack["deliveryId"]!.GetValue<string>());
                 Assert.Equal(1, Num(ack["leaseGeneration"]));
@@ -497,12 +532,242 @@ public class ChatBridgeV2Tests
         });
     }
 
-    private static JsonObject Delivery(int generation, string id = "<delivery-id>")
+    [Fact]
+    public void Enqueue_failure_does_not_ack_and_a_later_delivery_can()
+    {
+        using var dir = new TempDir();
+        var failing = new AcceptQueue { Fail = true };
+        var client = Ready(dir.Path, failing);
+        var denied = client.OnFrame(Delivery(1, "d1"));
+        Assert.Empty(denied.Send);
+        Assert.Contains("not acked", string.Join('\n', client.TakeNotes()), StringComparison.Ordinal);
+        var inbound = File.ReadAllText(client.InboundPath);
+        Assert.Contains("\"op\":\"seen\"", inbound, StringComparison.Ordinal);
+        Assert.Contains("hello from fixture", inbound, StringComparison.Ordinal);
+        Assert.DoesNotContain("\"op\":\"handed_off\"", inbound, StringComparison.Ordinal);
+        Assert.DoesNotContain("\"op\":\"ack_pending\"", inbound, StringComparison.Ordinal);
+
+        var retry = new AcceptQueue();
+        var reopened = Ready(dir.Path, retry);
+        var welcome = reopened.OnFrame(JsonNode.Parse(Welcome)!.AsObject());
+        Assert.DoesNotContain(welcome.Send, frame => Json.Str(frame, "type") == "ack");
+        Assert.Equal(0, retry.Calls);
+
+        var acked = reopened.OnFrame(Delivery(1, "d1"));
+        Assert.Equal("ack", acked.Send.Single()["type"]!.GetValue<string>());
+        Assert.Equal(1, retry.Calls);
+        Assert.Contains("\"op\":\"ack_pending\"", File.ReadAllText(reopened.InboundPath), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Delivery_without_text_is_not_acked()
+    {
+        using var dir = new TempDir();
+        var queue = new AcceptQueue();
+        var client = Ready(dir.Path, queue);
+        var bare = Fixture("deployed", "delivery");
+        Assert.Empty(client.OnFrame(bare).Send);
+        Assert.Equal(0, queue.Calls);
+        Assert.DoesNotContain("\"op\":\"ack_pending\"", File.ReadAllText(client.InboundPath), StringComparison.Ordinal);
+        Assert.Contains("no text payload", string.Join('\n', client.TakeNotes()), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Nested_message_text_is_the_payload_that_is_queued()
+    {
+        using var dir = new TempDir();
+        var queue = new AcceptQueue();
+        var client = Ready(dir.Path, queue);
+        var frame = Fixture("deployed", "delivery");
+        frame["message"] = new JsonObject { ["text"] = "nested body", ["nick"] = "alex" };
+        var acked = client.OnFrame(frame);
+        Assert.Equal("ack", acked.Send.Single()["type"]!.GetValue<string>());
+        Assert.Equal("nested body", queue.LastText);
+        Assert.Contains("nested body", File.ReadAllText(client.InboundPath), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Ack_result_correlates_delivery_id_and_ignores_a_stale_one()
+    {
+        using var dir = new TempDir();
+        var client = Ready(dir.Path);
+        Assert.Single(client.OnFrame(Delivery(1, "a")).Send);
+        Assert.Empty(client.OnFrame(Delivery(1, "b")).Send);
+
+        var other = client.OnFrame(Ack("other", 1));
+        Assert.Empty(other.Send);
+        Assert.DoesNotContain("\"op\":\"processed\"", File.ReadAllText(client.InboundPath), StringComparison.Ordinal);
+        Assert.Contains("does not match", string.Join('\n', client.TakeNotes()), StringComparison.Ordinal);
+
+        var wrongGen = client.OnFrame(Ack("a", 9));
+        Assert.Empty(wrongGen.Send);
+        Assert.DoesNotContain("\"op\":\"processed\"", File.ReadAllText(client.InboundPath), StringComparison.Ordinal);
+
+        var matched = client.OnFrame(Ack("a", 1));
+        Assert.Equal("b", matched.Send.Single()["deliveryId"]!.GetValue<string>());
+        Assert.Contains("\"how\":\"processed\"", File.ReadAllText(client.InboundPath), StringComparison.Ordinal);
+        Assert.Empty(client.OnFrame(Delivery(1, "a")).Send);
+    }
+
+    [Fact]
+    public void Operator_resolve_line_is_applied_on_the_next_pump_step()
+    {
+        using var dir = new TempDir();
+        var outbox = dir.File("outbox.jsonl");
+        File.WriteAllText(outbox, "");
+        var client = V2Client.Open(dir.Path);
+        client.BeginDeployed(outbox);
+        client.EnqueueLocal("held");
+        var sent = client.NextChat();
+        Assert.True(sent.Send);
+        var line = new JsonObject
+        {
+            ["op"] = "resolve",
+            ["client_msg_id"] = sent.ClientMsgId,
+            ["decision"] = "drop"
+        };
+        File.AppendAllText(client.OutboundPath, line.ToJsonString(JsonUtil.Opts) + "\n");
+        var after = client.NextChat();
+        Assert.False(after.Hold);
+        Assert.False(after.Send);
+        Assert.Empty(client.UncertainIds());
+    }
+
+    [Fact]
+    public async Task Reconcile_command_drops_a_held_send_and_refuses_a_second_time()
+    {
+        using var dir = new TempDir();
+        var cfg = dir.File("config.json");
+        File.WriteAllText(cfg, """{"channel":"c","nick":"n","url":"ws://127.0.0.1:9/relay","base":"."}""");
+        var outbox = dir.File("outbox.jsonl");
+        File.WriteAllText(outbox, "");
+        var client = V2Client.Open(dir.Path);
+        client.BeginDeployed(outbox);
+        client.EnqueueLocal("held");
+        var sent = client.NextChat();
+        Assert.NotNull(sent.ClientMsgId);
+
+        var prev = Console.Out;
+        var stdout = new StringWriter();
+        Console.SetOut(stdout);
+        try
+        {
+            Assert.Equal(0, await Program.Main(["reconcile", "--config", cfg, "--id", sent.ClientMsgId, "drop"]));
+            Assert.Equal(1, await Program.Main(["reconcile", "--config", cfg, "--id", sent.ClientMsgId, "requeue"]));
+        }
+        finally
+        {
+            Console.SetOut(prev);
+        }
+
+        Assert.Contains("reconciled", stdout.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("held", stdout.ToString(), StringComparison.Ordinal);
+        var reopened = V2Client.Open(dir.Path);
+        reopened.BeginDeployed(outbox);
+        Assert.False(reopened.NextChat().Send);
+        Assert.False(reopened.NextChat().Hold);
+    }
+
+    [Fact]
+    public async Task Opt_in_does_not_ack_when_the_consumer_queue_cannot_be_written()
+    {
+        await using var fx = new RelayFixture
+        {
+            Url = "ws://127.0.0.1:8787/relay",
+            ProtocolV2 = true
+        };
+        File.WriteAllText(Path.Combine(fx.Dir.Path, "agents"), "not-a-directory");
+        fx.Script.Enqueue(Attempt.HoldBeforeJoin());
+        var phase = 0;
+        await fx.RunUntil(() =>
+        {
+            if (fx.Script.Latest is null)
+                return false;
+            if (phase == 0 && fx.Script.Sent.Count == 0)
+            {
+                fx.Script.Latest.Push(DeployedHello);
+                phase = 1;
+                return false;
+            }
+
+            if (phase == 1 && fx.Script.Sent.Count >= 1)
+            {
+                fx.Script.Latest.Push(Welcome);
+                phase = 2;
+                return false;
+            }
+
+            if (phase == 2 && fx.Script.Sent.Any(IsType("pull")))
+            {
+                fx.Script.Latest.Push("""{"type":"delivery","deliveryId":"d1","leaseGeneration":1,"nick":"alex","text":"hello from fixture"}""");
+                phase = 3;
+                return false;
+            }
+
+            if (phase != 3)
+                return false;
+            var inboundPath = Path.Combine(fx.Dir.Path, V2Client.InboundName);
+            if (!File.Exists(inboundPath))
+                return false;
+            var inbound = File.ReadAllText(inboundPath);
+            if (!inbound.Contains("\"op\":\"seen\"", StringComparison.Ordinal))
+                return false;
+            Assert.DoesNotContain("\"op\":\"ack_pending\"", inbound, StringComparison.Ordinal);
+            Assert.DoesNotContain("\"op\":\"handed_off\"", inbound, StringComparison.Ordinal);
+            Assert.DoesNotContain(fx.Script.Sent, line => IsType("ack")(line));
+            var room = File.ReadAllText(Path.Combine(fx.Dir.Path, "inbox.jsonl"));
+            Assert.Contains("not acked", room, StringComparison.Ordinal);
+            Assert.DoesNotContain("v2_handoff", room, StringComparison.Ordinal);
+            return true;
+        });
+    }
+
+    private static JsonObject Delivery(int generation, string id = "<delivery-id>", string text = "hello from fixture")
     {
         var frame = Fixture("deployed", "delivery");
         frame["deliveryId"] = id;
         frame["leaseGeneration"] = generation;
+        frame["text"] = text;
+        frame["nick"] = "alex";
         return frame;
+    }
+
+    private static JsonObject Ack(string deliveryId, int generation) => new()
+    {
+        ["type"] = "ack_result",
+        ["state"] = "processed",
+        ["deliveryId"] = deliveryId,
+        ["leaseGeneration"] = generation
+    };
+
+    private static V2Client Ready(string dir, IV2ConsumerQueue? queue = null)
+    {
+        var client = V2Client.Open(dir);
+        client.Consumers = queue ?? new AcceptQueue();
+        return client;
+    }
+
+    private sealed class AcceptQueue : IV2ConsumerQueue
+    {
+        public int Calls { get; private set; }
+        public bool Fail { get; set; }
+        public string? LastText { get; private set; }
+        public Action? OnEnqueue { get; set; }
+
+        public bool TryEnqueue(V2QueuedDelivery delivery, out string? error)
+        {
+            OnEnqueue?.Invoke();
+            Calls++;
+            LastText = delivery.Text;
+            if (Fail)
+            {
+                error = "IOException";
+                return false;
+            }
+
+            error = null;
+            return true;
+        }
     }
 
     private static JsonObject Fixture(string group, string id)

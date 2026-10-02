@@ -14,11 +14,14 @@ Opt-in (`"protocol_v2": true` on a voizle URL):
 - Inbox owner secret comes from the env var named by `inbox_owner_env` and is sent as `pass`. It is redacted in logs. The public trip is not ownership. A `binding` token is redacted and ignored.
 - Outbound lines are copied into `{base}/durable-v2-outbound.jsonl` and fsynced as `queued` before send, then as `sent` before the socket write. The pump reads that queue, not the outbox tail. The first opt-in snapshots the offset after the last complete outbox line, so older lines are not burst and a half-written tail is imported once its newline arrives. Later launches keep that offset.
 - `client_msg_id` is the local row id. It is **not** sent on the chat frame.
-- A `sent` row completes only on `accepted` (`messageId` / `ingressId` stored when present). Until then the pump **holds**. It does not resend. `V2Client.ResolveUncertain(id, "requeue"|"drop")` is the test hook. `requeue` can duplicate on the server.
-- Inbound `delivery` is fsynced `seen`, then `ack_pending`, before the ack frame is returned. Ack is `{"v":2,"type":"ack","deliveryId","leaseGeneration"}`.
-- Completion is `ack_result` with `state: "processed"` or `idempotent: true` for that generation. `lease_fenced` and `lease_expired` leave the row unacked. A seen or fenced row may be re-leased. The same generation, once processed, is deduped. A higher generation is a new lease.
+- A `sent` row completes only on `accepted` (`messageId` / `ingressId` stored when present). Until then the pump **holds**. It does not resend. The operator command is `chat-bridge reconcile --id <client_msg_id> drop|requeue`. `drop` does not send. `requeue` may duplicate on the server and is never implied. The command does not connect and does not turn `protocol_v2` on. A running bridge applies the new ledger line on its next outbound step. `status` prints uncertain ids and not the held text.
+- Inbound `delivery` is fsynced `seen` with a payload (`text`, and `nick` / `trip` / `ts` / `id` when present). Flat fields are used. The same fields are read from a nested `message`, `msg`, `chat`, or `payload` object when that object carries `text`. Owner fields are not copied. A delivery with no `text` stays `seen` and is not acked.
+- Before the ack frame, the payload is fsynced into the wake queues and the ledger records `handed_off`. The queues are `{base}/agents/<id>/inbox.jsonl` (what `inbox due` reads) and one chat line on the room `inbox.jsonl` with `v2_handoff` set to the delivery id (what `mention_hook`, `watch`, and `hook` already read). `mention_hook` queues that line even when the text has no `@` mention. A raw `delivery` frame in the log is not a wake.
+- The agent id is the configured agent that owns the bridge nick, otherwise the only configured agent, otherwise the nick when the roster is empty and the nick is a safe id. v1 (`protocol_v2` off) still does not create `{base}/agents/`.
+- The ack frame is returned only after `handed_off`. Ack is `{"v":2,"type":"ack","deliveryId","leaseGeneration"}`. If the enqueue throws or returns false, the row stays `seen` (no `handed_off`, no `ack_pending`, no wire ack). A later delivery of that generation can enqueue and then ack. `handed_off` or `ack_pending` on reopen replays the ack and does not enqueue again.
+- Completion is `ack_result` with `state: "processed"` or `idempotent: true` for that delivery and generation. When the frame includes `deliveryId`, only that row is settled, and `leaseGeneration` must match when it is present. A result that names a different id or generation does not complete the in-flight ack. A result with no id still settles the single in-flight ack (the §11 fixtures omit the id). `lease_fenced` and `lease_expired` use the same correlation and leave the row unacked. A seen or fenced row may be re-leased. The same generation, once processed, is deduped. A higher generation is a new lease.
 - After `welcome` with `inboxAuth: true`, the client sends `{"v":2,"type":"pull"}` and repeats while `pull_result.queued > 0` (cap 100 per connection).
-- Restart reloads both jsonl files. `queued` can still send. `sent` holds. `ack_pending` is re-acked once (same-generation re-ack is idempotent or fenced). `seen` from an earlier process waits for a new delivery.
+- Restart reloads both jsonl files. `queued` can still send. `sent` holds until `reconcile` or `accepted`. `ack_pending` and `handed_off` replay one ack and do not enqueue again. `seen` from an earlier process waits for a new delivery.
 
 v1 (`protocol_v2` false or absent) does not create those files and still joins with `"v": 1`, including when the hello carries `durable`.
 
@@ -28,7 +31,9 @@ v1 (`protocol_v2` false or absent) does not create those files and still joins w
 |---|---|
 | Pin v2 from `versions: [2,1]` | Recognized. Not spoken unless the hello also has deployed `durableVersion: 2`. A designed-only hello stays v1. |
 | Opaque `binding` token owns the inbox | Not sent or stored. Owner secret at join (`pass`). Trips stay evidence. `inbox_held` backs off the session. |
-| Wire `client_msg_id` dedups sends | Local id only. Uncertain sends stop. They are not retried automatically. |
+| Wire `client_msg_id` dedups sends | Local id only. Uncertain sends stop until `reconcile`. `requeue` is explicit and may duplicate. |
+| Delivery body other than `deliveryId` and `leaseGeneration` (§11 does not pin it) | `text` is required before ack. `nick` / `from`, `trip`, `ts` / `time`, and `id` / `messageId` are stored when present, including on a nested `message`, `msg`, `chat`, or `payload` object. |
+| `ack_result` has no `deliveryId` in the minimal fixture | Later wire examples include `deliveryId` (and may include `leaseGeneration`). When those fields are present they must match the row. When `deliveryId` is absent, only the single in-flight ack is settled. A mismatch is ignored. |
 | `resume` / `seq` / `leased` / `acked` | Captured as unresolved fixtures. Ignored if they arrive. Not sent. |
 
 Unresolved and deployed frames: `tests/Chief.Bridge.Tests/Fixtures/v2/frames.json`.
@@ -36,12 +41,10 @@ Unresolved and deployed frames: `tests/Chief.Bridge.Tests/Fixtures/v2/frames.jso
 ## Still blocked
 
 - Contract §10 (lease horizon, batch cap, retention, presence `seq`, multi-agent cap, binding-token lifecycle). Deployed defaults cited in §11 stay server-side (`RELAY_DURABLE_LEASE_MS` 15000, `RELAY_DURABLE_MAX_ATTEMPTS` 5, `RELAY_DURABLE_PULL_LIMIT` 20). This client does not invent a pull limit field.
-- Delivery body fields other than `deliveryId` and `leaseGeneration`.
 - Welcome inbox count field names.
-- `ack_result` does not carry `deliveryId` in the evidence, so one ack is in flight and the next result settles it.
 - `dead` without `deliveryId` is logged and not acked.
 - No live v2 server in these tests. Scripted frames only.
-- Wire deliveries are logged on the room `inbox.jsonl` and acked from the v2 ledger. They are not filed into `agents/<id>/inbox.jsonl`. Mention routing stays on v1 `chat` frames.
+- One ack is still in flight at a time. A pipelined `ack_result` is applied only when it names `deliveryId` (and `leaseGeneration`, when present). An unnamed result is not guessed when more than one ack is pending.
 - Live cutover order is unchanged: Appwrite dual-write (flag off) → Fuse review → chief → dot → Fuse. Production configs keep `protocol_v2` off until that review.
 
 ## Tests
@@ -60,9 +63,11 @@ The v1 suite is still `dotnet test tests/Chief.Bridge.Tests`.
 4. Both advertisements: join `v` is 2 and the chat/ack/pull frames match the deployed fixtures.
 5. Outbox import fsyncs `queued` before `sent`. `sent` is on disk before the chat frame is returned.
 6. Reopen after `sent` and no `accepted`: the pump holds and does not emit another chat. The line appended behind it is still queued (not skipped by a fresh EOF).
-7. `accepted` clears the hold. `ResolveUncertain(..., "drop")` also clears it without a send.
-8. Delivery fsyncs `seen` then `ack_pending` before the ack frame is returned.
-9. Same generation after `processed` or `idempotent` is deduped. The same generation merely seen or `lease_fenced` is not. A higher generation is acked again.
-10. Reopen keeps `ack_pending` and replays one ack. Processed rows stay processed.
-11. Owner secret is `pass` on the join and `<redacted>` in the inbox log. A trip on the delivery does not grant or deny the ack.
-12. A `bound` frame's `binding` value is redacted and does not become local ownership.
+7. `accepted` clears the hold. `reconcile --id <id> drop` also clears it without a send. `requeue` sends that row again and may duplicate. Neither happens on its own.
+8. A delivery with `text` fsyncs `seen` (payload included), then the agent inbox and the `v2_handoff` room line, then `handed_off`, then `ack_pending`, before the ack frame is returned.
+9. If that enqueue fails, or the delivery has no `text`, there is no `ack_pending` and no ack frame. Reopen does not ack a `seen` row. A later delivery can enqueue and then ack.
+10. Same generation after `processed` or `idempotent` is deduped. The same generation merely seen or `lease_fenced` is not. A higher generation is acked again.
+11. Reopen keeps `ack_pending` and replays one ack without enqueueing again. Processed rows stay processed.
+12. An `ack_result` that names a different `deliveryId` or `leaseGeneration` does not complete the in-flight row. A matching id does. A fixture result with no id still completes the single in-flight ack.
+13. Owner secret is `pass` on the join and `<redacted>` in the inbox log. A trip on the delivery does not grant or deny the ack.
+14. A `bound` frame's `binding` value is redacted and does not become local ownership.

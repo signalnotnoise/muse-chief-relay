@@ -50,6 +50,8 @@ internal sealed class HackChatBridge
         // deployment keeps the jsonl bridge and does not grow an agents/ tree.
         _mentions = cfg.MentionRouting.Enabled ? MentionRouter.Open(cfg) : null;
         _v2 = cfg.ProtocolV2 && _voizle ? V2Client.Open(cfg.BaseDir) : null;
+        if (_v2 is not null)
+            _v2.Consumers = new V2WakeQueue(cfg, _fileLock);
     }
 
     private sealed class Session
@@ -655,7 +657,7 @@ internal sealed class HackChatBridge
             if (step.Hold)
             {
                 // §11: resending after a missed `accepted` creates a second message.
-                // Stop the outbound pump until ResolveUncertain (tests) or a later accepted.
+                // Stop the outbound pump until an explicit reconcile (requeue or drop) or a later accepted.
                 if (!announcedHold)
                 {
                     announcedHold = true;

@@ -31,6 +31,7 @@ internal static class Program
                 "watch" => await CmdWatchAsync(cli),
                 "hook" => await CmdHookAsync(cli),
                 "inbox" => CmdInbox(cli),
+                "reconcile" => CmdReconcile(cli),
                 "help" => CmdHelp(),
                 _ => await RunAsync(cli)
             };
@@ -187,12 +188,18 @@ internal static class Program
               inbox pending --agent <id>       Print every unacked room event, including those in backoff.
               inbox ack --agent <id> <event>   Acknowledge one event. Idempotent. Exit 1 if the id is unknown.
               inbox fail --agent <id> <event>  Record a soft adapter failure and its backoff. Exit 1 if unknown.
+              reconcile --id <client_msg_id> requeue|drop
+                                                Operator path for one uncertain v2 send. Does not connect
+                                                and does not turn protocol_v2 on. drop does not send.
+                                                requeue may duplicate on the server. A sent row is never
+                                                resent until this command (or a later accepted). Exit 1
+                                                when that id is not an uncertain send.
               help                              This text
 
             The inbox commands are the adapter contract (docs/chatbridge.md). They do not call a model.
             Config for the bridge run: --config or the first argument, then MUSE_RELAY_CONFIG, then
             CHATBRIDGE_CONFIG, then ./config.json, then ./config.example.json (with a warning).
-            Config for say/status/watch/hook/inbox: --config, then MUSE_RELAY_CONFIG, then
+            Config for say/status/watch/hook/inbox/reconcile: --config, then MUSE_RELAY_CONFIG, then
             CHATBRIDGE_CONFIG, then ./config.json. No other fallback.
             An explicit path that doesn't exist is an error; it never falls through to another file.
             Use -- to end options, e.g. say -- --config is literal text.
@@ -329,6 +336,66 @@ internal static class Program
         Console.WriteLine(cfg.MentionRouting.Enabled
             ? $"mentions: on ({cfg.Roster.Agents.Count} agent(s), max fan-out hop {cfg.MentionRouting.MaxFanoutHop})"
             : "mentions: off");
+        PrintV2(cfg);
+        return 0;
+    }
+
+    /// <summary>
+    /// Report uncertain v2 sends. Does not connect and does not create the ledger.
+    /// Ids only: the held text is not printed.
+    /// </summary>
+    private static void PrintV2(RelayConfig cfg)
+    {
+        var outbound = Path.Combine(cfg.BaseDir, V2Client.OutboundName);
+        if (!File.Exists(outbound))
+        {
+            Console.WriteLine(cfg.ProtocolV2 ? "v2: on, no uncertain send" : "v2: off");
+            return;
+        }
+
+        var ids = V2Client.Open(cfg.BaseDir).UncertainIds();
+        if (ids.Count == 0)
+        {
+            Console.WriteLine(cfg.ProtocolV2 ? "v2: on, no uncertain send" : "v2: ledger present, no uncertain send");
+            return;
+        }
+
+        Console.WriteLine(
+            $"v2: {ids.Count} uncertain send(s); not resent automatically. reconcile --id <client_msg_id> drop|requeue (requeue may duplicate)");
+        foreach (var id in ids)
+            Console.WriteLine("v2 uncertain: " + id);
+    }
+
+    private static int CmdReconcile(CliArgs cli)
+    {
+        string? id = null;
+        string? decision = null;
+        for (var i = 0; i < cli.Rest.Count; i++)
+        {
+            var a = cli.Rest[i];
+            if (a == "--id" && i + 1 < cli.Rest.Count && !string.IsNullOrWhiteSpace(cli.Rest[i + 1]))
+                id = cli.Rest[++i];
+            else if (a.StartsWith("--id=", StringComparison.Ordinal) && a.Length > "--id=".Length)
+                id = a["--id=".Length..];
+            else if (decision is null && a is "requeue" or "drop")
+                decision = a;
+            else
+                throw new ArgumentException($"reconcile: unknown argument '{a}'");
+        }
+
+        if (string.IsNullOrWhiteSpace(id) || decision is null)
+            throw new ArgumentException("usage: ChatBridge reconcile --id <client_msg_id> requeue|drop");
+
+        var cfg = RelayConfig.Load(cli.ConfigPath, allowExampleFallback: false);
+        if (!V2Client.Open(cfg.BaseDir).ResolveUncertain(id, decision))
+        {
+            Console.Error.WriteLine($"not reconciled: {id} is not an uncertain send");
+            return 1;
+        }
+
+        Console.WriteLine(decision == "requeue"
+            ? $"reconciled {id} requeue (may duplicate on the server)"
+            : $"reconciled {id} drop");
         return 0;
     }
 

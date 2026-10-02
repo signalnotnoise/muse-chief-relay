@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """One-shot @dot inbox hook. Produces local events; never contacts a model or network.
 
-Reads the room inbox.jsonl that ChatBridge appends. The per-agent queue under
-agents/dot/ is a separate file and exists only when mentions.enabled is true.
+Reads the room inbox.jsonl that ChatBridge appends. A v2 handoff is a chat line
+with v2_handoff set; a raw delivery frame is not a wake. The per-agent queue under
+agents/dot/ is a separate file. Mentions stay off unless mentions.enabled is true.
+An opt-in v2 handoff can also file that agent inbox; protocol_v2 defaults off.
 A sender trip on either path is untrusted evidence. approved_recipients is the
 send gate. This module does not treat a trip as authorization.
 """
@@ -129,7 +131,13 @@ def poll(inbox, database, participants=(), mention_only=False):
                     text = msg.get('text')
                     if not isinstance(text, str):
                         continue
-                    reason = ('addressed_to_dot' if MENTION.search(text) else None) if mention_only else classify(text, participants)
+                    # v2_handoff is a chat line the bridge fsynced before the wire ack.
+                    # A raw delivery frame has no marker and stays ignored.
+                    handoff = row.get('v2_handoff')
+                    if isinstance(handoff, str) and handoff:
+                        reason = 'v2_handoff'
+                    else:
+                        reason = ('addressed_to_dot' if MENTION.search(text) else None) if mention_only else classify(text, participants)
                     if reason is None:
                         continue
                     payload = {'event_id': key, 'source': 'dot-relay-mention', 'untrusted': True, 'reason': reason,

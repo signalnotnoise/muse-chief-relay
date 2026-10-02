@@ -47,7 +47,7 @@ internal sealed record CliArgs(string Command, string? ConfigPath, IReadOnlyList
             rest.Add(a);
         }
 
-        if (rest.Count > 0 && rest[0] is "say" or "status" or "watch" or "hook" or "inbox")
+        if (rest.Count > 0 && rest[0] is "say" or "status" or "watch" or "hook" or "inbox" or "reconcile")
             return new CliArgs(rest[0], config, rest.Skip(1).ToList());
         if (rest.Count > 0 && rest[0] is "help" or "-h" or "--help")
             return new CliArgs("help", config, rest.Skip(1).ToList());

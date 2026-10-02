@@ -154,9 +154,11 @@ internal sealed class V2SessionEndException(string message) : Exception(message)
 /// §11 says a retry after a missed <c>accepted</c> creates a second message. The local id is
 /// <c>client_msg_id</c>. It is not put on the deployed chat frame — the server has no
 /// idempotency key.
-/// Inbound: a delivery is fsynced as <c>seen</c> and then <c>ack_pending</c> before the ack
-/// frame is returned. Completion is <c>ack_result</c> <c>processed</c> or <c>idempotent</c>
-/// for that lease generation. A seen or fenced row is not complete and may be re-leased.
+/// Inbound: a delivery is fsynced as <c>seen</c> with its payload, then handed to
+/// <see cref="Consumers"/>, then fsynced as <c>handed_off</c> and <c>ack_pending</c>
+/// before the ack frame is returned. A failed handoff stays <c>seen</c> and is not acked.
+/// Completion is <c>ack_result</c> <c>processed</c> or <c>idempotent</c> for that
+/// delivery and lease generation. A seen or fenced row is not complete and may be re-leased.
 /// </remarks>
 internal sealed class V2Client
 {
@@ -172,12 +174,11 @@ internal sealed class V2Client
     private readonly List<string> _inOrder = new();
     private readonly Dictionary<string, InItem> _in = new();
     private readonly Queue<string> _notes = new();
-    private readonly Dictionary<string, int> _seenEpoch = new();
 
     private string? _outboxPath;
+    private long _outboundApplied;
     private long _cursor;
     private bool _cursorSet;
-    private int _epoch;
     private bool _inboxAuth;
     private bool _initialPullSent;
     private bool _pullAgain;
@@ -190,9 +191,16 @@ internal sealed class V2Client
         _inboundPath = Path.Combine(baseDir, InboundName);
         Load(_outboundPath, ApplyOut);
         Load(_inboundPath, ApplyIn);
+        _outboundApplied = CompleteLineEnd(_outboundPath);
     }
 
     public static V2Client Open(string baseDir) => new(baseDir);
+
+    /// <summary>
+    /// Durable wake queue. Null fails closed: a delivery is stored as <c>seen</c> and not acked.
+    /// The bridge sets this to the room-inbox and <c>agents/&lt;id&gt;/inbox.jsonl</c> handoff.
+    /// </summary>
+    public IV2ConsumerQueue? Consumers { get; set; }
 
     public string OutboundPath => _outboundPath;
     public string InboundPath => _inboundPath;
@@ -207,21 +215,18 @@ internal sealed class V2Client
         lock (_gate)
         {
             _outboxPath = outboxPath;
-            _epoch++;
             _inboxAuth = false;
             _initialPullSent = false;
             _pullAgain = false;
             _pulls = 0;
             _ackInFlight = null;
-            _seenEpoch.Clear();
+            CatchUpOutbound();
             if (_cursorSet)
                 return;
             // Snapshot after the last complete line. A tail with no newline is still
             // being written; starting at raw EOF would skip its head and never send it.
             var length = CompleteLineEnd(outboxPath);
-            AppendOps(_outboundPath, new JsonObject[] { CursorOp(length) });
-            _cursor = length;
-            _cursorSet = true;
+            AppendOutbound(new[] { CursorOp(length) });
         }
     }
 
@@ -241,7 +246,10 @@ internal sealed class V2Client
     public void ImportNewOutboxLines()
     {
         lock (_gate)
+        {
+            CatchUpOutbound();
             ImportLocked();
+        }
     }
 
     /// <summary>Local chat (auto-ack) joins the same durable queue. It does not skip the head.</summary>
@@ -256,8 +264,7 @@ internal sealed class V2Client
                 ["client_msg_id"] = id,
                 ["text"] = text
             };
-            AppendOps(_outboundPath, new[] { op });
-            ApplyOut(op);
+            AppendOutbound(new[] { op });
             return id;
         }
     }
@@ -270,6 +277,7 @@ internal sealed class V2Client
     {
         lock (_gate)
         {
+            CatchUpOutbound();
             ImportLocked();
             var head = FirstOpen();
             if (head is null)
@@ -280,15 +288,17 @@ internal sealed class V2Client
                 return V2ChatStep.Idle;
 
             var sent = new JsonObject { ["op"] = "sent", ["client_msg_id"] = head.Id };
-            AppendOps(_outboundPath, new[] { sent });
-            ApplyOut(sent);
+            AppendOutbound(new[] { sent });
             return new V2ChatStep(false, head.Id, ChatFrame(head.Text));
         }
     }
 
     /// <summary>
-    /// Operator or test hook. <paramref name="decision"/> is <c>requeue</c> (may duplicate on the
-    /// server) or <c>drop</c> (do not send). Only a <c>sent</c> row can be resolved.
+    /// Resolve one uncertain <c>sent</c> row. <paramref name="decision"/> is <c>requeue</c>
+    /// (may duplicate on the server) or <c>drop</c> (do not send). Only a <c>sent</c> row can
+    /// be resolved. This does not send by itself. The operator command is
+    /// <c>reconcile --id &lt;client_msg_id&gt; requeue|drop</c>. A <c>sent</c> row is never resent
+    /// until that explicit decision.
     /// </summary>
     public bool ResolveUncertain(string clientMsgId, string decision)
     {
@@ -304,9 +314,25 @@ internal sealed class V2Client
                 ["client_msg_id"] = clientMsgId,
                 ["decision"] = decision
             };
-            AppendOps(_outboundPath, new[] { op });
-            ApplyOut(op);
+            AppendOutbound(new[] { op });
             return true;
+        }
+    }
+
+    /// <summary>Ids of <c>sent</c> rows still waiting on <c>accepted</c>. Empty when nothing is held.</summary>
+    public IReadOnlyList<string> UncertainIds()
+    {
+        lock (_gate)
+        {
+            CatchUpOutbound();
+            var ids = new List<string>();
+            foreach (var id in _outOrder)
+            {
+                if (_out[id].State == "sent")
+                    ids.Add(id);
+            }
+
+            return ids;
         }
     }
 
@@ -383,7 +409,7 @@ internal sealed class V2Client
     {
         _inboxAuth = JsonNum.Bool(frame, "inboxAuth") == true;
         var send = new List<JsonObject>();
-        if (TryArmAck(replayOnly: true) is { } ack)
+        if (TryArmAck() is { } ack)
             send.Add(ack);
         else if (_inboxAuth && ArmPull() is { } pull)
             send.Add(pull);
@@ -400,34 +426,34 @@ internal sealed class V2Client
             return V2InboundResult.None;
         }
 
-        if (_in.TryGetValue(id, out var existing))
+        if (_in.TryGetValue(id, out var existing) && existing.Generation == generation)
         {
-            if (existing.Generation == generation && existing.State is "processed" or "dead")
+            if (existing.State is "processed" or "dead" or "ack_pending")
                 return V2InboundResult.None;
-            if (existing.Generation == generation && existing.State == "ack_pending")
-                return V2InboundResult.None;
-            // Same generation, still only seen: a re-lease. Not complete. Fall through and ack if idle.
-            // A higher generation is a new lease even when an older one was processed.
+            // Handoff already landed. Replay the ack; do not enqueue again.
+            if (existing.State == "handed_off")
+                return ArmAck();
         }
 
+        var payload = V2Payload.Copy(frame);
         var seen = new JsonObject
         {
             ["op"] = "seen",
             ["deliveryId"] = id,
-            ["leaseGeneration"] = generation.Value
+            ["leaseGeneration"] = generation.Value,
+            ["payload"] = payload
         };
-        AppendOps(_inboundPath, new[] { seen });
-        ApplyIn(seen);
+        AppendInbound(seen);
         // A newer lease that arrives while this id's ack is still in flight is stored
-        // on the row and armed only after that ack settles. Overwriting now would
+        // on the row and handed off only after that ack settles. Overwriting now would
         // let the in-flight result complete the wrong generation.
-        if (_in.TryGetValue(id, out var stored) && stored.State == "seen")
-            _seenEpoch[id] = _epoch;
-
-        var send = new List<JsonObject>();
-        if (TryArmAck(replayOnly: false) is { } ack)
-            send.Add(ack);
-        return new V2InboundResult(send, false, null);
+        if (!_in.TryGetValue(id, out var stored))
+            return V2InboundResult.None;
+        if (stored.State is "ack_pending" or "handed_off" && stored.Generation != generation)
+            return V2InboundResult.None;
+        if (stored.State == "seen" && !CommitHandoff(stored))
+            return V2InboundResult.None;
+        return ArmAck();
     }
 
     private V2InboundResult OnAckResult(JsonObject frame)
@@ -435,16 +461,39 @@ internal sealed class V2Client
         var state = Json.Str(frame, "state");
         var idempotent = JsonNum.Bool(frame, "idempotent") == true;
         if (state == "processed" || idempotent)
-            CompleteInFlight(idempotent ? "idempotent" : "processed");
-        else if (state is "lease_fenced" or "lease_expired")
-            FenceInFlight(state);
-        else
         {
-            _notes.Enqueue("ack_result did not confirm completion");
-            return V2InboundResult.None;
+            if (!TryCorrelate(frame, out var item, out var note) || item is null)
+            {
+                if (note is not null)
+                    _notes.Enqueue(note);
+                return V2InboundResult.None;
+            }
+
+            if (note is not null)
+                _notes.Enqueue(note);
+            if (item.State is not ("processed" or "dead"))
+                Complete(item, idempotent ? "idempotent" : "processed");
+            return ContinueAfterAck();
         }
 
-        return ContinueAfterAck();
+        if (state is "lease_fenced" or "lease_expired")
+        {
+            if (!TryCorrelate(frame, out var item, out var note) || item is null)
+            {
+                if (note is not null)
+                    _notes.Enqueue(note);
+                return V2InboundResult.None;
+            }
+
+            if (note is not null)
+                _notes.Enqueue(note);
+            if (item.State is not ("processed" or "dead"))
+                Fence(item, state);
+            return ContinueAfterAck();
+        }
+
+        _notes.Enqueue("ack_result did not confirm completion");
+        return V2InboundResult.None;
     }
 
     private V2InboundResult OnError(JsonObject frame)
@@ -452,7 +501,17 @@ internal sealed class V2Client
         var code = Json.Str(frame, "code");
         if (code is "lease_fenced" or "lease_expired")
         {
-            FenceInFlight(code);
+            if (!TryCorrelate(frame, out var item, out var note) || item is null)
+            {
+                if (note is not null)
+                    _notes.Enqueue(note);
+                return V2InboundResult.None;
+            }
+
+            if (note is not null)
+                _notes.Enqueue(note);
+            if (item.State is not ("processed" or "dead"))
+                Fence(item, code);
             return ContinueAfterAck();
         }
 
@@ -484,8 +543,7 @@ internal sealed class V2Client
             op["messageId"] = messageId;
         if (Json.Str(frame, "ingressId") is { } ingressId)
             op["ingressId"] = ingressId;
-        AppendOps(_outboundPath, new[] { op });
-        ApplyOut(op);
+        AppendOutbound(new[] { op });
         return new V2InboundResult(Array.Empty<JsonObject>(), true, null);
     }
 
@@ -520,9 +578,7 @@ internal sealed class V2Client
             ["deliveryId"] = id,
             ["leaseGeneration"] = generation
         };
-        AppendOps(_inboundPath, new[] { op });
-        ApplyIn(op);
-        _seenEpoch.Remove(id);
+        AppendInbound(op);
         if (_ackInFlight == id)
             _ackInFlight = null;
         return V2InboundResult.None;
@@ -531,14 +587,26 @@ internal sealed class V2Client
     private V2InboundResult ContinueAfterAck()
     {
         var send = new List<JsonObject>();
-        if (TryArmAck(replayOnly: false) is { } ack)
+        if (TryArmAck() is { } ack)
             send.Add(ack);
         else if ((_pullAgain || (_inboxAuth && !_initialPullSent)) && ArmPull() is { } pull)
             send.Add(pull);
         return new V2InboundResult(send, true, null);
     }
 
-    private JsonObject? TryArmAck(bool replayOnly)
+    private V2InboundResult ArmAck()
+    {
+        var send = new List<JsonObject>();
+        if (TryArmAck() is { } ack)
+            send.Add(ack);
+        return new V2InboundResult(send, false, null);
+    }
+
+    /// <summary>
+    /// Ack a row whose consumer handoff is already durable. A <c>seen</c> row is not acked:
+    /// that state means the handoff has not succeeded, and a later lease can retry it.
+    /// </summary>
+    private JsonObject? TryArmAck()
     {
         if (_ackInFlight is not null)
             return null;
@@ -546,21 +614,8 @@ internal sealed class V2Client
         foreach (var id in _inOrder)
         {
             var item = _in[id];
-            if (item.State == "ack_pending")
+            if (item.State is "ack_pending" or "handed_off")
                 return WriteAck(item);
-        }
-
-        if (replayOnly)
-            return null;
-
-        foreach (var id in _inOrder)
-        {
-            var item = _in[id];
-            if (item.State != "seen")
-                continue;
-            if (!_seenEpoch.TryGetValue(id, out var epoch) || epoch != _epoch)
-                continue;
-            return WriteAck(item);
         }
 
         return null;
@@ -574,54 +629,166 @@ internal sealed class V2Client
             ["deliveryId"] = item.DeliveryId,
             ["leaseGeneration"] = item.Generation
         };
-        AppendOps(_inboundPath, new[] { op });
-        ApplyIn(op);
+        AppendInbound(op);
         _ackInFlight = item.DeliveryId;
-        _seenEpoch.Remove(item.DeliveryId);
         return AckFrame(item.DeliveryId, item.Generation);
     }
 
-    private void CompleteInFlight(string how)
+    /// <summary>
+    /// Fsync the consumer handoff, then <c>handed_off</c>. False leaves the row <c>seen</c>
+    /// so the server can re-lease it. The ack frame is not returned in that case.
+    /// </summary>
+    private bool CommitHandoff(InItem item)
     {
-        var id = _ackInFlight ?? Oldest(static item => item.State == "ack_pending");
-        _ackInFlight = null;
-        if (id is null || !_in.TryGetValue(id, out var item))
-            return;
+        if (V2Payload.TryQueue(item.DeliveryId, item.Generation, item.Payload) is not { } delivery)
+        {
+            _notes.Enqueue("delivery has no text payload; not acked");
+            return false;
+        }
+
+        if (Consumers is null)
+        {
+            _notes.Enqueue("no consumer queue; delivery not acked");
+            return false;
+        }
+
+        try
+        {
+            if (!Consumers.TryEnqueue(delivery, out var error))
+            {
+                _notes.Enqueue(string.IsNullOrEmpty(error)
+                    ? "consumer enqueue failed; delivery not acked"
+                    : "consumer enqueue failed; delivery not acked (" + error + ")");
+                return false;
+            }
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            _notes.Enqueue("consumer enqueue failed; delivery not acked (" + ex.GetType().Name + ")");
+            return false;
+        }
+
+        AppendInbound(new JsonObject
+        {
+            ["op"] = "handed_off",
+            ["deliveryId"] = item.DeliveryId,
+            ["leaseGeneration"] = item.Generation
+        });
+        return item.State == "handed_off";
+    }
+
+    private void Complete(InItem item, string how)
+    {
+        if (_ackInFlight == item.DeliveryId)
+            _ackInFlight = null;
         if (item.State is "processed" or "dead")
             return;
-        var op = new JsonObject
+        AppendInbound(new JsonObject
         {
             ["op"] = "processed",
-            ["deliveryId"] = id,
+            ["deliveryId"] = item.DeliveryId,
             ["leaseGeneration"] = item.Generation,
             ["how"] = how
-        };
-        AppendOps(_inboundPath, new[] { op });
-        ApplyIn(op);
-        _seenEpoch.Remove(id);
+        });
         PromoteQueuedLease(item);
     }
 
-    private void FenceInFlight(string code)
+    private void Fence(InItem item, string code)
     {
-        var id = _ackInFlight ?? Oldest(static item => item.State == "ack_pending");
-        _ackInFlight = null;
-        if (id is null || !_in.TryGetValue(id, out var item))
-            return;
+        if (_ackInFlight == item.DeliveryId)
+            _ackInFlight = null;
         if (item.State is "processed" or "dead")
             return;
-        var op = new JsonObject
+        AppendInbound(new JsonObject
         {
             ["op"] = "fence",
-            ["deliveryId"] = id,
+            ["deliveryId"] = item.DeliveryId,
             ["leaseGeneration"] = item.Generation,
             ["code"] = code
-        };
-        AppendOps(_inboundPath, new[] { op });
-        ApplyIn(op);
-        // Drop the epoch so Continue does not immediately ack the same generation again.
-        _seenEpoch.Remove(id);
+        });
+        // Seen again, not handed off. The same generation is not acked until a new delivery
+        // commits the consumer queue. A generation that arrived during this ack is promoted below.
         PromoteQueuedLease(item);
+    }
+
+    /// <summary>
+    /// Match <c>ack_result</c> / lease errors to one row. A frame that names
+    /// <c>deliveryId</c> settles only that row, and <c>leaseGeneration</c> must match
+    /// when it is present. A frame with neither id is applied only when one ack is in
+    /// flight — the §11 fixtures omit the id. A mismatch does not complete a different row.
+    /// </summary>
+    private bool TryCorrelate(JsonObject frame, out InItem? item, out string? note)
+    {
+        item = null;
+        note = null;
+        var id = Json.Str(frame, "deliveryId");
+        var generation = JsonNum.Long(frame, "leaseGeneration");
+        if (!string.IsNullOrEmpty(id))
+        {
+            if (!_in.TryGetValue(id, out var named))
+            {
+                note = "ack_result deliveryId does not match a local delivery; not applied";
+                return false;
+            }
+
+            if (generation is not null && generation.Value != named.Generation)
+            {
+                note = "ack_result leaseGeneration does not match that delivery; not applied";
+                return false;
+            }
+
+            if (named.State is "processed" or "dead")
+            {
+                note = "ack_result for a finished delivery; ignored";
+                if (_ackInFlight == id)
+                    _ackInFlight = null;
+                item = named;
+                return true;
+            }
+
+            if (named.State is not ("ack_pending" or "handed_off"))
+            {
+                note = "ack_result for a delivery that is not waiting on ack; not applied";
+                return false;
+            }
+
+            if (_ackInFlight == id)
+                _ackInFlight = null;
+            item = named;
+            return true;
+        }
+
+        var pending = new List<InItem>();
+        foreach (var key in _inOrder)
+        {
+            if (_in[key].State == "ack_pending")
+                pending.Add(_in[key]);
+        }
+
+        InItem? inflight = null;
+        if (_ackInFlight is not null && _in.TryGetValue(_ackInFlight, out var marked) && marked.State == "ack_pending")
+            inflight = marked;
+        else if (pending.Count == 1)
+            inflight = pending[0];
+
+        if (inflight is null)
+        {
+            note = pending.Count > 1
+                ? "ack_result has no deliveryId and more than one ack is pending; not applied"
+                : "ack_result has no deliveryId and no in-flight ack; not applied";
+            return false;
+        }
+
+        if (generation is not null && generation.Value != inflight.Generation)
+        {
+            note = "ack_result leaseGeneration does not match the in-flight ack; not applied";
+            return false;
+        }
+
+        _ackInFlight = null;
+        item = inflight;
+        note = null;
+        return true;
     }
 
     /// <summary>
@@ -641,10 +808,12 @@ internal sealed class V2Client
             ["deliveryId"] = item.DeliveryId,
             ["leaseGeneration"] = next
         };
-        AppendOps(_inboundPath, new[] { seen });
-        ApplyIn(seen);
+        if (item.QueuedPayload is not null)
+            seen["payload"] = item.QueuedPayload.DeepClone();
+        AppendInbound(seen);
+        item.QueuedPayload = null;
         if (item.State == "seen")
-            _seenEpoch[item.DeliveryId] = _epoch;
+            CommitHandoff(item);
     }
 
     private JsonObject? ArmPull()
@@ -659,17 +828,6 @@ internal sealed class V2Client
 
         _pulls++;
         return PullFrame();
-    }
-
-    private string? Oldest(Func<InItem, bool> match)
-    {
-        foreach (var id in _inOrder)
-        {
-            if (match(_in[id]))
-                return id;
-        }
-
-        return null;
     }
 
     private void ImportLocked()
@@ -717,9 +875,7 @@ internal sealed class V2Client
         }
 
         ops.Add(CursorOp(cursor));
-        AppendOps(_outboundPath, ops);
-        foreach (var op in ops)
-            ApplyOut(op);
+        AppendOutbound(ops);
     }
 
     private OutItem? FirstOpen()
@@ -782,15 +938,26 @@ internal sealed class V2Client
         switch (Json.Str(op, "op"))
         {
             case "seen":
-                if (item.State == "ack_pending" && generation != item.Generation)
+                if (item.State is "ack_pending" or "handed_off" && generation != item.Generation)
                 {
                     item.QueuedGeneration = generation;
+                    if (op["payload"] is JsonObject queued)
+                        item.QueuedPayload = (JsonObject)queued.DeepClone();
                     break;
                 }
 
                 item.Generation = generation;
                 item.State = "seen";
                 item.QueuedGeneration = null;
+                item.QueuedPayload = null;
+                if (op["payload"] is JsonObject payload)
+                    item.Payload = (JsonObject)payload.DeepClone();
+                break;
+            case "handed_off":
+                if (item.State is "processed" or "dead" or "ack_pending")
+                    break;
+                item.Generation = generation;
+                item.State = "handed_off";
                 break;
             case "ack_pending":
                 item.Generation = generation;
@@ -908,7 +1075,62 @@ internal sealed class V2Client
         public string DeliveryId { get; } = deliveryId;
         public long Generation { get; set; }
         public long? QueuedGeneration { get; set; }
+        public JsonObject? Payload { get; set; }
+        public JsonObject? QueuedPayload { get; set; }
         public string State { get; set; } = "seen";
+    }
+
+    private void AppendInbound(JsonObject op)
+    {
+        AppendOps(_inboundPath, new[] { op });
+        ApplyIn(op);
+    }
+
+    /// <summary>
+    /// Apply resolve lines an operator appended while this process was idle.
+    /// Bytes this process already applied are not read again.
+    /// </summary>
+    private void CatchUpOutbound()
+    {
+        var end = CompleteLineEnd(_outboundPath);
+        if (end <= _outboundApplied)
+            return;
+        byte[] buf;
+        using (var fs = new FileStream(_outboundPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+        {
+            fs.Seek(_outboundApplied, SeekOrigin.Begin);
+            var len = (int)(end - _outboundApplied);
+            buf = new byte[len];
+            fs.ReadExactly(buf, 0, len);
+        }
+
+        _outboundApplied = end;
+        var text = Encoding.UTF8.GetString(buf);
+        using var reader = new StringReader(text);
+        string? line;
+        while ((line = reader.ReadLine()) is not null)
+        {
+            if (line.Length == 0)
+                continue;
+            try
+            {
+                if (JsonNode.Parse(line) is JsonObject op)
+                    ApplyOut(op);
+            }
+            catch (System.Text.Json.JsonException)
+            {
+                // A corrupt operator line does not resend anything.
+            }
+        }
+    }
+
+    private void AppendOutbound(IReadOnlyList<JsonObject> ops)
+    {
+        CatchUpOutbound();
+        AppendOps(_outboundPath, ops);
+        _outboundApplied = CompleteLineEnd(_outboundPath);
+        foreach (var op in ops)
+            ApplyOut(op);
     }
 }
 

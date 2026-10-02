@@ -40,6 +40,16 @@ class MentionTests(unittest.TestCase):
         self.assertEqual(acknowledge(self.db,event['event_id']),1)
         self.assertIsNone(next_event(self.db))
 
+    def test_v2_handoff_wakes_and_a_raw_delivery_does_not(self):
+        self.append('hello from the durable queue', 30, kind='delivery')
+        row = {'dir': 'in', 'v2_handoff': 'd1', 'msg': {'type': 'chat', 'id': 'v2:d1', 'nick': 'fixture', 'text': 'hello from the durable queue'}}
+        with self.inbox.open('a') as f:
+            f.write(json.dumps(row) + '\n')
+        self.assertEqual(poll(self.inbox, self.db)['queued'], 1)
+        event = next_event(self.db)
+        self.assertEqual(event['reason'], 'v2_handoff')
+        self.assertEqual(event['message']['text'], 'hello from the durable queue')
+
     def test_replay_is_not_a_new_mention(self):
         message={'type':'chat','id':10,'nick':'fixture','text':'@dot historical'}
         self.inbox.write_text(json.dumps({'dir':'in','msg':{'type':'welcome','replay':[message]}})+'\n'+json.dumps({'dir':'in','msg':message})+'\n')
