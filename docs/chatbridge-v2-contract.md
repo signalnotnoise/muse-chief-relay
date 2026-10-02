@@ -1,6 +1,12 @@
 # ChatBridge v2 Client Protocol Contract
 
-**Status:** Draft for review. Not implemented. No v2 branch exists yet.
+**Status:** Draft for review. §§2–9 below describe a *designed* v2 wire protocol,
+not the deployed server — see **§11 Deployed-server conformance** for the
+version-pinned ground truth. The server-side v2 (flag-gated durable delivery,
+PR #8, `origin/main` de60fd4) IS implemented and live in production with the
+flag ON (`GET /health` → `"durable": true`, verified 2026-10-02 ~13:15 ET).
+No v2 *client* implementation exists yet; dot stays v1 until the prerequisites
+in §11 close.
 **Author:** Fuse, 2026-10-02. Alex approved Fuse authoring this contract.
 **Purpose:** Unblock dot's v2 cutover. This document is the protocol contract dot implements against.
 
@@ -442,13 +448,85 @@ All v2 delivery is at-least-once:
    contract says yes: `pull` for an unbound agent is `unknown_agent`.)
 6. **Multiple agents per connection** — one `bind` per agent id per connection
    is allowed; is there a cap?
-7. **Server verification still outstanding** — this revision reconciles the
-   contract against dot's consistency feedback only. The wire behavior
-   (dual hello, binding tokens, send-dedup on `client_msg_id`, ack-keyed
-   delivery) still needs review against the actual v2 server code before any
-   implementation or cutover.
+7. **Server verification — RESOLVED in §11.** The wire behavior in §§2–9 was
+   verified against the actual v2 server code on 2026-10-02 ~13:15 ET. The
+   conformance pin, future-work labels, and implemented equivalents are in
+   §11. Nothing in §§2–9 may be implemented against until §11 says the
+   deployed server speaks it.
 8. **`binding` token lifecycle** — rotation policy, expiry, and what the server
    does when a stale token re-binds after the inbox was legitimately reclaimed.
+
+---
+
+## 11. Deployed-server conformance (2026-10-02)
+
+Verified against live evidence, not the draft above. Everything in §§2–9 that
+contradicts this section is **future work**; the "implemented equivalent"
+column is what a v2 client may actually rely on today.
+
+### 11.1 Version pin
+
+- Production relay: `voizle-text-relay`. `GET /health` on the live deployment
+  returns `{"ok":true,"protocol":"voizle-text-relay","v":1,"durable":true,...}` —
+  the durable-delivery flag is **ON** in production.
+- Newest relay code on `origin/main` is the PR #8 squash
+  (`de60fd4` "Add feature-flagged durable delivery to the text relay (#8)").
+  Two later follow-ups — read-only joins doc (`b442363`) and trip-salt HOLD
+  (`5bbeb74`) — are **unmerged and therefore not deployed**.
+- Canonical server docs: `voizle/server/relay/DURABLE.md`,
+  `voizle/server/relay/CHANGELOG.md`. This contract's §§2–9 do NOT supersede them.
+
+### 11.2 Future work vs implemented equivalents
+
+| Designed in §§2–9 (FUTURE WORK) | Deployed equivalent (what the server actually does) |
+|---|---|
+| `versions: [2,1]` dual-version hello; `v2.features` advertisement | `hello` is always `v: 1`. With the flag on it adds `"durable": true` and `"durableVersion": 2`. The parser accepts exactly `v: 1`, or `v: 2` when the flag is on; anything else is `bad_version`. No `versions` array exists anywhere in server src. A client opts into v2 **per-join** with `{"v":2,"type":"join",...}` — v1 connections stay live through a rolling upgrade with no mixed-version session on any one connection. |
+| Server-issued opaque `binding` token (`bind`/`bound`, `inbox_held`) | Ownership = **client-chosen owner secret** presented at v2 join (`password`, `pass`, or `nick#secret`). The server stores an HMAC verifier (trip-salt-bound); later joins must present the same secret. Trips stay evidence-only. No token is issued; no `bind`/`bound` frames exist. |
+| `client_msg_id` send-dedup (at-most-once retry) | **Not implemented.** No idempotency key in server src. A sender that retries after losing its `accepted` frame creates a second message. Implemented equivalent: the sender correlates the `accepted` frame (`messageId`/`ingressId`) before treating a send as stored; outbound is **at-least-once**, sender-side. |
+| Per-room `seq`, `resume`/`since_seq`/`resumed`, `seq_too_old` | **Not implemented.** No sequence numbers on chat frames. Implemented equivalent: after a v2 join with `inboxAuth: true`, backlog arrives as `delivery` frames right after `welcome`; then `pull` leases more, up to `RELAY_DURABLE_PULL_LIMIT` (default 20) per call, closed by `pull_result` with `{count, queued, delivered, dead}`. Repeat `pull` while `queued > 0` — that is the paging mechanism. |
+| `leased` batch / `lease` IDs / `acked` counts | Leases exist but differently: a lease is one log record carrying attempt + generation + state. `ack` is `{"v":2,"type":"ack","deliveryId","leaseGeneration"}`; the server answers `ack_result` with `state: "processed"`, or `idempotent: true` on a same-generation re-ack. There is no lease-ID frame and no acked-count frame. |
+| Cursor paging / cursor interleaving | **No cursor exists in server src.** One inbox per connection; `pull`-driven paging only. There is no interleaving concept. |
+
+### 11.3 Review items resolved from server evidence (dot's 3eea33b review)
+
+1. **Paging.** No cursor. `pull` → server leases up to `RELAY_DURABLE_PULL_LIMIT`
+   (default 20), then `pull_result` reports `{count, queued, delivered, dead}`.
+   The client pages by pulling again while `queued > 0`. Backlog rows stream as
+   `delivery` frames immediately after `welcome` (which sets `replay: []`,
+   `inboxAuth: true`, and inbox counts).
+2. **Retention gaps.** By design: v2 inboxes are **never backfilled** — traffic
+   accepted before the nick's first v2 join is a gap, not an error. Retired
+   inboxes stop receiving fan-out (room caps: `RELAY_MAX_USERS_PER_ROOM` active,
+   4× that in lifetime creates). v1 `welcome.replay` is rebuilt from accepted
+   messages capped at `RELAY_REPLAY_LIMIT`. Processed rows, rejected ingress,
+   and dead letters stay on disk; there is no compaction.
+3. **Late/lost ack.** Generation-fenced: ack must match the current lease
+   generation, owner, and expiry. Older generation → `lease_fenced` (newer
+   lease left alone); expired → `lease_expired`; same-generation re-ack →
+   `idempotent: true`. Disconnect/shutdown/startup releases open leases back
+   to `queued` **without lowering the generation**, so a stale ack from a
+   previous session cannot mark the row processed — the next lease bumps the
+   generation. Attempt counts survive restarts and count toward the dead
+   letter (`RELAY_DURABLE_MAX_ATTEMPTS`, default 5); a spent budget appends a
+   `dead` record that is never leased again, and a connected v2 socket is told
+   with `type: "dead"`.
+4. **Outbound-send semantics.** The `accepted` frame (sent to the v2 sender
+   only) means the ingress was **stored and the fan-out queued** — it does NOT
+   mean any adapter processed the row. A later `delivery` frame is the handoff;
+   `ack_result` with `state: "processed"` is the completion. There is no client
+   idempotency key: uncertain sends are at-least-once by server evidence
+   (`DURABLE.md`: "A version-2 sender that retries a chat because it missed
+   `accepted` creates a second message."). `POST /hook` returns
+   `ok`/`delivered`/`stored`, plus `messageId` and `state: "accepted"` after
+   fsync when the flag is on; hook lines are roots.
+
+Defaults pinned: `RELAY_DURABLE_LEASE_MS=15000`, `RELAY_DURABLE_MAX_ATTEMPTS=5`,
+`RELAY_DURABLE_PULL_LIMIT=20`.
+
+Prerequisites for dot's v2 cutover therefore remain open: no client may
+implement against §§2–9 (designed) until the future-work rows above are either
+implemented server-side or the client is rewritten to §11's deployed
+equivalents. Dot stays v1 — correct.
 
 ---
 
