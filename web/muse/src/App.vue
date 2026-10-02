@@ -310,7 +310,18 @@ function onWorkspaceCreate() {
                   :key="name"
                   class="rounded-md px-1.5 py-1 text-chat max-[820px]:shrink-0 max-[820px]:rounded-full max-[820px]:border max-[820px]:border-line max-[820px]:bg-panel max-[820px]:whitespace-nowrap"
                   :class="{ 'bg-me text-accent': name === nick }"
-                >{{ name }}</li>
+                >
+                  <!-- Clicking a roster name addresses them, same as transcript
+                       nick clicks; the user's own row stays unclickable. -->
+                  <button
+                    v-if="name !== nick"
+                    type="button"
+                    class="cursor-pointer hover:underline focus-visible:outline-solid focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-focus"
+                    :title="'Mention ' + name"
+                    @click="mentionNick(name)"
+                  >{{ name }}</button>
+                  <span v-else>{{ name }}</span>
+                </li>
               </ul>
               <div class="grid shrink-0 gap-1 text-[0.78rem] text-muted max-[820px]:hidden">
                 <div><span class="text-dim">channel</span> <span id="meta-channel" class="font-mono text-[0.74rem] text-ink">{{ metaChannel }}</span></div>
