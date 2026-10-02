@@ -19,6 +19,7 @@ internal sealed class HackChatBridge
     private readonly object _fileLock = new();
     private readonly AutoAcker _acker;
     private readonly MentionRouter? _mentions;
+    private readonly IHivemindMirror? _mirror;
     private readonly bool _voizle;
     // Auto-acks waiting to go out. Filled by the receive loop, drained by the send loop ahead of the outbox,
     // which _sendWake wakes early so an ack doesn't wait out the outbox poll.
@@ -47,6 +48,9 @@ internal sealed class HackChatBridge
         // Mention inboxes sit beside inbox.jsonl. Off unless mentions.enabled, so a current
         // deployment keeps the jsonl bridge and does not grow an agents/ tree.
         _mentions = cfg.MentionRouting.Enabled ? MentionRouter.Open(cfg) : null;
+        // Room-chat mirror into HIVEMIND. Off unless HIVEMIND_MESSAGE_MIRROR=1.
+        // Offer only enqueues; a failure must not affect this session.
+        _mirror = HivemindMirror.Open(_runtime, line => TryStderr("[chatbridge] " + line));
     }
 
     private sealed class Session
@@ -547,6 +551,17 @@ internal sealed class HackChatBridge
                 break;
 
             case "chat":
+                // The line is already in inbox.jsonl. Mirror after that accept.
+                // The helper hashes the channel and drops trip and join secrets.
+                try
+                {
+                    _mirror?.Offer(obj, _cfg.Channel);
+                }
+                catch (Exception ex)
+                {
+                    TryStderr($"[chatbridge] hivemind message mirror failed ({ex.GetType().Name})");
+                }
+
                 if (_mentions is not null && !MentionIngress.TryAccept(_mentions, RoomMessage.FromFrame(obj, _cfg.Channel), out var routeError))
                     LogEvent("err", new JsonObject { ["error"] = "mention route: " + routeError });
 

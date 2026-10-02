@@ -203,6 +203,8 @@ internal sealed class RelayFixture : IAsyncDisposable
     public Func<DateTimeOffset>? UtcNow { get; set; }
     public Func<TimeSpan, CancellationToken, Task>? IdleDelay { get; set; }
     public Action? OnBackoff { get; set; }
+    public Func<string, string?>? Env { get; init; }
+    public Action<string>? MirrorOffer { get; init; }
 
     private readonly string _pass;
 
@@ -290,7 +292,11 @@ internal sealed class RelayFixture : IAsyncDisposable
             OutboxPoll = TimeSpan.FromMilliseconds(20),
             Stdout = Stdout,
             UtcNow = utcNow ?? (() => DateTimeOffset.UtcNow),
-            IdleDelay = idleDelay ?? ((delay, token) => Task.Delay(delay, token))
+            IdleDelay = idleDelay ?? ((delay, token) => Task.Delay(delay, token)),
+            // Tests do not follow the process environment. An operator flag must not
+            // start the Node helper during a socket script.
+            Env = key => Env?.Invoke(key),
+            MirrorOffer = MirrorOffer
         };
 
         var bridge = new HackChatBridge(cfg, runtime);

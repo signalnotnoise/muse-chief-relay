@@ -20,6 +20,8 @@ The log tag is `[chatbridge]`. That is the program name. The socket nick and the
 
 `inbox.jsonl`, `outbox.jsonl`, `watch`, `hook`, `say`, and auto-ack behave as before. Mention routing runs only when `mentions.enabled` is true. Leave it false and the process does not create `{base}/agents/`.
 
+Accepted chats can be mirrored into HIVEMIND after they are appended to `inbox.jsonl`. That path is off unless `HIVEMIND_MESSAGE_MIRROR` is `1`. The bridge does not wait on it, and a failure does not drop the line. See [hivemind.md](hivemind.md).
+
 ## Consumers under bots/
 
 | Directory | What it runs |

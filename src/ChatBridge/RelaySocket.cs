@@ -57,6 +57,20 @@ internal sealed class BridgeRuntime
     /// <summary>Where operator lines go. Null writes to stdout. A throw here is ignored.</summary>
     public Action<string>? Stdout { get; init; }
 
+    /// <summary>
+    /// Environment lookup for the HIVEMIND mirror gate. Null uses
+    /// <see cref="Environment.GetEnvironmentVariable"/>. The mirror stays off unless
+    /// <c>HIVEMIND_MESSAGE_MIRROR</c> is <c>1</c>.
+    /// </summary>
+    public Func<string, string?>? Env { get; init; }
+
+    /// <summary>
+    /// Test stand-in for the Node helper. When the mirror flag is on, each accepted
+    /// chat is handed here as one JSON object (no channel name, trip, or secret).
+    /// Null starts the Node helper instead.
+    /// </summary>
+    public Action<string>? MirrorOffer { get; init; }
+
     public static BridgeRuntime For(RelayConfig cfg) => new()
     {
         SocketFactory = timeout => new ClientRelaySocket(cfg.Origin, timeout)
