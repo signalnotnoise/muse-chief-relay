@@ -18,6 +18,28 @@ internal static class InboxContract
         if (!string.Equals(scope, RoomScope, StringComparison.Ordinal))
             throw new InvalidOperationException("side context cannot be copied into the room");
     }
+
+    /// <summary>
+    /// Wake payload for one durable inbox row. <see cref="InboxWakeRequest.Trip"/> is copied from the
+    /// source line when that line had one. It is untrusted identity evidence, not an authorization.
+    /// Allowlists (<c>mention_trips</c>, <c>task_trips</c>, <c>hook.trips</c>) stay the trust decision.
+    /// </summary>
+    public static InboxWakeRequest ToWake(InboxView view) => new()
+    {
+        Agent = view.Event.Agent,
+        Id = view.Event.Id,
+        Seq = view.Event.Seq,
+        SourceId = view.Event.SourceId,
+        Room = view.Event.Room,
+        From = view.Event.From,
+        Text = view.Event.Text,
+        Trip = string.IsNullOrWhiteSpace(view.Event.Trip) ? null : view.Event.Trip,
+        Mentions = view.Event.Mentions,
+        Hop = view.Event.Hop,
+        Scope = RoomScope,
+        Attempts = view.Attempts,
+        NextUnix = view.NextUnix
+    };
 }
 
 /// <summary>
@@ -34,6 +56,14 @@ internal sealed class InboxWakeRequest
     [System.Text.Json.Serialization.JsonPropertyName("source_id")] public string SourceId { get; init; } = "";
     [System.Text.Json.Serialization.JsonPropertyName("room")] public string Room { get; init; } = "";
     [System.Text.Json.Serialization.JsonPropertyName("from")] public string From { get; init; } = "";
+
+    /// <summary>
+    /// Sender trip copied from the room line, or null when that line had none.
+    /// Untrusted evidence only: a value here does not mean the sender is trusted,
+    /// and a null does not mean they failed a check. Trust is an allowlist elsewhere.
+    /// </summary>
+    [System.Text.Json.Serialization.JsonPropertyName("trip")] public string? Trip { get; init; }
+
     [System.Text.Json.Serialization.JsonPropertyName("text")] public string Text { get; init; } = "";
     [System.Text.Json.Serialization.JsonPropertyName("mentions")] public IReadOnlyList<string> Mentions { get; init; } = Array.Empty<string>();
     [System.Text.Json.Serialization.JsonPropertyName("hop")] public int Hop { get; init; }
@@ -41,21 +71,7 @@ internal sealed class InboxWakeRequest
     [System.Text.Json.Serialization.JsonPropertyName("attempts")] public int Attempts { get; init; }
     [System.Text.Json.Serialization.JsonPropertyName("next_unix")] public long? NextUnix { get; init; }
 
-    public static InboxWakeRequest Create(InboxView view) => new()
-    {
-        Agent = view.Event.Agent,
-        Id = view.Event.Id,
-        Seq = view.Event.Seq,
-        SourceId = view.Event.SourceId,
-        Room = view.Event.Room,
-        From = view.Event.From,
-        Text = view.Event.Text,
-        Mentions = view.Event.Mentions,
-        Hop = view.Event.Hop,
-        Scope = InboxContract.RoomScope,
-        Attempts = view.Attempts,
-        NextUnix = view.NextUnix
-    };
+    public static InboxWakeRequest Create(InboxView view) => InboxContract.ToWake(view);
 }
 
 /// <summary>

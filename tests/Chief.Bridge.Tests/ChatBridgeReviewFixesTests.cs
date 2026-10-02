@@ -1,6 +1,9 @@
 namespace Chief.Bridge.Tests;
 
-/// <summary>Regressions for the three filesystem blockers on the mention inbox.</summary>
+/// <summary>
+/// Regressions for the three filesystem blockers on the mention inbox, and for the wake
+/// contract keeping a sender trip as untrusted evidence.
+/// </summary>
 public class ChatBridgeReviewFixesTests
 {
     private const string Agents = """
@@ -111,6 +114,37 @@ public class ChatBridgeReviewFixesTests
         deep.Route(new RoomMessage("room", "dot", null, "!fanout @muse one", 1, null));
         var second = deep.Route(new RoomMessage("room", "muse", null, "!fanout @dot two", 2, null));
         Assert.Equal(2, Assert.Single(second.Delivered).Hop);
+    }
+
+    [Fact]
+    public void Wake_keeps_sender_trip_as_untrusted_evidence()
+    {
+        using var dir = new TempDir();
+        var router = Open(dir);
+        var carried = router.Route(new RoomMessage("room", "Alex", "Ab12Cd", "@dot with a trip", 21, "trip-1"));
+        var missing = router.Route(new RoomMessage("room", "Alex", null, "@dot no trip", 22, "trip-2"));
+        Assert.Equal(RouteKind.Delivered, carried.Kind);
+        Assert.Equal(RouteKind.Delivered, missing.Kind);
+
+        var wakes = router.InboxFor("dot").Pending().Select(InboxContract.ToWake).ToList();
+        var withTrip = Assert.Single(wakes, w => w.SourceId == "srv:trip-1");
+        var without = Assert.Single(wakes, w => w.SourceId == "srv:trip-2");
+        Assert.Equal("Ab12Cd", withTrip.Trip);
+        Assert.Null(without.Trip);
+
+        var json = System.Text.Json.JsonSerializer.Serialize(withTrip, JsonUtil.Opts);
+        Assert.Contains("\"trip\":\"Ab12Cd\"", json);
+        Assert.DoesNotContain("trusted", json, StringComparison.OrdinalIgnoreCase);
+
+        var acker = new AutoAcker(new AutoAckConfig
+        {
+            Enabled = true,
+            MentionTrips = ["OnlyOnTheList"]
+        }, "relay");
+        var decision = acker.Consider("Alex", withTrip.Trip, "@relay hi", DateTimeOffset.UnixEpoch,
+            () => new HookView(HookState.NotConfigured, "not configured", null));
+        Assert.False(decision.Send);
+        Assert.Equal("untrusted trip", decision.Reason);
     }
 
     private static MentionRouter Open(TempDir dir, TimeSpan? lockBudget = null, string? json = null)

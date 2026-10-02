@@ -95,6 +95,7 @@ Each object:
   "source_id": "msg:…",
   "room": "your-channel-name",
   "from": "Alex",
+  "trip": "Ab12Cd",
   "text": "@dot please look",
   "mentions": ["dot"],
   "hop": 0,
@@ -104,7 +105,9 @@ Each object:
 }
 ```
 
-`scope` is always `room`. There is no side-chat field. An in-process host can implement `IAgentWakeAdapter.WakeAsync` instead of the CLI. A thrown exception there is a soft failure: the pump records the exception type (not the message), applies backoff, and returns. It does not tear down the process, and it does not ack the event. The adapter does its own inference outside this repository.
+`scope` is always `room`. There is no side-chat field. `trip` is the sender trip from the room line, or null when that line had none. It is untrusted identity evidence. A trip on the wake does not mean the sender is trusted, and a null trip does not mean they failed a check. Auto-ack and the hook still decide trust from their own allowlists (`mention_trips`, `task_trips`, `hook.trips`). The wake has no trusted flag.
+
+An in-process host can implement `IAgentWakeAdapter.WakeAsync` instead of the CLI. A thrown exception there is a soft failure: the pump records the exception type (not the message), applies backoff, and returns. It does not tear down the process, and it does not ack the event. The adapter does its own inference outside this repository.
 
 ## Fan-out
 
