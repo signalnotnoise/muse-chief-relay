@@ -12,6 +12,7 @@ internal enum RouteKind
     /// <summary>
     /// Durable, but not in the recipient inbox.jsonl yet. A recipient lock timeout is on that
     /// agent's deferred.jsonl. A sender lock timeout during fan-out is on ingress.jsonl.
+    /// A later line held so it cannot pass that fan-out is on ingress.jsonl too.
     /// </summary>
     Deferred,
 
@@ -30,6 +31,8 @@ internal sealed record RouteResult(RouteKind Kind, IReadOnlyList<InboxEvent> Del
 /// Agent senders do not fan out again unless the line explicitly requests it, and that
 /// extra hop is capped by <c>mentions.max_fanout_hop</c> inside one causal chain.
 /// A fan-out is journaled to ingress.jsonl before that chain is read from the sender inbox.
+/// A later line that would deliver to any agent still waiting on that journal is retained
+/// behind it, so overlapping inboxes stay in arrival order.
 /// </summary>
 internal sealed class MentionRouter : IMentionSink
 {
@@ -78,6 +81,14 @@ internal sealed class MentionRouter : IMentionSink
     public RouteResult Route(RoomMessage message)
     {
         DrainIngress();
+        // Drain stops at a sender lock that is still busy. Routing this line now would file it
+        // ahead of that older ingress row. Keep it on the journal until the overlap can drain.
+        if (WaitingOnEarlierIngress(message))
+        {
+            _ingress.Retain(message, MessageIds.Source(message));
+            return RouteResult.Of(RouteKind.Deferred);
+        }
+
         return RouteFresh(message);
     }
 
@@ -86,17 +97,72 @@ internal sealed class MentionRouter : IMentionSink
         foreach (var retained in _ingress.Pending())
         {
             var result = RouteFresh(retained.Message);
-            if (result.Kind is RouteKind.OwnEcho or RouteKind.NoMention or RouteKind.ReplySuppressed)
-                _ingress.Forget(retained.SourceId);
-            else if (result.Kind == RouteKind.Deferred && _ingress.Pending().Any(p => p.SourceId == retained.SourceId))
+            if (!_ingress.Pending().Any(p => p.SourceId == retained.SourceId))
+                continue;
+            // Still on the journal. A sender-lock miss has to stay at the head. Anything else
+            // this path retained only for ordering (a human chat, a duplicate) is finished.
+            if (result.Kind == RouteKind.Deferred)
                 break;
+            _ingress.Forget(retained.SourceId);
         }
     }
 
+    /// <summary>
+    /// True when this line is already queued, or when it would deliver to an agent that an
+    /// older ingress row also delivers to. Mentions that do not file (echo, no tag, a plain
+    /// agent reply) do not wait.
+    /// </summary>
+    private bool WaitingOnEarlierIngress(RoomMessage message)
+    {
+        var mine = TargetIds(message);
+        if (mine.Count == 0)
+            return false;
+
+        var sourceId = MessageIds.Source(message);
+        foreach (var retained in _ingress.Pending())
+        {
+            if (string.Equals(retained.SourceId, sourceId, StringComparison.Ordinal)
+                || TargetIds(retained.Message).Overlaps(mine))
+                return true;
+        }
+
+        return false;
+    }
+
+    private HashSet<string> TargetIds(RoomMessage message)
+    {
+        var ids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (IsOwnEcho(message))
+            return ids;
+
+        var parsed = MentionParse.Parse(message.Text, _directory);
+        if (parsed.Agents.Count == 0)
+            return ids;
+
+        var sender = _directory.FindByNick(message.From);
+        if (sender is not null && !parsed.ExplicitFanout)
+            return ids;
+
+        foreach (var agent in parsed.Agents)
+        {
+            if (IsSelfTarget(agent, message.From, sender))
+                continue;
+            ids.Add(agent.Id);
+        }
+
+        return ids;
+    }
+
+    private bool IsOwnEcho(RoomMessage message) =>
+        !string.IsNullOrEmpty(_bridgeNick)
+        && string.Equals(message.From, _bridgeNick, StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsSelfTarget(AgentRecord agent, string from, AgentRecord? sender) =>
+        agent.OwnsNick(from) || (sender is not null && string.Equals(sender.Id, agent.Id, StringComparison.OrdinalIgnoreCase));
+
     private RouteResult RouteFresh(RoomMessage message)
     {
-        if (!string.IsNullOrEmpty(_bridgeNick)
-            && string.Equals(message.From, _bridgeNick, StringComparison.OrdinalIgnoreCase))
+        if (IsOwnEcho(message))
             return RouteResult.Of(RouteKind.OwnEcho);
 
         var parsed = MentionParse.Parse(message.Text, _directory);
@@ -142,7 +208,7 @@ internal sealed class MentionRouter : IMentionSink
         var deferred = 0;
         foreach (var agent in parsed.Agents)
         {
-            if (agent.OwnsNick(message.From) || (sender is not null && string.Equals(sender.Id, agent.Id, StringComparison.OrdinalIgnoreCase)))
+            if (IsSelfTarget(agent, message.From, sender))
                 continue;
 
             var draft = new InboxEvent

@@ -284,6 +284,54 @@ public class ChatBridgeReviewFixesTests
     }
 
     [Fact]
+    public void Mixed_agent_fanout_and_human_chat_keep_fifo_when_the_sender_lock_is_busy()
+    {
+        using var dir = new TempDir();
+        var router = Open(dir, TimeSpan.FromMilliseconds(80));
+        var older = new RoomMessage("room", "dot", null, "!fanout @muse older fan-out", 30, "older");
+        var newer = new RoomMessage("room", "Alex", null, "@muse newer chat", 31, "newer");
+        var ingress = Path.Combine(dir.Path, "agents", IngressJournal.FileName);
+        var museInbox = Path.Combine(dir.Path, "agents", "muse", "inbox.jsonl");
+
+        using (new FileStream(Path.Combine(dir.Path, "agents", "dot", "inbox.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None))
+        {
+            var deferred = router.Route(older);
+            Assert.Equal(RouteKind.Deferred, deferred.Kind);
+            Assert.Empty(deferred.Delivered);
+
+            var held = router.Route(newer);
+            Assert.Equal(RouteKind.Deferred, held.Kind);
+            Assert.Empty(held.Delivered);
+
+            var journal = File.ReadAllText(ingress);
+            Assert.Contains("older fan-out", journal);
+            Assert.Contains("newer chat", journal);
+            if (File.Exists(museInbox))
+            {
+                var muse = File.ReadAllText(museInbox);
+                Assert.DoesNotContain("older fan-out", muse);
+                Assert.DoesNotContain("newer chat", muse);
+            }
+        }
+
+        var restarted = Open(dir, TimeSpan.FromMilliseconds(80));
+        var pending = restarted.InboxFor("muse").Pending();
+        Assert.Equal(2, pending.Count);
+        Assert.Equal(1, pending[0].Event.Seq);
+        Assert.Equal("srv:older", pending[0].Event.SourceId);
+        Assert.Equal("dot", pending[0].Event.From);
+        Assert.True(pending[0].Event.Fanout);
+        Assert.Contains("older fan-out", pending[0].Event.Text);
+        Assert.Equal(2, pending[1].Event.Seq);
+        Assert.Equal("srv:newer", pending[1].Event.SourceId);
+        Assert.Equal("Alex", pending[1].Event.From);
+        Assert.False(pending[1].Event.Fanout);
+        Assert.Contains("newer chat", pending[1].Event.Text);
+        Assert.Equal(RouteKind.Duplicate, restarted.Route(newer).Kind);
+        Assert.Equal(2, restarted.InboxFor("muse").Pending().Count);
+    }
+
+    [Fact]
     public void Unknown_parent_fanout_does_not_start_a_new_root()
     {
         using var dir = new TempDir();

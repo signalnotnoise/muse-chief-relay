@@ -4,8 +4,10 @@ using System.Text.Json.Serialization;
 namespace ChatBridge;
 
 /// <summary>
-/// Append-only journal of fan-out lines retained before the sender inbox is read.
-/// A busy sender lock leaves the keep row in place. A finished route appends <c>done</c>.
+/// Append-only journal of lines retained before they can be filed in arrival order.
+/// A fan-out is kept before the sender inbox is read. A busy sender lock leaves that keep
+/// row in place. A later line that shares a recipient is kept behind it. A finished route
+/// appends <c>done</c>.
 /// </summary>
 internal sealed class IngressJournal
 {

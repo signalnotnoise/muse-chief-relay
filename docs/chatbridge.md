@@ -69,7 +69,7 @@ For each agent:
 | `{base}/agents/<id>/inbox.jsonl` | Append-only deliveries. `seq` starts at 1 and only increases. |
 | `{base}/agents/<id>/control.jsonl` | Append-only acks (`op: ack`) and retry rows (`op: attempt`). |
 | `{base}/agents/<id>/deferred.jsonl` | Mentions waiting on a busy recipient inbox lock. Filed into `inbox.jsonl` when that lock is free. The inbox append is flushed to disk before this file is truncated. |
-| `{base}/agents/ingress.jsonl` | Fan-out lines retained before the sender inbox is read for parent, root, and hop. A busy sender lock leaves the line here. |
+| `{base}/agents/ingress.jsonl` | Fan-out lines retained before the sender inbox is read for parent, root, and hop. A busy sender lock leaves the line here. A later chat that shares a recipient waits here too, so that inbox keeps arrival order. |
 | `{base}/agents/<id>/room.jsonl` | Room history for that agent. Scope `room` only. |
 | `{base}/agents/<id>/side/<peer>.jsonl` | Side-chat history. Scope `side`. The router never writes this. |
 
@@ -81,7 +81,7 @@ Retry backoff after a recorded failure is 1s, 2s, 4s, 8s, 16s, then 30s. The hea
 
 The per-agent `inbox.lock` is exclusive. The bridge and `inbox ack` can both want it. A busy lock is retried for about 2 seconds. If the recipient lock is still busy, the mention is appended to that agent's `deferred.jsonl` and filed into `inbox.jsonl` the next time that lock is taken: the next route, `inbox pending`, `inbox due`, or a process restart. Filing flushes the new inbox bytes to disk before `deferred.jsonl` is truncated, so a power loss cannot clear the journal and lose the delivery. After that, `inbox pending` shows it. The mention is not dropped. A disk error that is not a busy lock still leaves the mention unstored: the room `inbox.jsonl` gets `mention route: not filed: <exception type>` and the socket stays up.
 
-An agent fan-out is appended to `{base}/agents/ingress.jsonl` and flushed before the sender inbox is read. If that sender lock is still busy, the line stays in the ingress journal and is routed on the next chat, or when the process opens the router again. It is not dropped, and it is not written to the sender's own inbox.
+An agent fan-out is appended to `{base}/agents/ingress.jsonl` and flushed before the sender inbox is read. If that sender lock is still busy, the line stays in the ingress journal and is routed on the next chat, or when the process opens the router again. It is not dropped, and it is not written to the sender's own inbox. A later line that would file to any of those same recipients is appended to the same journal and is not filed first, so overlapping inboxes stay in arrival order. A line that does not share a recipient is still routed immediately.
 
 ## Wake contract
 
