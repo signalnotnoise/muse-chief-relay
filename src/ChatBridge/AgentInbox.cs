@@ -44,6 +44,12 @@ internal enum InboxWriteKind
 
 internal readonly record struct InboxWrite(InboxWriteKind Kind, InboxEvent Event);
 
+/// <summary>
+/// One locked read of a sender inbox for fan-out. <see cref="Unresolved"/> means an explicit
+/// parent or root is missing, or the parent's chain root disagrees with the requested root.
+/// </summary>
+internal readonly record struct ChainInspection(bool Unresolved, InboxEvent? Parent, string? Root, int HighestHop);
+
 internal static class InboxBackoff
 {
     /// <summary>1s, 2s, 4s, 8s, 16s, then 30s. <paramref name="attempts"/> is 1 after the first failure.</summary>
@@ -175,49 +181,53 @@ internal sealed class AgentInbox
     {
         if (string.IsNullOrEmpty(root))
             return 0;
-        return UnderLock(_ =>
+        return UnderLock(_ => HighestFanoutHopUnlocked(root));
+    }
+
+    /// <summary>
+    /// Resolve a fan-out parent and root against this inbox in one lock.
+    /// Neither reference uses the latest delivery. An explicit parent that is not here, an explicit
+    /// root with no event in that chain, or a parent whose chain root disagrees with <paramref name="rootRef"/>,
+    /// is unresolved. With neither reference, the latest delivery is the parent.
+    /// </summary>
+    public ChainInspection InspectChain(string? parentRef, string? rootRef) =>
+        UnderLock(_ =>
         {
-            var max = 0;
-            foreach (var ev in _events)
+            if (!string.IsNullOrEmpty(parentRef))
             {
-                if (!ev.Fanout || ev.Hop <= max)
-                    continue;
-                if (string.Equals(ChainRoot(ev), root, StringComparison.Ordinal))
-                    max = ev.Hop;
+                var parent = FindUnlocked(parentRef);
+                if (parent is null)
+                    return new ChainInspection(true, null, null, 0);
+                var chain = ChainRoot(parent);
+                if (!string.IsNullOrEmpty(rootRef) && !string.Equals(rootRef, chain, StringComparison.Ordinal))
+                    return new ChainInspection(true, null, null, 0);
+                return new ChainInspection(false, parent, chain, HighestFanoutHopUnlocked(chain));
             }
 
-            return max;
+            if (!string.IsNullOrEmpty(rootRef))
+            {
+                if (!ChainExistsUnlocked(rootRef))
+                    return new ChainInspection(true, null, null, 0);
+                return new ChainInspection(false, null, rootRef, HighestFanoutHopUnlocked(rootRef));
+            }
+
+            var latest = LatestUnlocked();
+            if (latest is null)
+                return new ChainInspection(false, null, null, 0);
+            var root = ChainRoot(latest);
+            return new ChainInspection(false, latest, root, HighestFanoutHopUnlocked(root));
         });
-    }
 
     /// <summary>Delivery with this id or source id, acked or not.</summary>
     public InboxEvent? Find(string? idOrSource)
     {
         if (string.IsNullOrEmpty(idOrSource))
             return null;
-        return UnderLock(_ =>
-        {
-            if (_byId.TryGetValue(idOrSource, out var byId))
-                return byId;
-            return _events.FirstOrDefault(e =>
-                string.Equals(e.SourceId, idOrSource, StringComparison.Ordinal)
-                || string.Equals(e.Id, idOrSource, StringComparison.Ordinal));
-        });
+        return UnderLock(_ => FindUnlocked(idOrSource));
     }
 
     /// <summary>Highest-seq delivery in this inbox, acked or not. Null when the inbox has none.</summary>
-    public InboxEvent? Latest() =>
-        UnderLock(_ =>
-        {
-            InboxEvent? best = null;
-            foreach (var ev in _events)
-            {
-                if (best is null || ev.Seq > best.Seq)
-                    best = ev;
-            }
-
-            return best;
-        });
+    public InboxEvent? Latest() => UnderLock(_ => LatestUnlocked());
 
     internal static string ChainRoot(InboxEvent ev) =>
         string.IsNullOrEmpty(ev.Root) ? ev.SourceId : ev.Root;
@@ -234,6 +244,44 @@ internal sealed class AgentInbox
 
     private InboxEvent? FindSource(string sourceId) =>
         _events.FirstOrDefault(e => string.Equals(e.SourceId, sourceId, StringComparison.Ordinal));
+
+    private InboxEvent? FindUnlocked(string idOrSource)
+    {
+        if (_byId.TryGetValue(idOrSource, out var byId))
+            return byId;
+        return _events.FirstOrDefault(e =>
+            string.Equals(e.SourceId, idOrSource, StringComparison.Ordinal)
+            || string.Equals(e.Id, idOrSource, StringComparison.Ordinal));
+    }
+
+    private InboxEvent? LatestUnlocked()
+    {
+        InboxEvent? best = null;
+        foreach (var ev in _events)
+        {
+            if (best is null || ev.Seq > best.Seq)
+                best = ev;
+        }
+
+        return best;
+    }
+
+    private bool ChainExistsUnlocked(string root) =>
+        _events.Any(e => string.Equals(ChainRoot(e), root, StringComparison.Ordinal));
+
+    private int HighestFanoutHopUnlocked(string root)
+    {
+        var max = 0;
+        foreach (var ev in _events)
+        {
+            if (!ev.Fanout || ev.Hop <= max)
+                continue;
+            if (string.Equals(ChainRoot(ev), root, StringComparison.Ordinal))
+                max = ev.Hop;
+        }
+
+        return max;
+    }
 
     private InboxWrite AppendOrDuplicate(InboxEvent draft, List<InboxEvent> filed)
     {
@@ -349,6 +397,10 @@ internal sealed class AgentInbox
             filed.Add(stored);
         }
 
+        // Inbox appends above are flushed here, before deferred.jsonl is truncated. A power loss
+        // after the truncate then still finds the deliveries on disk. A loss before the truncate
+        // replays deferred.jsonl and skips source ids already stored.
+        FlushDurable(InboxPath);
         ClearFile(DeferredPath);
     }
 
@@ -407,9 +459,12 @@ internal sealed class AgentInbox
     /// </summary>
     private FileStream Lock() => LockFile(Path.Combine(_dir, "inbox.lock"));
 
-    private FileStream LockFile(string path)
+    private FileStream LockFile(string path) => AcquireExclusive(path, _lockBudget);
+
+    internal static FileStream AcquireExclusive(string path, TimeSpan budget)
     {
         var started = System.Diagnostics.Stopwatch.StartNew();
+        var limit = budget < TimeSpan.Zero ? TimeSpan.Zero : budget;
         Exception? last = null;
         while (true)
         {
@@ -420,20 +475,40 @@ internal sealed class AgentInbox
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
                 last = ex;
-                if (started.Elapsed >= _lockBudget)
+                if (started.Elapsed >= limit)
                     throw new IOException(LockBusyMessage, last);
                 Thread.Sleep(TimeSpan.FromMilliseconds(20));
             }
         }
     }
 
-    private static bool IsLockBusy(IOException ex) =>
-        ex.Message.Contains(LockBusyMessage, StringComparison.Ordinal);
+    internal static bool IsLockBusy(Exception ex) =>
+        ex is IOException io && io.Message.Contains(LockBusyMessage, StringComparison.Ordinal);
 
-    private static void AppendJson<T>(string path, T value)
+    /// <summary>
+    /// Test seam. Invoked only from <see cref="FlushDurable"/> after <c>Flush(flushToDisk: true)</c>.
+    /// Production leaves this null.
+    /// </summary>
+    internal static Action<string>? OnDurableFlush { get; set; }
+
+    private static void AppendJson<T>(string path, T value) => AppendDurableJson(path, value);
+
+    internal static void AppendDurableJson<T>(string path, T value)
     {
-        var json = JsonSerializer.Serialize(value, JsonUtil.Opts);
-        File.AppendAllText(path, json + "\n");
+        var bytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(value, JsonUtil.Opts) + "\n");
+        using var fs = new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.Read);
+        fs.Write(bytes);
+        fs.Flush(flushToDisk: true);
+    }
+
+    /// <summary>Fsync <paramref name="path"/> so later truncation of another file cannot outrun these bytes.</summary>
+    internal static void FlushDurable(string path)
+    {
+        if (!File.Exists(path))
+            return;
+        using var fs = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite);
+        fs.Flush(flushToDisk: true);
+        OnDurableFlush?.Invoke(path);
     }
 
     private static void ClearFile(string path)

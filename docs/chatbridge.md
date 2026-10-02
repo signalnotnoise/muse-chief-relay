@@ -68,17 +68,20 @@ For each agent:
 |---|---|
 | `{base}/agents/<id>/inbox.jsonl` | Append-only deliveries. `seq` starts at 1 and only increases. |
 | `{base}/agents/<id>/control.jsonl` | Append-only acks (`op: ack`) and retry rows (`op: attempt`). |
-| `{base}/agents/<id>/deferred.jsonl` | Mentions waiting on a busy inbox lock. Filed into `inbox.jsonl` when that lock is free. |
+| `{base}/agents/<id>/deferred.jsonl` | Mentions waiting on a busy recipient inbox lock. Filed into `inbox.jsonl` when that lock is free. The inbox append is flushed to disk before this file is truncated. |
+| `{base}/agents/ingress.jsonl` | Fan-out lines retained before the sender inbox is read for parent, root, and hop. A busy sender lock leaves the line here. A later chat that shares a recipient waits here too, so that inbox keeps arrival order. |
 | `{base}/agents/<id>/room.jsonl` | Room history for that agent. Scope `room` only. |
 | `{base}/agents/<id>/side/<peer>.jsonl` | Side-chat history. Scope `side`. The router never writes this. |
 
 Restart reads those files and continues. Pending events stay pending, in `seq` order. An ack stays acked.
 
-A final `inbox.jsonl`, `control.jsonl`, or `deferred.jsonl` line that does not end in a newline is repaired before the next append. Repair appends a newline when the tail is already a complete JSON value, and truncates a partial tail back to the previous newline. The bytes before that tail are not rewritten, so a crash during repair cannot replace valid history with a short write. The next event or ack is then its own line and is still there after reload. A newline-terminated corrupt line is skipped and does not glue to the following one.
+A final `inbox.jsonl`, `control.jsonl`, `deferred.jsonl`, or `ingress.jsonl` line that does not end in a newline is repaired before the next append. Repair appends a newline when the tail is already a complete JSON value, and truncates a partial tail back to the previous newline. The bytes before that tail are not rewritten, so a crash during repair cannot replace valid history with a short write. The next event or ack is then its own line and is still there after reload. A newline-terminated corrupt line is skipped and does not glue to the following one.
 
 Retry backoff after a recorded failure is 1s, 2s, 4s, 8s, 16s, then 30s. The head of the queue blocks later events until it is due, so a retry does not skip ahead.
 
-The per-agent `inbox.lock` is exclusive. The bridge and `inbox ack` can both want it. A busy lock is retried for about 2 seconds. If it is still busy, the mention is appended to `deferred.jsonl` and filed into `inbox.jsonl` the next time that lock is taken: the next route, `inbox pending`, `inbox due`, or a process restart. After that, `inbox pending` shows it. The mention is not dropped. A disk error that is not a busy lock still leaves the mention unstored: the room `inbox.jsonl` gets `mention route: not filed: <exception type>` and the socket stays up.
+The per-agent `inbox.lock` is exclusive. The bridge and `inbox ack` can both want it. A busy lock is retried for about 2 seconds. If the recipient lock is still busy, the mention is appended to that agent's `deferred.jsonl` and filed into `inbox.jsonl` the next time that lock is taken: the next route, `inbox pending`, `inbox due`, or a process restart. Filing flushes the new inbox bytes to disk before `deferred.jsonl` is truncated, so a power loss cannot clear the journal and lose the delivery. After that, `inbox pending` shows it. The mention is not dropped. A disk error that is not a busy lock still leaves the mention unstored: the room `inbox.jsonl` gets `mention route: not filed: <exception type>` and the socket stays up.
+
+An agent fan-out is appended to `{base}/agents/ingress.jsonl` and flushed before the sender inbox is read. If that sender lock is still busy, the line stays in the ingress journal and is routed on the next chat, or when the process opens the router again. It is not dropped, and it is not written to the sender's own inbox. A later line that would file to any of those same recipients is appended to the same journal and is not filed first, so overlapping inboxes stay in arrival order. A line that does not share a recipient is still routed immediately.
 
 ## Wake contract
 
@@ -134,7 +137,7 @@ A chat whose sender nick is a configured agent is a reply. It is not filed to an
 - a leading `!fanout` token
 - JSON `"fanout": true`
 
-The hop that counts is the farther of the line's own `"hop"` and the deepest fan-out hop already delivered to that sender in the same causal chain. The chain is the parent's root. A JSON `"parent"` or `"root"` names it. A bare `!fanout` continues the latest delivery to that sender, acked or not. A new human mention is a new root, so an older hop does not apply to it, including after that older event is acked and the process restarts. A bare `!fanout` carries hop 0, and `"hop": 0` does not clear a hop already stored for the chain it continues. The reply is dropped when that carried hop is already at `mentions.max_fanout_hop` (default 1), so two agents cannot alternate `!fanout` inside one chain and land each reply at hop 1. The sender is never a recipient of their own tag. A chat from the bridge's own socket nick is treated as this process's echo and is not routed.
+The hop that counts is the farther of the line's own `"hop"` and the deepest fan-out hop already delivered to that sender in the same causal chain. The chain is the parent's root. A JSON `"parent"` or `"root"` names it. A bare `!fanout` continues the latest delivery to that sender, acked or not. A new human mention is a new root, so an older hop does not apply to it, including after that older event is acked and the process restarts. A bare `!fanout` carries hop 0, and `"hop": 0` does not clear a hop already stored for the chain it continues. The reply is dropped when that carried hop is already at `mentions.max_fanout_hop` (default 1), so two agents cannot alternate `!fanout` inside one chain and land each reply at hop 1. A `"parent"` or `"root"` that is not in the sender's inbox, or a parent whose chain root disagrees with `"root"`, is not routed and does not start a new root. The sender is never a recipient of their own tag. A chat from the bridge's own socket nick is treated as this process's echo and is not routed.
 
 ## Room and side chats
 

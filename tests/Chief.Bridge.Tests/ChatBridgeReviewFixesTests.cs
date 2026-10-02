@@ -245,6 +245,178 @@ public class ChatBridgeReviewFixesTests
     }
 
     [Fact]
+    public void Sender_inbox_lock_retains_fanout_until_the_lock_is_free()
+    {
+        using var dir = new TempDir();
+        var router = Open(dir, TimeSpan.FromMilliseconds(80));
+        var cause = router.Route(new RoomMessage("room", "Alex", null, "@muse hold this", 10, "cause"));
+        Assert.Equal("srv:cause", Assert.Single(cause.Delivered).Root);
+
+        var message = new RoomMessage("room", "muse", null, "!fanout @dot after the lock", 11, "carry");
+        var ingress = Path.Combine(dir.Path, "agents", IngressJournal.FileName);
+        var dotInbox = Path.Combine(dir.Path, "agents", "dot", "inbox.jsonl");
+        bool accepted;
+        string? error;
+        using (new FileStream(Path.Combine(dir.Path, "agents", "muse", "inbox.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None))
+        {
+            accepted = MentionIngress.TryAccept(router, message, out error);
+            Assert.Contains("after the lock", File.ReadAllText(ingress));
+            if (File.Exists(dotInbox))
+                Assert.DoesNotContain("after the lock", File.ReadAllText(dotInbox));
+            var senderDeferred = Path.Combine(dir.Path, "agents", "muse", AgentInbox.DeferredName);
+            if (File.Exists(senderDeferred))
+                Assert.DoesNotContain("after the lock", File.ReadAllText(senderDeferred));
+        }
+
+        Assert.True(accepted);
+        Assert.Null(error);
+
+        var restarted = Open(dir, TimeSpan.FromMilliseconds(80));
+        var filed = Assert.Single(restarted.InboxFor("dot").Pending());
+        Assert.Equal("srv:carry", filed.Event.SourceId);
+        Assert.Equal(1, filed.Event.Hop);
+        Assert.True(filed.Event.Fanout);
+        Assert.Equal("srv:cause", filed.Event.Parent);
+        Assert.Equal("srv:cause", filed.Event.Root);
+        Assert.Contains("after the lock", File.ReadAllText(Path.Combine(dir.Path, "agents", "dot", "room.jsonl")));
+        Assert.Equal(RouteKind.Duplicate, restarted.Route(message).Kind);
+        Assert.Single(restarted.InboxFor("dot").Pending());
+    }
+
+    [Fact]
+    public void Mixed_agent_fanout_and_human_chat_keep_fifo_when_the_sender_lock_is_busy()
+    {
+        using var dir = new TempDir();
+        var router = Open(dir, TimeSpan.FromMilliseconds(80));
+        var older = new RoomMessage("room", "dot", null, "!fanout @muse older fan-out", 30, "older");
+        var newer = new RoomMessage("room", "Alex", null, "@muse newer chat", 31, "newer");
+        var ingress = Path.Combine(dir.Path, "agents", IngressJournal.FileName);
+        var museInbox = Path.Combine(dir.Path, "agents", "muse", "inbox.jsonl");
+
+        using (new FileStream(Path.Combine(dir.Path, "agents", "dot", "inbox.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None))
+        {
+            var deferred = router.Route(older);
+            Assert.Equal(RouteKind.Deferred, deferred.Kind);
+            Assert.Empty(deferred.Delivered);
+
+            var held = router.Route(newer);
+            Assert.Equal(RouteKind.Deferred, held.Kind);
+            Assert.Empty(held.Delivered);
+
+            var journal = File.ReadAllText(ingress);
+            Assert.Contains("older fan-out", journal);
+            Assert.Contains("newer chat", journal);
+            if (File.Exists(museInbox))
+            {
+                var muse = File.ReadAllText(museInbox);
+                Assert.DoesNotContain("older fan-out", muse);
+                Assert.DoesNotContain("newer chat", muse);
+            }
+        }
+
+        var restarted = Open(dir, TimeSpan.FromMilliseconds(80));
+        var pending = restarted.InboxFor("muse").Pending();
+        Assert.Equal(2, pending.Count);
+        Assert.Equal(1, pending[0].Event.Seq);
+        Assert.Equal("srv:older", pending[0].Event.SourceId);
+        Assert.Equal("dot", pending[0].Event.From);
+        Assert.True(pending[0].Event.Fanout);
+        Assert.Contains("older fan-out", pending[0].Event.Text);
+        Assert.Equal(2, pending[1].Event.Seq);
+        Assert.Equal("srv:newer", pending[1].Event.SourceId);
+        Assert.Equal("Alex", pending[1].Event.From);
+        Assert.False(pending[1].Event.Fanout);
+        Assert.Contains("newer chat", pending[1].Event.Text);
+        Assert.Equal(RouteKind.Duplicate, restarted.Route(newer).Kind);
+        Assert.Equal(2, restarted.InboxFor("muse").Pending().Count);
+    }
+
+    [Fact]
+    public void Unknown_parent_fanout_does_not_start_a_new_root()
+    {
+        using var dir = new TempDir();
+        var router = Open(dir);
+        var unknown = new RoomMessage("room", "dot", null,
+            """{"fanout":true,"parent":"unknown-parent","text":"@muse one"}""", 1, "a1");
+        Assert.Equal(RouteKind.Unresolved, router.Route(unknown).Kind);
+        Assert.Equal(RouteKind.Unresolved, router.Route(new RoomMessage("room", "muse", null,
+            """{"fanout":true,"parent":"unknown-parent","text":"@dot two"}""", 2, "a2")).Kind);
+        Assert.Equal(RouteKind.Unresolved, router.Route(new RoomMessage("room", "dot", null,
+            """{"fanout":true,"parent":"unknown-parent","text":"@muse three"}""", 3, "a3")).Kind);
+        Assert.False(File.Exists(router.InboxFor("muse").InboxPath));
+        Assert.False(File.Exists(router.InboxFor("dot").InboxPath));
+
+        var restarted = Open(dir);
+        Assert.Equal(RouteKind.Unresolved, restarted.Route(unknown).Kind);
+        Assert.False(File.Exists(restarted.InboxFor("muse").InboxPath));
+
+        var task = restarted.Route(new RoomMessage("room", "Alex", null, "@muse task", 4, "task"));
+        Assert.Equal("srv:task", Assert.Single(task.Delivered).Root);
+
+        Assert.Equal(RouteKind.Unresolved, restarted.Route(new RoomMessage("room", "muse", null,
+            """{"fanout":true,"parent":"srv:task","root":"other-root","text":"@dot drift"}""", 5, "drift")).Kind);
+        Assert.Equal(RouteKind.Unresolved, restarted.Route(new RoomMessage("room", "muse", null,
+            """{"fanout":true,"root":"missing-root","text":"@dot ghost"}""", 6, "ghost")).Kind);
+        Assert.False(File.Exists(restarted.InboxFor("dot").InboxPath));
+
+        var byRoot = restarted.Route(new RoomMessage("room", "muse", null,
+            """{"fanout":true,"root":"srv:task","text":"@dot by root"}""", 7, "by-root"));
+        var rooted = Assert.Single(byRoot.Delivered);
+        Assert.Equal(1, rooted.Hop);
+        Assert.Null(rooted.Parent);
+        Assert.Equal("srv:task", rooted.Root);
+        Assert.NotEqual(rooted.SourceId, rooted.Root);
+
+        Assert.Equal(RouteKind.Unresolved, restarted.Route(new RoomMessage("room", "muse", null,
+            """{"fanout":true,"parent":"unknown-parent","text":"@dot bypass"}""", 8, "bypass")).Kind);
+        Assert.Single(restarted.InboxFor("dot").Pending());
+
+        Assert.Equal(RouteKind.HopLimited, restarted.Route(new RoomMessage("room", "dot", null, "!fanout @muse back", 9, "back")).Kind);
+        Assert.Equal(RouteKind.Unresolved, restarted.Route(new RoomMessage("room", "dot", null,
+            """{"fanout":true,"parent":"unknown-parent","text":"@muse also"}""", 10, "also")).Kind);
+        Assert.Single(restarted.InboxFor("muse").Pending());
+        Assert.Single(restarted.InboxFor("dot").Pending());
+    }
+
+    [Fact]
+    public void Deferred_inbox_is_flushed_before_the_journal_is_cleared()
+    {
+        using var dir = new TempDir();
+        var inbox = AgentInbox.Open(Path.Combine(dir.Path, "dot"), TimeSpan.FromMilliseconds(80));
+        var deferred = Path.Combine(dir.Path, "dot", AgentInbox.DeferredName);
+        var draft = Draft("dot:flush", "flush", "flush-me");
+        using (new FileStream(Path.Combine(dir.Path, "dot", "inbox.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None))
+        {
+            var write = inbox.Write(draft);
+            Assert.Equal(InboxWriteKind.Deferred, write.Kind);
+            Assert.Contains("flush-me", File.ReadAllText(deferred));
+        }
+
+        var flushedWhileDeferred = false;
+        AgentInbox.OnDurableFlush = path =>
+        {
+            if (!string.Equals(path, inbox.InboxPath, StringComparison.Ordinal))
+                return;
+            Assert.Contains("flush-me", File.ReadAllText(inbox.InboxPath));
+            Assert.Contains("flush-me", File.ReadAllText(deferred));
+            flushedWhileDeferred = true;
+        };
+        try
+        {
+            var filed = Assert.Single(inbox.Pending());
+            Assert.Equal("flush", filed.Event.SourceId);
+        }
+        finally
+        {
+            AgentInbox.OnDurableFlush = null;
+        }
+
+        Assert.True(flushedWhileDeferred);
+        Assert.Equal(0, new FileInfo(deferred).Length);
+        Assert.Contains("flush-me", File.ReadAllText(inbox.InboxPath));
+    }
+
+    [Fact]
     public void Wake_keeps_sender_trip_as_untrusted_evidence()
     {
         using var dir = new TempDir();
