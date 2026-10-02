@@ -425,4 +425,5 @@ test("tracked client source does not update, delete, or embed a key", () => {
   assert.match(example, /APPWRITE_DATABASE_ID=hivemind/);
   assert.match(example, /^APPWRITE_API_KEY=\s*$/m);
   assert.doesNotMatch(example, /APPWRITE_API_KEY=.+/);
+  assert.match(example, /^HIVEMIND_MESSAGE_MIRROR=0\s*$/m);
 });

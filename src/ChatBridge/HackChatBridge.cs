@@ -19,6 +19,7 @@ internal sealed class HackChatBridge
     private readonly object _fileLock = new();
     private readonly AutoAcker _acker;
     private readonly MentionRouter? _mentions;
+    private readonly IHivemindMirror? _mirror;
     private readonly bool _voizle;
     // Null unless protocol_v2 is on and this URL speaks voizle. v1 sessions never open it.
     private readonly V2Client? _v2;
@@ -52,6 +53,9 @@ internal sealed class HackChatBridge
         _v2 = cfg.ProtocolV2 && _voizle ? V2Client.Open(cfg.BaseDir) : null;
         if (_v2 is not null)
             _v2.Consumers = new V2WakeQueue(cfg, _fileLock);
+        // Room-chat mirror into HIVEMIND. Off unless HIVEMIND_MESSAGE_MIRROR=1.
+        // Offer only enqueues; a failure must not affect this session.
+        _mirror = HivemindMirror.Open(_runtime, line => TryStderr("[chatbridge] " + line));
     }
 
     private sealed class Session
@@ -597,6 +601,17 @@ internal sealed class HackChatBridge
                 break;
 
             case "chat":
+                // The line is already in inbox.jsonl. Mirror after that accept.
+                // The helper hashes the channel and drops trip and join secrets.
+                try
+                {
+                    _mirror?.Offer(obj, _cfg.Channel);
+                }
+                catch (Exception ex)
+                {
+                    TryStderr($"[chatbridge] hivemind message mirror failed ({ex.GetType().Name})");
+                }
+
                 if (_mentions is not null && !MentionIngress.TryAccept(_mentions, RoomMessage.FromFrame(obj, _cfg.Channel), out var routeError))
                     LogEvent("err", new JsonObject { ["error"] = "mention route: " + routeError });
 

@@ -110,6 +110,8 @@ that client name the operation and the status code. They do not include the key,
 or the document body. If Appwrite is unset or the read fails, the same git/jsonl fetch runs.
 That fallback is not a production cutover: the static page still works with the variables unset.
 
+Room chat is not written to Appwrite unless `HIVEMIND_MESSAGE_MIRROR` is `1`. Unset or `0` does not create workspace or message documents, even when `APPWRITE_*` is set. The mirror is asynchronous: a failure is an operation name and a status code, and ChatBridge still delivers the chat. The stored message uses the room UUID as its document id, the sender nick, the text, and a workspace key that is the SHA-256 of the channel. The channel name, trip, and join password are not fields on that document. Leave the flag off until that mirror has been reviewed.
+
 ## Knowledge graph
 
 Alex's private knowledge graph (Voizle) is not in this repo. Never copy it into docs/status.json, the status page, a room board, or chat, and never add a Voizle repo to publish_repos. The room board (committed, public), the status page (fail-closed) and the knowledge graph (private, local) are separate and don't feed each other.

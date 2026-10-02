@@ -504,7 +504,7 @@ public class ChatBridgeV2Tests
             ProtocolV2 = true,
             Trip = "Ab12Cd",
             InboxOwnerEnv = "CHATBRIDGE_INBOX_OWNER",
-            Env = new Dictionary<string, string> { ["CHATBRIDGE_INBOX_OWNER"] = owner }
+            Env = name => name == "CHATBRIDGE_INBOX_OWNER" ? owner : null
         };
         fx.Script.Enqueue(Attempt.HoldBeforeJoin());
         var pushed = false;

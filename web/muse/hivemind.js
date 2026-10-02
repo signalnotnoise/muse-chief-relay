@@ -54,7 +54,28 @@ const SCHEMA = {
     flagged: string(16, false),
     body: string(65535, true),
   },
+  // Chat mirror (Fuse, 2026-10-02). key is a slug or sha256(channel), never the
+  // channel name. Document ids for workspaces stay on the s1_ scheme because a
+  // 64-hex key does not fit an Appwrite id. Message document ids are the room UUID.
+  workspaces: {
+    key: string(64, true),
+    name: string(128, false),
+    description: string(2048, false),
+    createdTs: integer(true),
+  },
+  messages: {
+    workspaceKey: string(64, true),
+    threadKey: string(64, true),
+    sender: string(64, true),
+    text: string(8192, true),
+    ts: integer(true),
+  },
 };
+
+const TEXT_MAX = 8192;
+const SENDER_MAX = 64;
+const TS_MAX = 100000000000;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 function own(object, key) {
   return Object.prototype.hasOwnProperty.call(object, key);
@@ -115,7 +136,24 @@ function validateDocument(collectionId, data) {
   }
   if (collectionId === "cards") return validateCard(data);
   if (collectionId === "knowledge") return validateNote(data);
+  if (collectionId === "workspaces") return validateWorkspace(data);
+  if (collectionId === "messages") return validateMessage(data);
   return "unknown";
+}
+
+function validateWorkspace(data) {
+  if (!isWorkspaceKey(data.key)) return "key";
+  if (data.createdTs < 0) return "type";
+  return "";
+}
+
+function validateMessage(data) {
+  if (!isWorkspaceKey(data.workspaceKey)) return "key";
+  if (!SLUG_RE.test(data.threadKey) || data.threadKey.length > 64) return "type";
+  if (!data.sender || data.sender.trim() !== data.sender || data.sender.length > SENDER_MAX) return "sender";
+  if (!data.text || data.text.length > TEXT_MAX) return "length";
+  if (data.ts < 0 || data.ts > TS_MAX) return "type";
+  return "";
 }
 
 function validateCard(data) {
@@ -286,6 +324,93 @@ function cardsToBoard(docs) {
   return { tasks: tasks, decisions: decisions, scratch: scratch, skipped: skipped };
 }
 
+function workspaceKeyFromChannel(channel) {
+  if (typeof channel !== "string") return "";
+  const trimmed = channel.trim();
+  if (!trimmed) return "";
+  return createHash("sha256").update(trimmed, "utf8").digest("hex");
+}
+
+function isWorkspaceKey(value) {
+  if (typeof value !== "string" || value.length > 64) return false;
+  if (HASH_RE.test(value)) return true;
+  return SLUG_RE.test(value);
+}
+
+function messageDocumentId(id) {
+  if (typeof id !== "string") return "";
+  const value = id.trim().toLowerCase();
+  return UUID_RE.test(value) ? value : "";
+}
+
+function failPlan(reason) {
+  return { ok: false, reason: reason };
+}
+
+// Build the workspace and message documents for one accepted room chat.
+// The channel string is hashed and then dropped. trip, password, and any
+// other extra fields are not copied. Text longer than 8192 is refused.
+function planRoomMirror(input, nowSeconds) {
+  if (!isObject(input)) return failPlan("type");
+  const documentId = messageDocumentId(input.id);
+  if (!documentId) return failPlan("id");
+
+  const channel = typeof input.channel === "string" ? input.channel.trim() : "";
+  let workspaceKey = "";
+  if (typeof input.workspaceKey === "string" && input.workspaceKey.length > 0) {
+    if (!isWorkspaceKey(input.workspaceKey)) return failPlan("key");
+    if (channel && input.workspaceKey === channel) return failPlan("key");
+    workspaceKey = input.workspaceKey;
+  } else if (channel) {
+    workspaceKey = workspaceKeyFromChannel(channel);
+    if (!workspaceKey || workspaceKey === channel) return failPlan("key");
+  } else {
+    return failPlan("key");
+  }
+
+  if (typeof input.sender !== "string") return failPlan("sender");
+  const sender = input.sender.trim();
+  if (!sender || sender.length > SENDER_MAX) return failPlan("sender");
+
+  if (typeof input.text !== "string" || input.text.length === 0) return failPlan("missing");
+  if (input.text.length > TEXT_MAX) return failPlan("length");
+
+  let threadKey = "room";
+  if (own(input, "threadKey") && input.threadKey != null && input.threadKey !== "") {
+    if (typeof input.threadKey !== "string" || !SLUG_RE.test(input.threadKey) || input.threadKey.length > 64) {
+      return failPlan("type");
+    }
+    threadKey = input.threadKey;
+  }
+
+  let ts;
+  if (own(input, "ts") && input.ts != null && input.ts !== "") {
+    if (!Number.isSafeInteger(input.ts) || input.ts < 0 || input.ts > TS_MAX) return failPlan("type");
+    ts = input.ts;
+  } else {
+    const now = Number.isSafeInteger(nowSeconds) ? nowSeconds : Math.floor(Date.now() / 1000);
+    if (!Number.isSafeInteger(now) || now < 0 || now > TS_MAX) return failPlan("type");
+    ts = now;
+  }
+
+  const workspace = { key: workspaceKey, createdTs: ts };
+  const message = {
+    workspaceKey: workspaceKey,
+    threadKey: threadKey,
+    sender: sender,
+    text: input.text,
+    ts: ts,
+  };
+  if (validateDocument("workspaces", workspace)) return failPlan("type");
+  if (validateDocument("messages", message)) return failPlan("type");
+  return {
+    ok: true,
+    documentId: documentId,
+    workspace: workspace,
+    message: message,
+  };
+}
+
 function noteFromDocument(doc) {
   if (!isObject(doc) || doc.visibility !== "public") return null;
   if (typeof doc.slug !== "string" || typeof doc.title !== "string" || typeof doc.summary !== "string" || typeof doc.body !== "string") {
@@ -311,6 +436,7 @@ function noteFromDocument(doc) {
 
 module.exports = {
   HASH_RE: HASH_RE,
+  TEXT_MAX: TEXT_MAX,
   SCHEMA: SCHEMA,
   documentId: documentId,
   emptyBoard: emptyBoard,
@@ -319,4 +445,8 @@ module.exports = {
   cardDataFromLine: cardDataFromLine,
   cardsToBoard: cardsToBoard,
   noteFromDocument: noteFromDocument,
+  workspaceKeyFromChannel: workspaceKeyFromChannel,
+  isWorkspaceKey: isWorkspaceKey,
+  messageDocumentId: messageDocumentId,
+  planRoomMirror: planRoomMirror,
 };
