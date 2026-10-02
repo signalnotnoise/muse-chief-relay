@@ -209,6 +209,139 @@ public class HivemindMirrorTests
         Assert.DoesNotContain("secret-marker", inbox);
     }
 
+    [Fact(Timeout = 15000)]
+    public void Burst_larger_than_the_queue_cap_is_mirrored_from_the_spill_file()
+    {
+        using var dir = new TempDir();
+        var spill = dir.File(NodeHivemindMirror.SpillFileName);
+        var logs = new LockedLines();
+        var seen = new LockedLines();
+        var total = NodeHivemindMirror.MaxQueued + 9;
+        var mirror = NodeHivemindMirror.StartForTest(logs.Add, spill, seen.Add, start: false);
+
+        for (var n = 1; n <= total; n++)
+            mirror.Offer(RoomChat(Id(n), "burst-text-marker"), "throwaway-test");
+
+        var spilled = File.ReadAllText(spill);
+        var spillLines = spilled.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+        Assert.Equal(9, spillLines.Length);
+        Assert.Contains(Id(NodeHivemindMirror.MaxQueued + 1), spilled);
+        Assert.Contains("burst-text-marker", spilled);
+        Assert.DoesNotContain("throwaway-test", spilled);
+        Assert.DoesNotContain(Id(1), spilled);
+        Assert.Equal(9, logs.Count("hivemind message mirror deferred (queue)"));
+        Assert.Equal(0, logs.Count("hivemind message mirror refused (queue)"));
+        Assert.DoesNotContain("burst-text-marker", logs.Text());
+        Assert.DoesNotContain("throwaway-test", logs.Text());
+
+        mirror.Start();
+        Assert.True(WaitUntil(() => seen.Count() == total && !File.Exists(spill)));
+        for (var n = 1; n <= total; n++)
+            Assert.Contains(Id(n), seen.Text());
+        Assert.Equal(0, logs.Count("hivemind message mirror refused (queue)"));
+        Assert.DoesNotContain("burst-text-marker", logs.Text());
+    }
+
+    [Fact(Timeout = 15000)]
+    public void Burst_while_the_helper_is_busy_still_mirrors_past_the_old_cap()
+    {
+        using var dir = new TempDir();
+        var spill = dir.File(NodeHivemindMirror.SpillFileName);
+        var logs = new LockedLines();
+        var seen = new LockedLines();
+        var entered = new ManualResetEventSlim(false);
+        var release = new ManualResetEventSlim(false);
+        var running = 0;
+        var overflow = 9;
+        var total = 1 + NodeHivemindMirror.MaxQueued + overflow;
+        var mirror = NodeHivemindMirror.StartForTest(logs.Add, spill, json =>
+        {
+            seen.Add(json);
+            if (Interlocked.Increment(ref running) == 1)
+            {
+                entered.Set();
+                release.Wait();
+            }
+        });
+
+        try
+        {
+            mirror.Offer(RoomChat(Id(1), "burst-text-marker"), "throwaway-test");
+            Assert.True(entered.Wait(5000));
+            for (var n = 2; n <= total; n++)
+                mirror.Offer(RoomChat(Id(n), "burst-text-marker"), "throwaway-test");
+
+            var spilled = File.ReadAllText(spill);
+            Assert.Equal(overflow, spilled.Split('\n', StringSplitOptions.RemoveEmptyEntries).Length);
+            Assert.Equal(overflow, logs.Count("hivemind message mirror deferred (queue)"));
+            Assert.Equal(0, logs.Count("hivemind message mirror refused (queue)"));
+            Assert.DoesNotContain("burst-text-marker", logs.Text());
+            Assert.DoesNotContain("throwaway-test", logs.Text());
+
+            release.Set();
+            Assert.True(WaitUntil(() => seen.Count() == total && !File.Exists(spill)));
+            for (var n = 1; n <= total; n++)
+                Assert.Contains(Id(n), seen.Text());
+            Assert.DoesNotContain("refused (type)", logs.Text());
+        }
+        finally
+        {
+            release.Set();
+        }
+    }
+
+    [Fact(Timeout = 15000)]
+    public void A_spill_that_cannot_be_written_is_refused_without_throwing()
+    {
+        using var dir = new TempDir();
+        var blocker = dir.File("not-a-directory");
+        File.WriteAllText(blocker, "x");
+        var spill = Path.Combine(blocker, NodeHivemindMirror.SpillFileName);
+        var logs = new LockedLines();
+        var seen = new LockedLines();
+        var extra = 3;
+        var mirror = NodeHivemindMirror.StartForTest(logs.Add, spill, seen.Add, start: false);
+
+        for (var n = 1; n <= NodeHivemindMirror.MaxQueued + extra; n++)
+            mirror.Offer(RoomChat(Id(n), "burst-text-marker"), "throwaway-test");
+
+        Assert.Equal(extra, logs.Count("hivemind message mirror refused (queue)"));
+        Assert.Equal(0, logs.Count("hivemind message mirror deferred (queue)"));
+        Assert.DoesNotContain("burst-text-marker", logs.Text());
+        Assert.DoesNotContain("throwaway-test", logs.Text());
+        Assert.False(File.Exists(spill));
+
+        mirror.Start();
+        Assert.True(WaitUntil(() => seen.Count() == NodeHivemindMirror.MaxQueued));
+        Assert.Contains(Id(1), seen.Text());
+        Assert.Contains(Id(NodeHivemindMirror.MaxQueued), seen.Text());
+        Assert.DoesNotContain(Id(NodeHivemindMirror.MaxQueued + 1), seen.Text());
+    }
+
+    [Fact(Timeout = 15000)]
+    public void Spill_file_from_a_previous_process_is_drained_and_a_bad_line_is_skipped()
+    {
+        using var dir = new TempDir();
+        var spill = dir.File(NodeHivemindMirror.SpillFileName);
+        var first = MirrorPayload.Build(RoomChat(Id(1), "burst-text-marker"), "throwaway-test", 1700000000);
+        var second = MirrorPayload.Build(RoomChat(Id(2), "burst-text-marker"), "throwaway-test", 1700000000);
+        Assert.True(first.Ok);
+        Assert.True(second.Ok);
+        File.WriteAllText(spill, "corrupt-spill-line\n" + first.Json + "\n" + second.Json + "\n");
+
+        var logs = new LockedLines();
+        var seen = new LockedLines();
+        _ = NodeHivemindMirror.StartForTest(logs.Add, spill, seen.Add);
+
+        Assert.True(WaitUntil(() => seen.Count() == 2 && !File.Exists(spill)));
+        Assert.Contains(Id(1), seen.Text());
+        Assert.Contains(Id(2), seen.Text());
+        Assert.Equal(1, logs.Count("hivemind message mirror refused (json)"));
+        Assert.DoesNotContain("corrupt-spill-line", logs.Text());
+        Assert.DoesNotContain("burst-text-marker", logs.Text());
+        Assert.DoesNotContain("throwaway-test", logs.Text());
+    }
+
     private static async Task DriveChat(RelayFixture fx, string text, Func<bool> done)
     {
         var sent = 0;
@@ -262,5 +395,55 @@ public class HivemindMirrorTests
     {
         var path = Path.Combine(fx.Dir.Path, "inbox.jsonl");
         return File.Exists(path) && File.ReadAllText(path).Contains(needle, StringComparison.Ordinal);
+    }
+
+    private static string Id(int n) => $"00000000-0000-4000-8000-{n:x12}";
+
+    private static JsonObject RoomChat(string id, string text) =>
+        JsonNode.Parse($$"""
+            {"cmd":"chat","nick":"Ada","text":"{{text}}","id":"{{id}}","time":1700000000,"channel":"throwaway-test"}
+            """)!.AsObject();
+
+    private static bool WaitUntil(Func<bool> done, int ms = 5000)
+    {
+        var until = Environment.TickCount64 + ms;
+        while (Environment.TickCount64 < until)
+        {
+            if (done())
+                return true;
+            Thread.Sleep(10);
+        }
+
+        return done();
+    }
+
+    private sealed class LockedLines
+    {
+        private readonly object _gate = new();
+        private readonly List<string> _lines = new();
+
+        public void Add(string line)
+        {
+            lock (_gate)
+                _lines.Add(line);
+        }
+
+        public int Count()
+        {
+            lock (_gate)
+                return _lines.Count;
+        }
+
+        public int Count(string exact)
+        {
+            lock (_gate)
+                return _lines.Count(line => line == exact);
+        }
+
+        public string Text()
+        {
+            lock (_gate)
+                return string.Join("\n", _lines);
+        }
     }
 }
