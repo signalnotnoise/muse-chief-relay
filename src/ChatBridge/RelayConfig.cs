@@ -17,8 +17,30 @@ internal sealed class RelayConfig
     public string? Pass { get; set; }
 
     // Optional public trip code for voizle-text-relay (Ab12Cd or !Ab12Cd). Not a password.
-    // Sent only on a v1 join, as ! plus the six-character code. Safe to log.
+    // Sent only on a join, as ! plus the six-character code. Safe to log. It is identity
+    // evidence, not inbox ownership.
     public string? Trip { get; set; }
+
+    /// <summary>
+    /// Opt in to the ChatBridge v2 client (contract §11 deployed dialect). Default false:
+    /// the process speaks v1, including when the server advertises durable delivery.
+    /// Does not enable relay dual-write or any live cutover flag.
+    /// </summary>
+    [JsonPropertyName("protocol_v2")]
+    public bool ProtocolV2 { get; set; }
+
+    /// <summary>
+    /// Name of an environment variable that holds the §11 inbox owner secret.
+    /// The secret is presented as <c>pass</c> on a v2 join and is never written to config,
+    /// logs, or docs. Empty or omitted: the v2 join carries no owner secret.
+    /// A public <see cref="Trip"/> is not this secret.
+    /// </summary>
+    [JsonPropertyName("inbox_owner_env")]
+    public string? InboxOwnerEnv { get; set; }
+
+    /// <summary>Resolved from <see cref="InboxOwnerEnv"/> at load. Never logged.</summary>
+    [JsonIgnore]
+    public string? InboxOwnerSecret { get; set; }
 
     /// <summary>
     /// True when <see cref="Url"/> is not hack.chat. Those sockets speak voizle-text-relay v1
@@ -155,6 +177,11 @@ internal sealed class RelayConfig
 
         cfg.AutoAck ??= new AutoAckConfig();
         cfg.AutoAck.Validate(path);
+        if (!string.IsNullOrWhiteSpace(cfg.InboxOwnerEnv))
+        {
+            var secret = getEnv(cfg.InboxOwnerEnv);
+            cfg.InboxOwnerSecret = string.IsNullOrEmpty(secret) ? null : secret;
+        }
         cfg.Hook?.Validate(path);
         cfg.MentionRouting = cfg.Mentions ?? new MentionConfig();
         cfg.Roster = AgentDirectory.Parse(path, cfg.Agents, cfg.MentionRouting);

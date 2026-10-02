@@ -116,6 +116,9 @@ internal static class LogRedaction
         var copy = (JsonObject)obj.DeepClone();
         if (cmd == "session" && copy.ContainsKey("token"))
             copy["token"] = Redacted;
+        // Owner material is never an inbox line. `binding` is the designed §4 token
+        // (not issued by the deployed server). `pass` / `password` are the §11 owner secret.
+        RedactOwnerFields(copy);
         return copy;
     }
 
@@ -123,8 +126,8 @@ internal static class LogRedaction
     public static JsonNode Outbound(JsonNode payload)
     {
         var copy = payload.DeepClone();
-        if (copy is JsonObject o && o.ContainsKey("pass"))
-            o["pass"] = Redacted;
+        if (copy is JsonObject o)
+            RedactOwnerFields(o);
         return copy;
     }
 
@@ -135,6 +138,16 @@ internal static class LogRedaction
     /// </summary>
     public static string DroppedOutboxLine(string line) =>
         $"outbox: dropped malformed line ({line.Trim().Length} chars)";
+
+    /// <summary>Replace owner-secret fields in place. Does not touch public trips.</summary>
+    public static void RedactOwnerFields(JsonObject obj)
+    {
+        foreach (var key in new[] { "pass", "password", "binding" })
+        {
+            if (obj.ContainsKey(key))
+                obj[key] = Redacted;
+        }
+    }
 }
 
 internal static class OutboxPayload

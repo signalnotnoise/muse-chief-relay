@@ -1,0 +1,209 @@
+{
+  "source": "docs/chatbridge-v2-contract.md §11 (deployed) and §§2–9 (designed, future work)",
+  "captured": "2026-10-02",
+  "rule": "Deployed frames are the only ones this client sends or completes on. Unresolved frames are captured from the contract so they are not reinvented. Placeholder angle-bracket values are not secrets, trips, or channel names.",
+  "deployed": [
+    {
+      "id": "hello",
+      "evidence": "§11.2 hello is always v:1 and, with the durable flag on, adds durable and durableVersion 2. type is how this client already recognizes a v1 hello.",
+      "frame": {
+        "protocol": "voizle-text-relay",
+        "v": 1,
+        "type": "hello",
+        "durable": true,
+        "durableVersion": 2
+      }
+    },
+    {
+      "id": "join",
+      "evidence": "§11.2 client opts into v2 per-join. Ownership is a client-chosen secret in pass (or password, or nick#secret). This client sends pass only, never nick#secret, so the secret is not in the logged nick.",
+      "frame": {
+        "v": 2,
+        "type": "join",
+        "room": "<room>",
+        "nick": "<nick>",
+        "trip": "!<code>",
+        "pass": "<owner-secret>"
+      }
+    },
+    {
+      "id": "welcome",
+      "evidence": "§11.3 welcome sets replay to an empty array and inboxAuth true. Inbox count field names are not in the evidence.",
+      "unresolved": ["inbox count field names", "whether v is present"],
+      "frame": {
+        "type": "welcome",
+        "replay": [],
+        "inboxAuth": true
+      }
+    },
+    {
+      "id": "delivery",
+      "evidence": "§11.3 backlog rows stream as delivery frames. Ack requires deliveryId and leaseGeneration. Other body fields are not pinned.",
+      "unresolved": ["text", "nick", "trip", "id", "seq", "attempt", "state"],
+      "frame": {
+        "type": "delivery",
+        "deliveryId": "<delivery-id>",
+        "leaseGeneration": 1
+      }
+    },
+    {
+      "id": "pull",
+      "evidence": "§11.3 the client pages with pull. No cursor. The limit field name is not in the evidence, so the frame is only v and type.",
+      "unresolved": ["limit field name", "agent"],
+      "frame": {
+        "v": 2,
+        "type": "pull"
+      }
+    },
+    {
+      "id": "pull_result",
+      "evidence": "§11.3 pull_result reports count, queued, delivered, dead. Page again while queued > 0.",
+      "frame": {
+        "type": "pull_result",
+        "count": 1,
+        "queued": 1,
+        "delivered": 1,
+        "dead": 0
+      }
+    },
+    {
+      "id": "ack",
+      "evidence": "§11.2 ack is v 2, type ack, deliveryId, leaseGeneration.",
+      "frame": {
+        "v": 2,
+        "type": "ack",
+        "deliveryId": "<delivery-id>",
+        "leaseGeneration": 1
+      }
+    },
+    {
+      "id": "ack_result_processed",
+      "evidence": "§11.2 ack_result state processed is completion.",
+      "frame": {
+        "type": "ack_result",
+        "state": "processed"
+      }
+    },
+    {
+      "id": "ack_result_idempotent",
+      "evidence": "§11.2 same-generation re-ack answers idempotent true.",
+      "frame": {
+        "type": "ack_result",
+        "idempotent": true
+      }
+    },
+    {
+      "id": "accepted",
+      "evidence": "§11.3 accepted carries messageId and ingressId and means stored, not adapter-processed.",
+      "frame": {
+        "type": "accepted",
+        "messageId": "<message-id>",
+        "ingressId": "<ingress-id>"
+      }
+    },
+    {
+      "id": "dead",
+      "evidence": "§11.3 a connected v2 socket is told type dead. deliveryId on that frame is not pinned.",
+      "unresolved": ["deliveryId", "attempt"],
+      "frame": {
+        "type": "dead"
+      }
+    },
+    {
+      "id": "lease_fenced",
+      "evidence": "§11.3 older generation is lease_fenced. The envelope is an error code in this fixture; ack_result carrying the same code is also accepted.",
+      "frame": {
+        "v": 2,
+        "type": "error",
+        "code": "lease_fenced"
+      }
+    },
+    {
+      "id": "lease_expired",
+      "evidence": "§11.3 expired lease is lease_expired.",
+      "frame": {
+        "v": 2,
+        "type": "error",
+        "code": "lease_expired"
+      }
+    }
+  ],
+  "unresolved": [
+    {
+      "id": "designed-hello",
+      "why": "§11.2: no versions array exists in server src. Do not pin a designed session from this hello alone.",
+      "frame": {
+        "protocol": "voizle-text-relay",
+        "v": 1,
+        "type": "hello",
+        "versions": [2, 1],
+        "v2": { "features": ["inbox", "lease", "resume"] }
+      }
+    },
+    {
+      "id": "designed-bind",
+      "why": "§11.2: no bind frame. Ownership is the owner secret at join.",
+      "frame": { "v": 2, "type": "bind", "agent": "<agent-id>" }
+    },
+    {
+      "id": "designed-bound",
+      "why": "§11.2: no token is issued. binding must not be stored or treated as authorization. Trips stay evidence.",
+      "frame": {
+        "v": 2,
+        "type": "bound",
+        "agent": "<agent-id>",
+        "depth": 0,
+        "binding": "<opaque-token>"
+      }
+    },
+    {
+      "id": "designed-chat",
+      "why": "§11.2: client_msg_id is not a server idempotency key. A retry after a missed accepted creates a second message. The id is local only.",
+      "frame": {
+        "v": 2,
+        "type": "chat",
+        "text": "<text>",
+        "client_msg_id": "<uuid>"
+      }
+    },
+    {
+      "id": "designed-leased",
+      "why": "§11.2: no leased batch and no lease id. A lease is deliveryId plus leaseGeneration.",
+      "frame": {
+        "v": 2,
+        "type": "leased",
+        "agent": "<agent-id>",
+        "lease": "<lease-id>",
+        "expires": 0,
+        "messages": []
+      }
+    },
+    {
+      "id": "designed-ack",
+      "why": "§11.2: ack is deliveryId plus leaseGeneration, not lease plus ids.",
+      "frame": {
+        "v": 2,
+        "type": "ack",
+        "agent": "<agent-id>",
+        "lease": "<lease-id>",
+        "ids": ["<id>"]
+      }
+    },
+    {
+      "id": "designed-acked",
+      "why": "§11.2: no acked-count frame. Completion is ack_result.",
+      "frame": {
+        "v": 2,
+        "type": "acked",
+        "agent": "<agent-id>",
+        "lease": "<lease-id>",
+        "count": 1
+      }
+    },
+    {
+      "id": "designed-resume",
+      "why": "§11.2: no since_seq resume. Paging is pull while pull_result.queued > 0.",
+      "frame": { "v": 2, "type": "resume", "since_seq": 0 }
+    }
+  ]
+}

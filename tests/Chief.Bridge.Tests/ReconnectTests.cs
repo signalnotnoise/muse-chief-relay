@@ -200,6 +200,9 @@ internal sealed class RelayFixture : IAsyncDisposable
     public int CancelAfterCreates { get; set; }
     public Action<string>? Stdout { get; set; }
     public double? ReceiveIdleSeconds { get; init; }
+    public bool ProtocolV2 { get; init; }
+    public string? InboxOwnerEnv { get; init; }
+    public IReadOnlyDictionary<string, string>? Env { get; init; }
     public Func<DateTimeOffset>? UtcNow { get; set; }
     public Func<TimeSpan, CancellationToken, Task>? IdleDelay { get; set; }
     public Action? OnBackoff { get; set; }
@@ -329,8 +332,13 @@ internal sealed class RelayFixture : IAsyncDisposable
         }
         if (ReceiveIdleSeconds is { } idle)
             doc["receive_idle_s"] = idle;
+        if (ProtocolV2)
+            doc["protocol_v2"] = true;
+        if (!string.IsNullOrEmpty(InboxOwnerEnv))
+            doc["inbox_owner_env"] = InboxOwnerEnv;
         File.WriteAllText(path, JsonSerializer.Serialize(doc));
-        return RelayConfig.Load(path, false, Dir.Path, _ => null);
+        return RelayConfig.Load(path, false, Dir.Path, name =>
+            Env is not null && Env.TryGetValue(name, out var value) ? value : null);
     }
 
     private static bool StateFlag(string path, string name)

@@ -7,6 +7,7 @@
   "trip": "",
   "base": ".",
   "receive_idle_s": 300,
+  "protocol_v2": false,
   "publish_repos": [
     "signalnotnoise/muse-chief-relay"
   ],

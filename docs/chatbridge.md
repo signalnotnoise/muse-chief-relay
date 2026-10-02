@@ -142,3 +142,7 @@ The hop that counts is the farther of the line's own `"hop"` and the deepest fan
 ## Room and side chats
 
 One agent id can be used in the room and in a side chat. Histories are different files, and room reads do not open `side/`. `ComposeRoomReply` returns the room text it was given and does not read side files. Copying a side scope into the room is refused. Nothing in the router writes side text into `inbox.jsonl`, `room.jsonl`, or a wake object.
+
+## v2 client (draft, off by default)
+
+`protocol_v2` defaults to false. The live path is still v1, including when a hello carries `durable`. The opt-in client follows `docs/chatbridge-v2-contract.md` §11 (deployed ack, generation, and outbound rules). Designed §§2–9 frames are fixtures only. See `docs/chatbridge-v2-client.md`.
