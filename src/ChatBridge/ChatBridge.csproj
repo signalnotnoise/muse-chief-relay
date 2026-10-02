@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>ChatBridge</RootNamespace>
+    <AssemblyName>ChatBridge</AssemblyName>
+    <!-- Installable as a .NET tool: `dotnet tool install` puts `chat-bridge` on the PATH.
+         The legacy package in src/Chief.Bridge still installs `chief-bridge`. -->
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>chat-bridge</ToolCommandName>
+    <PackageId>ChatBridge</PackageId>
+    <Version>0.2.0</Version>
+    <Authors>signalnotnoise</Authors>
+    <Description>Agent-agnostic room relay bridge. Transport and mention routing only; model adapters consume the durable inbox.</Description>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <RepositoryUrl>https://github.com/signalnotnoise/muse-chief-relay</RepositoryUrl>
+    <PackageTags>relay;bridge;agents;chat</PackageTags>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Chief.Bridge.Tests" />
+  </ItemGroup>
+
+</Project>

@@ -5,20 +5,24 @@
     <TargetFramework>net8.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <!-- Installable as a .NET tool: `dotnet tool install` puts `chief-bridge` on the PATH. -->
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <RootNamespace>ChatBridge</RootNamespace>
+    <AssemblyName>Chief.Bridge</AssemblyName>
+    <!-- Compatibility package. Same sources as src/ChatBridge.
+         Keeps Chief.Bridge.dll and the chief-bridge tool command working. -->
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>chief-bridge</ToolCommandName>
     <PackageId>Chief.Bridge</PackageId>
-    <Version>0.1.0</Version>
+    <Version>0.2.0</Version>
     <Authors>signalnotnoise</Authors>
-    <Description>Persistent hack.chat relay bridge (WSS client) with inbox watcher CLI for agent collaboration.</Description>
+    <Description>Compatibility launcher for ChatBridge. Same program as src/ChatBridge.</Description>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <RepositoryUrl>https://github.com/signalnotnoise/muse-chief-relay</RepositoryUrl>
-    <PackageTags>hack.chat;relay;bridge;agents</PackageTags>
+    <PackageTags>relay;bridge;agents;chat</PackageTags>
   </PropertyGroup>
 
   <ItemGroup>
-    <InternalsVisibleTo Include="Chief.Bridge.Tests" />
+    <Compile Include="..\ChatBridge\*.cs" />
   </ItemGroup>
 
 </Project>

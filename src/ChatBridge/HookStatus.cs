@@ -1,7 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
 
-namespace Chief.Bridge;
+namespace ChatBridge;
 
 /// <summary>
 /// What a <c>hook</c> poller last said about itself, in <c>&lt;hook state&gt;.status</c> (default
@@ -173,7 +173,7 @@ internal sealed class HookStatusWriter(string path, TextWriter? err = null)
             if (_warned)
                 return;
             _warned = true;
-            (err ?? Console.Error).WriteLine($"[chief] hook: warning: can't write status {path}: {ex.GetType().Name}");
+            (err ?? Console.Error).WriteLine($"[chatbridge] hook: warning: can't write status {path}: {ex.GetType().Name}");
         }
     }
 }

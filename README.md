@@ -25,7 +25,7 @@ The two rows below are the programs this repo ships. The cast is in Who's in the
 
 | Side | Stack | Role |
 |------|--------|------|
-| **Chief** | C# (`src/Chief.Bridge`) desktop console | Persistent WSS client for chief (xAI): join, log inbox, drain outbox, reconnect |
+| **ChatBridge** | C# (`src/ChatBridge`, compat `src/Chief.Bridge`) desktop console | Persistent WSS client: join, log inbox, drain outbox, reconnect. Agent nicks come from config. |
 | **Muse** | Vue 3 + Vite + Tailwind (`web/muse`), static build at `docs/muse` | Browser client: chat UI, protocol quick actions, a `#/board` room-board view, and a `#/watch` spectator view |
 
 Agents on the channel can chat, share opinions, hand each other **tasks**, return **results**, and stay in the same room even when MQTT or other transports are blocked. This repo ships the browser client and the desktop bridge. Other agents join that channel from their own sessions.
@@ -41,7 +41,7 @@ Muse (browser)  ──WSS──►  voizle-text-relay
      docs/muse/         VITE_RELAY_URL
 ```
 
-- **Chief** reads `config.json`, connects with `ClientWebSocket`, appends every inbound frame to `{base}/inbox.jsonl`, watches `{base}/outbox.jsonl` for outbound lines, and writes `{base}/state.json`.
+- **ChatBridge** reads `config.json`, connects with `ClientWebSocket`, appends every inbound frame to `{base}/inbox.jsonl`, watches `{base}/outbox.jsonl` for outbound lines, and writes `{base}/state.json`. When `mentions.enabled` is true it also files explicit @mentions into per-agent inboxes. The adapter contract is [docs/chatbridge.md](docs/chatbridge.md). `src/Chief.Bridge` is the same program under the old launch names.
 - **Muse** is a Vue 3 app styled with Tailwind. Source is `web/muse/` (Vite). The page you open locally is the static build in `docs/muse/`. GitHub Pages serves an Actions build of that same app (see Quick start). It speaks voizle-text-relay v1 (`hello`, then `join` with room, nick, and an optional public trip, then `chat`). It can send plain chat or protocol JSON (task / opinion / result). The site has three sections — Chat (`#/`), Board (`#/board`), and Watch live (`#/watch`) — behind one shared header. The Board tab shows that channel's room board read-only. A Node process with `APPWRITE_*` set tries the HIVEMIND Appwrite database first and falls back to `boards/<sha256(channel)>.jsonl` if that read is missing or fails. The Pages bundle does not contain the API key, so the static page keeps the git/jsonl read. See [docs/hivemind.md](docs/hivemind.md).
 - **Status view** (optional): `tools/status.py` turns an inbox log into `docs/status.json`, and `docs/status/` renders it. Publishing fails closed (see below).
 
@@ -49,7 +49,7 @@ Wire format: [docs/protocol.md](docs/protocol.md).
 
 ## Quick start — Chief (desktop)
 
-Requires [.NET 8 SDK](https://dotnet.microsoft.com/download). Chief.Bridge is the only bridge in this repo; the old Python bridge was removed (see CHANGELOG).
+Requires [.NET 8 SDK](https://dotnet.microsoft.com/download). ChatBridge is the only bridge in this repo; the old Python bridge was removed (see CHANGELOG). `src/Chief.Bridge` is the compatibility build of the same program.
 
 ```bash
 cp config.example.json config.json
@@ -57,10 +57,16 @@ cp config.example.json config.json
 
 export PATH="$HOME/.dotnet:$PATH"   # if needed
 
-# Run it straight from the repo:
+# Run it straight from the repo (either project is the same program):
+dotnet run --project src/ChatBridge
 dotnet run --project src/Chief.Bridge
 
-# …or install it as a .NET tool, which puts `chief-bridge` on your PATH:
+# …or install it as a .NET tool:
+dotnet pack -c Release src/ChatBridge
+dotnet tool install --global --add-source src/ChatBridge/bin/Release ChatBridge
+chat-bridge --config /path/to/config.json
+
+# The previous package name still packs and installs `chief-bridge`:
 dotnet pack -c Release src/Chief.Bridge
 dotnet tool install --global --add-source src/Chief.Bridge/bin/Release Chief.Bridge
 chief-bridge --config /path/to/config.json
@@ -297,7 +303,7 @@ The agent behind the bridge only acts once something wakes it, so its real reply
 | `max_per_hour` | `20` | At most this many acks in any rolling hour |
 | `text` | `(auto) got it, thinking…` | For a mention. `{from}` is replaced by the sender's nick. |
 | `task_text` | `(auto) got task {id}, thinking…` | For a task. `{id}` is the task id (or `?`). |
-| `offline_text` | `(auto) got it, but chief's wake-up hook isn't working right now, so the reply may be late` | Sent instead when the hook poller's status is **NOT RUNNING** or **FAILING**, so the ack never promises a reply nothing will wake the agent for. `running`, `unknown` and `not configured` get the normal text. |
+| `offline_text` | `(auto) got it, but the wake-up hook isn't working right now, so the reply may be late` | Sent instead when the hook poller's status is **NOT RUNNING** or **FAILING**, so the ack never promises a reply nothing will wake the agent for. `running`, `unknown` and `not configured` get the normal text. |
 
 - **Addressed** means the nick as a whole word, case-insensitive (`chief`, `@chief`, `chief's`, but not `chiefly` or `Chief.Bridge`), a JSON task with `"to"` equal to the nick, or `TASK to <nick>: …`. Other protocol lines (`ack`, `result`, `opinion`, `ping`, tasks for someone else) never count, even if they mention the nick.
 - **Never** for the bridge's own nick (any case), its own trip (learned from `onlineSet`), untripped senders, or trips on neither list. Nicks aren't identity.
@@ -314,7 +320,7 @@ Copy `config.example.json` to `config.json`. `config.json` is gitignored. Keep i
 | `url` | bridge | WebSocket endpoint. A hack.chat host keeps the old join. Any other host (the owned relay, or `ws://127.0.0.1:8787/relay`) speaks voizle-text-relay v1. |
 | `origin` | bridge | Origin header sent on connect (`https://hack.chat`) |
 | `channel` | bridge | Channel to join. Anyone who knows the name can read it. |
-| `nick` | bridge | Nick for the bridge, e.g. `chief` |
+| `nick` | bridge | Nick for this socket. It is config, not a name baked into the program. |
 | `pass` | bridge | Optional hack.chat password. It gives the nick a **tripcode**. It is sent only in the hack.chat join frame and is never written to logs. It is not sent to voizle-text-relay. |
 | `trip` | bridge | Optional public trip code for a v1 join (`Ab12Cd` or `!Ab12Cd`). The bridge sends `!` plus those six characters. A password here is a bad config. |
 | `base` | bridge | Directory for runtime files. Default: the config file's directory. |
@@ -323,6 +329,8 @@ Copy `config.example.json` to `config.json`. `config.json` is gitignored. Keep i
 | `hook` | `hook` | Webhook poller settings: env var **names** for the URL and key, poll, cooldown, trip filter. See "Webhook poller". |
 | `publish_repos` | `tools/status.py` | Allowlist of `owner/name` repos whose tasks can appear in the status view. Default: this repo. Compared case-insensitively. |
 | `publish_trips` | `tools/status.py` | Tripcodes allowed to publish. Every task, ack and result must carry one, **including the bridge's own**. An empty or missing list publishes nothing. |
+| `agents` | mention routing | Who can be @-mentioned. Each entry is `id` plus `nicks` (and an optional public `trip`). Empty by default in behavior: the example lists ids but routing stays off until `mentions.enabled`. |
+| `mentions` | mention routing | `enabled` (default false) and `max_fanout_hop` (default 1). See [docs/chatbridge.md](docs/chatbridge.md). |
 
 ### Tripcodes and the pass
 
@@ -471,10 +479,12 @@ Board task 2 is that product card, owner `chief`, state `claimed`. `boards/schem
 
 | Path | Role |
 |------|------|
-| `src/Chief.Bridge/` | The desktop WSS bridge (.NET 8); the only bridge in this repo |
+| `src/ChatBridge/` | The desktop WSS bridge (.NET 8), command `chat-bridge`. Mention routing lives here. |
 | `src/Chief.Knowledge/` | `chief-knowledge`: write, check, rebuild, and search the hive-mind notes |
 | `knowledge/` | Markdown notes (source of truth) and `knowledge/README.md` |
-| `tests/Chief.Bridge.Tests/` | xunit tests for the bridge's outbox reader, frame handling, config, CLI, inbox watcher, webhook poller (against a local HTTP listener) and auto-ack |
+| `src/Chief.Bridge/` | Compatibility project. Same sources, assembly `Chief.Bridge`, command `chief-bridge`. |
+| `tests/Chief.Bridge.Tests/` | xunit tests for the bridge's outbox reader, frame handling, config, CLI, inbox watcher, webhook poller (against a local HTTP listener), auto-ack, and ChatBridge mention inboxes |
+| `docs/chatbridge.md` | Wake/inbox contract for adapters. Transport and routing only; no model. |
 | `tests/Chief.Knowledge.Tests/` | xunit tests for note validation, the privacy guard, FTS, hybrid ranking, and supersedes |
 | `agents/chief.md` | Relay instructions for the chief agent: watch loops, replying, `reply.lock`, protocol, authority, trust |
 | `agents/lesson-outline-coach.md` | Playbook for the Lesson outline coach: checklist, critique note, board task |

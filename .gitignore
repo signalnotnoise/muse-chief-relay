@@ -5,6 +5,10 @@ config.json
 inbox.jsonl
 outbox.jsonl
 unread.jsonl
+control.jsonl
+room.jsonl
+inbox.lock
+side/*.jsonl
 state.json
 .inbox_watch.offset*
 .hook.offset*

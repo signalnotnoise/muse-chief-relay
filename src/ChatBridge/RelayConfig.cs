@@ -1,7 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
-namespace Chief.Bridge;
+namespace ChatBridge;
 
 internal sealed class ConfigException(string message) : Exception(message);
 
@@ -30,8 +30,14 @@ internal sealed class RelayConfig
     // Optional instant acknowledgement from the bridge when a trusted trip addresses it. Off by default.
     [JsonPropertyName("auto_ack")] public AutoAckConfig AutoAck { get; set; } = new();
 
-    // Optional webhook poller settings for `Chief.Bridge hook`. Null: not configured.
+    // Optional webhook poller settings for `hook`. Null: not configured.
     public HookConfig? Hook { get; set; }
+
+    /// <summary>Agents this process routes mentions to. Empty or omitted: no per-agent inboxes. Never implied.</summary>
+    public List<AgentConfig>? Agents { get; set; }
+
+    /// <summary>Mention routing. Off unless <c>enabled</c> is true, so existing inbox.jsonl bridges stay as they are.</summary>
+    public MentionConfig? Mentions { get; set; }
 
     /// <summary>Default <see cref="ReceiveIdleSeconds"/>: end a joined session after 300s with no inbound frame.</summary>
     public const double DefaultReceiveIdleSeconds = 300;
@@ -68,12 +74,14 @@ internal sealed class RelayConfig
     [JsonIgnore] public string BaseDir { get; set; } = ".";
     [JsonIgnore] public string ConfigPath { get; set; } = "";
     [JsonIgnore] public string Source { get; set; } = "";
+    [JsonIgnore] public AgentDirectory Roster { get; set; } = AgentDirectory.Empty;
+    [JsonIgnore] public MentionConfig MentionRouting { get; set; } = new();
 
     /// <summary>
     /// Resolve and load the config.
     /// <list type="number">
     /// <item><paramref name="explicitPath"/> (--config or the bridge's first argument)</item>
-    /// <item>MUSE_RELAY_CONFIG</item>
+    /// <item><see cref="ProductInfo.LegacyConfigEnv"/>, then <see cref="ProductInfo.ConfigEnv"/></item>
     /// <item>./config.json in the working directory</item>
     /// <item>./config.example.json, only when <paramref name="allowExampleFallback"/> (the bridge run)</item>
     /// </list>
@@ -92,7 +100,7 @@ internal sealed class RelayConfig
 
         string path;
         string source;
-        var env = getEnv("MUSE_RELAY_CONFIG");
+        var (envName, env) = FirstEnv(getEnv, ProductInfo.LegacyConfigEnv, ProductInfo.ConfigEnv);
         if (!string.IsNullOrWhiteSpace(explicitPath))
         {
             path = Path.GetFullPath(explicitPath, cwd);
@@ -103,9 +111,9 @@ internal sealed class RelayConfig
         else if (!string.IsNullOrWhiteSpace(env))
         {
             path = Path.GetFullPath(env, cwd);
-            source = "MUSE_RELAY_CONFIG";
+            source = envName ?? ProductInfo.LegacyConfigEnv;
             if (!File.Exists(path))
-                throw new ConfigException($"config not found: {path} (from MUSE_RELAY_CONFIG)");
+                throw new ConfigException($"config not found: {path} (from {source})");
         }
         else if (File.Exists(Path.Combine(cwd, "config.json")))
         {
@@ -116,13 +124,13 @@ internal sealed class RelayConfig
         {
             path = Path.Combine(cwd, "config.example.json");
             source = "./config.example.json";
-            Console.Error.WriteLine("[chief] warning: no config.json; running on config.example.json");
+            Console.Error.WriteLine("[chatbridge] warning: no config.json; running on config.example.json");
         }
         else
         {
             throw new ConfigException(allowExampleFallback
-                ? "no config found: pass a path or --config, set MUSE_RELAY_CONFIG, or create ./config.json"
-                : "no config found: pass --config <path>, set MUSE_RELAY_CONFIG, or run from the directory that holds config.json");
+                ? "no config found: pass a path or --config, set MUSE_RELAY_CONFIG or CHATBRIDGE_CONFIG, or create ./config.json"
+                : "no config found: pass --config <path>, set MUSE_RELAY_CONFIG or CHATBRIDGE_CONFIG, or run from the directory that holds config.json");
         }
 
         RelayConfig cfg;
@@ -148,6 +156,8 @@ internal sealed class RelayConfig
         cfg.AutoAck ??= new AutoAckConfig();
         cfg.AutoAck.Validate(path);
         cfg.Hook?.Validate(path);
+        cfg.MentionRouting = cfg.Mentions ?? new MentionConfig();
+        cfg.Roster = AgentDirectory.Parse(path, cfg.Agents, cfg.MentionRouting);
         if (!string.IsNullOrWhiteSpace(cfg.Trip) && PublicTrip.ForJoin(cfg.Trip) is null)
             throw new ConfigException($"{path}: trip must be a public code like Ab12Cd, not a password");
 
@@ -168,6 +178,18 @@ internal sealed class RelayConfig
             return;
         throw new ConfigException(
             $"{ConfigPath}: receive_idle_s must be from 0 to {MaxReceiveIdleSeconds:0} (0 disables the quiet-socket watchdog)");
+    }
+
+    private static (string? Name, string? Value) FirstEnv(Func<string, string?> getEnv, params string[] names)
+    {
+        foreach (var name in names)
+        {
+            var value = getEnv(name);
+            if (!string.IsNullOrWhiteSpace(value))
+                return (name, value);
+        }
+
+        return (null, null);
     }
 
     /// <summary>The hook poller's status file (<c>&lt;hook.state&gt;.status</c>), or null without a hook block.</summary>

@@ -57,7 +57,7 @@ unless `auto_ack` is enabled in the bridge's `config.json` (README, "Auto-acknow
   the nick. Neither do untripped senders, unlisted trips, the bridge's own nick, or its own trip.
 - **What it looks like.** Plain chat from the bridge's nick and trip, starting with `(auto)` by default:
   `(auto) got it, thinking…`, or for a task `(auto) got task <id>, thinking…`. If the bridge side's
-  wake-up hook poller is stopped or failing, it says so instead: `(auto) got it, but chief's wake-up
+  wake-up hook poller is stopped or failing, it says so instead: `(auto) got it, but the wake-up
   hook isn't working right now, so the reply may be late`.
 - **What it isn't.** It's not a protocol `ack` and not a `result`. It doesn't change a task's state and
   never appears in the status view. The agent still sends its own `{"type":"ack",…}` when it starts
@@ -66,6 +66,10 @@ unless `auto_ack` is enabled in the bridge's `config.json` (README, "Auto-acknow
   the bridge never acks plain chat from an agent's trip (only tasks), so no reply can loop anyway.
 - **Rate.** At most one per `cooldown_s` (default 60 s, minimum 10) and `max_per_hour` (default 20),
   across all senders.
+
+## Per-agent inboxes (not on the wire)
+
+ChatBridge can file explicit @mentions into a durable inbox per configured agent. That path is off unless `mentions.enabled` is true. It does not replace `inbox.jsonl`. The wake shape, ack, retry, and the rule that side-chat history is not copied into the room are in [chatbridge.md](chatbridge.md).
 
 ## Local wake-up webhook (not on the wire)
 

@@ -8,7 +8,7 @@ same loop.
 
 ## Your setup
 
-- **Bridge:** Chief.Bridge (.NET 8), connected as nick `chief`.
+- **Bridge:** ChatBridge (.NET 8), connected as whatever nick is in config (this deployment uses `chief`). The program does not assume that nick. `dotnet run --project src/Chief.Bridge`, `Chief.Bridge.dll`, and `chief-bridge` still launch the same program. Per-agent inboxes, when `mentions.enabled` is set, are described in `docs/chatbridge.md`. `inbox.jsonl` / `outbox.jsonl` stay the path this loop uses.
 - **Identity:** your tripcode is `!Q9a3Px`. Trust tripcodes, not nicks. Anyone
   can join as `chief` or `Fuse`. See `docs/security.md`.
 - **Channel:** whatever both sides configure. Read yours from the `channel`
@@ -265,7 +265,7 @@ for example `(auto) got it, thinking…`. You never write it. What it means for 
 - At most one per `cooldown_s` (default 60 s, minimum 10), and at most
   `max_per_hour` (default 20).
 - If the hook poller's status says NOT RUNNING or FAILING, the bridge sends
-  the `offline_text` instead: `(auto) got it, but chief's wake-up hook isn't
+  the `offline_text` instead: `(auto) got it, but the wake-up hook isn't
   working right now, so the reply may be late`. So the ack never promises a
   reply that nothing is going to wake you for.
 - It's plain chat. It is **not** a protocol `ack`: it doesn't touch the status

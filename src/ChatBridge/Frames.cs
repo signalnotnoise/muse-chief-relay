@@ -2,7 +2,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 
-namespace Chief.Bridge;
+namespace ChatBridge;
 
 /// <summary>
 /// Collects the fragments of one WebSocket message and decodes UTF-8 once, at end of message, so a

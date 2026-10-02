@@ -1,6 +1,6 @@
 using System.Net.WebSockets;
 
-namespace Chief.Bridge;
+namespace ChatBridge;
 
 internal readonly record struct RelayReceiveResult(
     int Count,

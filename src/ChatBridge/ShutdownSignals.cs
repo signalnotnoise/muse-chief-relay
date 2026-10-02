@@ -1,6 +1,6 @@
 using System.Runtime.InteropServices;
 
-namespace Chief.Bridge;
+namespace ChatBridge;
 
 /// <summary>
 /// SIGTERM / SIGINT → cancel <paramref name="cts"/> instead of killing the process, so the caller can finish
