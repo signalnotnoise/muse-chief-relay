@@ -54,6 +54,53 @@ public class HivemindMirrorTests
     }
 
     [Fact]
+    public void Voizle_millisecond_ts_is_stored_as_epoch_seconds()
+    {
+        var built = MirrorPayload.Build(Chat("ts", 1_790_970_720_123L), "throwaway-test", 99);
+        Assert.True(built.Ok, built.Reason);
+        Assert.Equal(1_790_970_720L, PayloadTs(built.Json));
+
+        var fromWire = JsonNode.Parse("""
+            {"cmd":"chat","nick":"Ada","text":"hello","id":"11111111-1111-4111-8111-111111111111","ts":1790970720123,"room":"throwaway-test"}
+            """)!.AsObject();
+        var parsed = MirrorPayload.Build(fromWire, "throwaway-test", 99);
+        Assert.True(parsed.Ok, parsed.Reason);
+        Assert.Equal(1_790_970_720L, PayloadTs(parsed.Json));
+
+        var even = MirrorPayload.Build(Chat("ts", 1_720_000_000_000L), "throwaway-test", 99);
+        Assert.True(even.Ok, even.Reason);
+        Assert.Equal(1_720_000_000L, PayloadTs(even.Json));
+
+        var seconds = MirrorPayload.Build(Chat("time", 1_700_000_000L), "throwaway-test", 99);
+        Assert.True(seconds.Ok, seconds.Reason);
+        Assert.Equal(1_700_000_000L, PayloadTs(seconds.Json));
+
+        var timeWins = Chat("time", 1_700_000_000L);
+        timeWins["ts"] = 1_790_970_720_123L;
+        var preferred = MirrorPayload.Build(timeWins, "throwaway-test", 99);
+        Assert.True(preferred.Ok, preferred.Reason);
+        Assert.Equal(1_700_000_000L, PayloadTs(preferred.Json));
+
+        var ceiling = MirrorPayload.Build(Chat("ts", MirrorPayload.TsMax), "throwaway-test", 99);
+        Assert.True(ceiling.Ok, ceiling.Reason);
+        Assert.Equal(MirrorPayload.TsMax, PayloadTs(ceiling.Json));
+
+        var msCeiling = MirrorPayload.Build(Chat("ts", MirrorPayload.TsMaxMillis), "throwaway-test", 99);
+        Assert.True(msCeiling.Ok, msCeiling.Reason);
+        Assert.Equal(MirrorPayload.TsMax, PayloadTs(msCeiling.Json));
+
+        Assert.Equal("type", MirrorPayload.Build(Chat("ts", MirrorPayload.TsMaxMillis + 1), "throwaway-test", 99).Reason);
+        Assert.Equal("type", MirrorPayload.Build(Chat("ts", -1), "throwaway-test", 99).Reason);
+        Assert.Equal("type", MirrorPayload.Build(Chat("time", MirrorPayload.TsMaxMillis + 1), "abc", 99).Reason);
+
+        var missing = Chat("time", 1);
+        missing.Remove("time");
+        var fallback = MirrorPayload.Build(missing, "throwaway-test", 99);
+        Assert.True(fallback.Ok, fallback.Reason);
+        Assert.Equal(99L, PayloadTs(fallback.Json));
+    }
+
+    [Fact]
     public void Oversize_text_and_a_non_uuid_are_refused()
     {
         var missing = JsonNode.Parse("""{"cmd":"chat","nick":"Ada","text":"hello"}""")!.AsObject();
@@ -176,6 +223,18 @@ public class HivemindMirrorTests
 
             return sent == 1 && done();
         });
+    }
+
+    private static long PayloadTs(string json) =>
+        JsonNode.Parse(json)!["ts"]!.GetValue<long>();
+
+    private static JsonObject Chat(string stampKey, long stamp)
+    {
+        var chat = JsonNode.Parse($$"""
+            {"cmd":"chat","nick":"Ada","text":"hello","id":"{{Uuid}}","room":"throwaway-test"}
+            """)!.AsObject();
+        chat[stampKey] = stamp;
+        return chat;
     }
 
     private static string ChatFrame(string text) =>
