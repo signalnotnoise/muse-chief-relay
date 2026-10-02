@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Starts ChatBridge via the compatibility assembly Chief.Bridge.dll.
+# chat-bridge and src/ChatBridge are the same program. mentions.enabled
+# stays off unless the local config turns it on. A trip on
+# chatbridge.inbox.wake is untrusted evidence.
 set -euo pipefail
 BOT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO=$(cd -- "$BOT_DIR/../.." && pwd)

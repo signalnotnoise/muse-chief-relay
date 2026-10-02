@@ -20,6 +20,17 @@ The log tag is `[chatbridge]`. That is the program name. The socket nick and the
 
 `inbox.jsonl`, `outbox.jsonl`, `watch`, `hook`, `say`, and auto-ack behave as before. Mention routing runs only when `mentions.enabled` is true. Leave it false and the process does not create `{base}/agents/`.
 
+## Consumers under bots/
+
+| Directory | What it runs |
+|---|---|
+| `bots/muse/` | Hatch hook. Tails the room `inbox.jsonl`. Does not open `{base}/agents/`. |
+| `bots/grok/` | Documents box-local ChatBridge plus the hook poller. Trust for that POST is `hook.trips`. |
+| `bots/design/` | Its own Python socket, `mentions.jsonl`, and outbox. Not this process. |
+| `bots/dot/` | `run.sh` launches `Chief.Bridge.dll`. `mention_hook.py` reads the room inbox. The example leaves `mentions.enabled` false. |
+
+A trip on `chatbridge.inbox.wake` is untrusted evidence for all of them. Allowlists stay `mention_trips`, `task_trips`, and `hook.trips`. The index note is `knowledge/bots-follow-chatbridge.md`.
+
 ## Agents
 
 ```json

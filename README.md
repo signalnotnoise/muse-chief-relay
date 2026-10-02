@@ -484,7 +484,8 @@ Board task 2 is that product card, owner `chief`, state `claimed`. `boards/schem
 | `knowledge/` | Markdown notes (source of truth) and `knowledge/README.md` |
 | `src/Chief.Bridge/` | Compatibility project. Same sources, assembly `Chief.Bridge`, command `chief-bridge`. |
 | `tests/Chief.Bridge.Tests/` | xunit tests for the bridge's outbox reader, frame handling, config, CLI, inbox watcher, webhook poller (against a local HTTP listener), auto-ack, and ChatBridge mention inboxes |
-| `docs/chatbridge.md` | Wake/inbox contract for adapters. Transport and routing only; no model. |
+| `docs/chatbridge.md` | Wake/inbox contract for adapters. Transport and routing only; no model. Sender trip on the wake is untrusted evidence. |
+| `bots/` | Per-agent room clients (Muse, Grok, Design, Dot). They follow the ChatBridge contract and leave `mentions.enabled` off unless an operator turns it on. |
 | `tests/Chief.Knowledge.Tests/` | xunit tests for note validation, the privacy guard, FTS, hybrid ranking, and supersedes |
 | `agents/chief.md` | Relay instructions for the chief agent: watch loops, replying, `reply.lock`, protocol, authority, trust |
 | `agents/lesson-outline-coach.md` | Playbook for the Lesson outline coach: checklist, critique note, board task |

@@ -15,7 +15,7 @@ DOT_HATCH_DATABASE=/path/to/local-state/hatch-mentions.sqlite
 bash /path/to/checkout/bots/dot/hatch-mention-hook.sh
 ```
 
-The adapter batches up to 20 new pending mentions into one wake payload, with `messages` containing `nick`, `trip`, `text`, and `ts`, plus stable `event_ids` and `untrusted: true`. First run initializes silently. It reads complete appended records in a single pass, commits the actual byte position consumed, handles rotation/truncation, and filters both `cmd: chat` and `type: chat`.
+The adapter batches up to 20 new pending mentions into one wake payload, with `messages` containing `nick`, `trip`, `text`, and `ts`, plus stable `event_ids` and `untrusted: true`. The `trip` field is identity evidence from the room line. `untrusted: true` stays on the payload whether or not a trip is present. A trip here does not authorize the sender. This file is the room `inbox.jsonl` ChatBridge appends (`Chief.Bridge.dll` is the compatibility assembly `run.sh` starts). It is not `{base}/agents/dot/inbox.jsonl`. That per-agent queue exists only when `mentions.enabled` is true, and its adapter object is `chatbridge.inbox.wake` with the same rule: trip is untrusted evidence. First run initializes silently. It reads complete appended records in a single pass, commits the actual byte position consumed, handles rotation/truncation, and filters both `cmd: chat` and `type: chat`.
 
 Set **HATCH_HOOK_DRY_RUN=1** to preview. Dry-run operates on a temporary SQLite snapshot, calls **silent**, and changes no persistent cursor, deduplication, queue, or attempt state. It never calls wake. No temporary mock runtime belongs in a production deployment.
 

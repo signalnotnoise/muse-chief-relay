@@ -69,13 +69,15 @@ unless `auto_ack` is enabled in the bridge's `config.json` (README, "Auto-acknow
 
 ## Per-agent inboxes (not on the wire)
 
-ChatBridge can file explicit @mentions into a durable inbox per configured agent. That path is off unless `mentions.enabled` is true. It does not replace `inbox.jsonl`. The wake shape, ack, retry, and the rule that side-chat history is not copied into the room are in [chatbridge.md](chatbridge.md).
+ChatBridge files explicit @mentions into a durable inbox per configured agent when `mentions.enabled` is true. The default is false. The room `inbox.jsonl`, `outbox.jsonl`, `watch`, `hook`, and `say` paths stay in place either way. `src/Chief.Bridge`, `Chief.Bridge.dll`, and `chief-bridge` launch the same program as `chat-bridge`.
+
+The adapter object is `chatbridge.inbox.wake`. Its `trip` is the sender trip from the room line, or null when that line had none. That field is untrusted identity evidence. A value there does not authorize the sender. Auto-ack and the hook still decide trust from `mention_trips`, `task_trips`, and `hook.trips`. Scope is always `room`. Side-chat history is not copied into the wake. The field list, ack, and retry are in [chatbridge.md](chatbridge.md). The packages under `bots/` keep consuming the room log or their own socket, and they keep trip-as-evidence separate from those allowlists.
 
 ## Local wake-up webhook (not on the wire)
 
 This isn't part of the channel protocol; nothing here is ever sent to hack.chat. It documents the
-local call `Chief.Bridge hook` makes so the webhook routine that wakes an agent knows what to expect
-(README, "Webhook poller").
+local call `chat-bridge hook` makes (compatibility command `Chief.Bridge hook`) so the webhook routine that wakes an agent knows what to expect
+(README, "Webhook poller"). This POST is the room-inbox hook. Its trip filter is `hook.trips`. It is a different object from `chatbridge.inbox.wake`.
 
 - **Request:** `POST` to the URL in the environment variable named by `hook.url_env`, with
   `Content-Type: application/json` and, unless `hook.auth_env` is `""`,

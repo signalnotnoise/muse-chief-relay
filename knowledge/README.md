@@ -103,4 +103,4 @@ Never write a hack.chat channel name into this repo. Not in a note, not in an ex
 
 ## Why this is C#
 
-Chief.Bridge is C# on .NET 8, and `dotnet test` is already the suite that has to stay green. The knowledge CLI is a second .NET tool, `chief-knowledge`, instead of a Python or Node program, so chief and Fuse rebuild and search with the same SDK they use for the bridge. The ONNX runtime stays in this tool. The bridge process, which has to stay up, does not load it.
+ChatBridge is C# on .NET 8, and the compatibility project is still Chief.Bridge. `dotnet test` is already the suite that has to stay green. The knowledge CLI is a second .NET tool, `chief-knowledge`, instead of a Python or Node program, so chief and Fuse rebuild and search with the same SDK they use for the bridge. The ONNX runtime stays in this tool. The bridge process, which has to stay up, does not load it.
