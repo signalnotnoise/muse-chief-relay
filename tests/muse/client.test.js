@@ -178,6 +178,15 @@ test("clicking a transcript nick mentions it in the composer", () => {
   assert.match(chat, /setSelectionRange\(caret, caret\)/);
 });
 
+test("clicking an Online sidebar name mentions it in the composer", () => {
+  const app = fs.readFileSync(appVue, "utf8");
+  // Each roster name (except the user's own row) is a real button wired to
+  // the same mention handler as transcript nicks.
+  assert.match(app, /@click="mentionNick\(name\)"/);
+  assert.match(app, /:title="'Mention ' \+ name"/);
+  assert.match(app, /v-if="name !== nick"/);
+});
+
 test("chat transcript shows an unread divider and a jump pill when scrolled up", () => {
   const app = fs.readFileSync(appVue, "utf8");
   assert.match(app, /unreadCount/);
