@@ -212,15 +212,18 @@ function createHivemind(options) {
     }
   }
 
-  async function createOrVerify(collectionId, identity, data) {
+  async function createOrVerify(collectionId, identity, data, mode) {
     const operation = collectionId + " create-or-verify";
+    const extra = mode || {};
     if (!isConfigured()) return { status: "unconfigured" };
     const reason = hive.validateDocument(collectionId, data);
     if (reason) {
       refuse(operation, reason);
       return { status: "error" };
     }
-    const documentId = hive.documentId(collectionId, identity);
+    const documentId = typeof extra.documentId === "string" && extra.documentId
+      ? extra.documentId
+      : hive.documentId(collectionId, identity);
     let existing = null;
     try {
       existing = await getOne(collectionId, documentId);
@@ -233,6 +236,9 @@ function createHivemind(options) {
     }
     if (existing) {
       if (!hive.documentsMatch(collectionId, data, existing)) {
+        // A message UUID that already exists is a duplicate chat. Leave the
+        // stored document alone and report success so the mirror does not retry.
+        if (extra.dedupConflict) return { status: "verified", documentId: documentId };
         refuse(operation, "conflict");
         return { status: "conflict", documentId: documentId };
       }
@@ -255,6 +261,12 @@ function createHivemind(options) {
       return { status: "created", documentId: documentId };
     } catch (error) {
       if (error && error.code === 409) {
+        // Message ids are the room UUID. A create conflict means that chat
+        // is already stored. Do not update it, and do not treat the race as
+        // a failure the mirror should retry.
+        if (extra.dedupConflict) {
+          return { status: "verified", documentId: documentId };
+        }
         try {
           const raced = await getOne(collectionId, documentId);
           if (raced && hive.documentsMatch(collectionId, data, raced)) {
@@ -294,6 +306,27 @@ function createHivemind(options) {
       return Promise.resolve({ status: "error" });
     }
     return createOrVerify("knowledge", data.slug, data);
+  }
+
+  function createOrVerifyWorkspace(data) {
+    if (!data || !hive.isWorkspaceKey(data.key)) {
+      refuse("workspaces create-or-verify", "key");
+      return Promise.resolve({ status: "error" });
+    }
+    return createOrVerify("workspaces", data.key, data);
+  }
+
+  function createOrVerifyMessage(data, documentId) {
+    const id = hive.messageDocumentId(documentId);
+    if (!id) {
+      refuse("messages create-or-verify", "id");
+      return Promise.resolve({ status: "error" });
+    }
+    if (!data || typeof data.workspaceKey !== "string") {
+      refuse("messages create-or-verify", "key");
+      return Promise.resolve({ status: "error" });
+    }
+    return createOrVerify("messages", id, data, { documentId: id, dedupConflict: true });
   }
 
   async function readBoardOrGit(hash, gitOpts) {
@@ -342,6 +375,8 @@ function createHivemind(options) {
     createOrVerifyBoard: createOrVerifyBoard,
     createOrVerifyCard: createOrVerifyCard,
     createOrVerifyNote: createOrVerifyNote,
+    createOrVerifyWorkspace: createOrVerifyWorkspace,
+    createOrVerifyMessage: createOrVerifyMessage,
     readBoardOrGit: readBoardOrGit,
   };
 }
