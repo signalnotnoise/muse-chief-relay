@@ -128,6 +128,27 @@ public class HivemindMirrorTests
     }
 
     [Fact]
+    public void Nonzero_helper_without_a_safe_line_is_logged()
+    {
+        var crash = new List<string>();
+        NodeHivemindMirror.LogHelperResult("SyntaxError: unexpected token\n    at startup\n", 1, crash.Add);
+        Assert.Equal("hivemind message mirror failed (exit)", Assert.Single(crash));
+        Assert.DoesNotContain("SyntaxError", crash[0]);
+
+        var empty = new List<string>();
+        NodeHivemindMirror.LogHelperResult("", 2, empty.Add);
+        Assert.Equal("hivemind message mirror failed (exit)", Assert.Single(empty));
+
+        var forwarded = new List<string>();
+        NodeHivemindMirror.LogHelperResult("hivemind message mirror failed (error)\n", 1, forwarded.Add);
+        Assert.Equal("hivemind message mirror failed (error)", Assert.Single(forwarded));
+
+        var quiet = new List<string>();
+        NodeHivemindMirror.LogHelperResult("SyntaxError: unexpected token\n", 0, quiet.Add);
+        Assert.Empty(quiet);
+    }
+
+    [Fact]
     public async Task A_throwing_mirror_does_not_drop_the_chat()
     {
         await using var fx = new RelayFixture

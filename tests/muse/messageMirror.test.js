@@ -163,6 +163,72 @@ test("message document id is the room uuid and oversize text is refused", async 
   assert.equal(mirrorLogs.join("\n").includes("z".repeat(20)), false);
 });
 
+test("an existing workspace with a different createdTs is verified and a message uuid still dedups", async () => {
+  const plan = hive.planRoomMirror(chat());
+  const wsId = hive.documentId("workspaces", KEY);
+  assert.notEqual(plan.workspace.createdTs, 1);
+  const store = memoryStore([
+    ["workspaces/" + wsId, { key: KEY, createdTs: 1, $id: wsId, $permissions: [] }],
+    ["messages/" + UUID, Object.assign({ $id: UUID, $permissions: [] }, plan.message)],
+  ]);
+  const logs = [];
+  const client = clientFor(store, logs);
+
+  const workspace = await client.createOrVerifyWorkspace({ key: KEY, createdTs: plan.workspace.createdTs });
+  assert.equal(workspace.status, "verified");
+  assert.equal(workspace.documentId, wsId);
+  assert.equal(store.docs.get("workspaces/" + wsId).createdTs, 1);
+
+  const message = await client.createOrVerifyMessage(
+    Object.assign({}, plan.message, { text: "edited" }),
+    UUID
+  );
+  assert.equal(message.status, "verified");
+  assert.equal(message.documentId, UUID);
+  assert.equal(store.docs.get("messages/" + UUID).text, "hello");
+
+  assert.equal(store.calls.some((call) => call[0] === "create" || call[0] === "update" || call[0] === "delete"), false);
+  const joined = logs.join("\n");
+  assert.equal(joined.includes("conflict"), false);
+  assert.equal(joined.includes("refused"), false);
+  assert.equal(joined.includes("edited"), false);
+  assert.equal(joined.includes(CHANNEL), false);
+});
+
+test("a workspace create race keeps the stored createdTs", async () => {
+  const plan = hive.planRoomMirror(chat());
+  const wsId = hive.documentId("workspaces", KEY);
+  const store = memoryStore([
+    ["workspaces/" + wsId, { key: KEY, createdTs: 1, $id: wsId, $permissions: [] }],
+  ]);
+  let gets = 0;
+  const realGet = store.getDocument.bind(store);
+  store.getDocument = async (params) => {
+    gets += 1;
+    if (gets === 1) {
+      const err = new Error("secret-marker");
+      err.code = 404;
+      throw err;
+    }
+    return realGet(params);
+  };
+  store.createDocument = async () => {
+    const err = new Error("secret-marker");
+    err.code = 409;
+    throw err;
+  };
+  const logs = [];
+  const client = clientFor(store, logs);
+  const result = await client.createOrVerifyWorkspace({ key: KEY, createdTs: plan.workspace.createdTs });
+  assert.equal(result.status, "verified");
+  assert.equal(result.documentId, wsId);
+  assert.equal(store.docs.get("workspaces/" + wsId).createdTs, 1);
+  assert.equal(store.calls.some((call) => call[0] === "update" || call[0] === "delete"), false);
+  assert.equal(logs.join("\n").includes("secret-marker"), false);
+  assert.equal(logs.join("\n").includes("conflict"), false);
+  assert.equal(logs.join("\n").includes(CHANNEL), false);
+});
+
 test("a 409 on the message uuid is dedup, not an update", async () => {
   const plan = hive.planRoomMirror(chat());
   const store = memoryStore([

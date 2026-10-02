@@ -236,8 +236,9 @@ function createHivemind(options) {
     }
     if (existing) {
       if (!hive.documentsMatch(collectionId, data, existing)) {
-        // A message UUID that already exists is a duplicate chat. Leave the
-        // stored document alone and report success so the mirror does not retry.
+        // Message UUIDs and workspace rows are first-write-wins. Leave the
+        // stored document alone (including workspace createdTs) and report
+        // success so the mirror does not retry.
         if (extra.dedupConflict) return { status: "verified", documentId: documentId };
         refuse(operation, "conflict");
         return { status: "conflict", documentId: documentId };
@@ -261,9 +262,9 @@ function createHivemind(options) {
       return { status: "created", documentId: documentId };
     } catch (error) {
       if (error && error.code === 409) {
-        // Message ids are the room UUID. A create conflict means that chat
-        // is already stored. Do not update it, and do not treat the race as
-        // a failure the mirror should retry.
+        // Message ids are the room UUID. A workspace create that loses the
+        // race is the same: the stored row stays, including its createdTs.
+        // Do not update it, and do not treat the race as a failure to retry.
         if (extra.dedupConflict) {
           return { status: "verified", documentId: documentId };
         }
@@ -313,7 +314,8 @@ function createHivemind(options) {
       refuse("workspaces create-or-verify", "key");
       return Promise.resolve({ status: "error" });
     }
-    return createOrVerify("workspaces", data.key, data);
+    // createdTs is first-write-wins. A later chat must not look like a conflict.
+    return createOrVerify("workspaces", data.key, data, { dedupConflict: true });
   }
 
   function createOrVerifyMessage(data, documentId) {

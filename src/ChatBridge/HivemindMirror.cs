@@ -252,15 +252,26 @@ internal sealed class NodeHivemindMirror : IHivemindMirror
             return;
         }
 
-        // Drain so the process can leave. Only the helper's own status lines are logged.
+        // Drain so the process can leave. Forward only the helper's own status
+        // lines. A nonzero exit that printed none of those still gets one log.
         _ = stdout.GetAwaiter().GetResult();
-        var err = stderr.GetAwaiter().GetResult();
-        foreach (var line in err.Split('\n'))
+        LogHelperResult(stderr.GetAwaiter().GetResult(), proc.ExitCode, _log);
+    }
+
+    internal static void LogHelperResult(string stderr, int exitCode, Action<string> log)
+    {
+        var forwarded = false;
+        foreach (var line in stderr.Split('\n'))
         {
             var trimmed = line.Trim();
-            if (SafeLine(trimmed))
-                _log(trimmed);
+            if (!SafeLine(trimmed))
+                continue;
+            log(trimmed);
+            forwarded = true;
         }
+
+        if (exitCode != 0 && !forwarded)
+            log("hivemind message mirror failed (exit)");
     }
 
     private static bool SafeLine(string line) =>
