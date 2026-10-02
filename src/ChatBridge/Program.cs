@@ -228,7 +228,9 @@ internal static class Program
             throw new ArgumentException($"usage: ChatBridge inbox {command} --agent <id> <event-id>");
 
         var cfg = RelayConfig.Load(cli.ConfigPath, allowExampleFallback: false);
-        var inbox = AgentInbox.Open(Path.Combine(cfg.BaseDir, "agents", agent));
+        var agentsRoot = Path.Combine(cfg.BaseDir, "agents");
+        var inbox = AgentInbox.Open(Path.Combine(agentsRoot, agent));
+        inbox.OnFiled = new ConversationStore(agentsRoot).AppendRoom;
         var now = DateTimeOffset.UtcNow;
         switch (command)
         {

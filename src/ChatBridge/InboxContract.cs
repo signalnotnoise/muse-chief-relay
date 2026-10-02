@@ -36,6 +36,8 @@ internal static class InboxContract
         Trip = string.IsNullOrWhiteSpace(view.Event.Trip) ? null : view.Event.Trip,
         Mentions = view.Event.Mentions,
         Hop = view.Event.Hop,
+        Parent = string.IsNullOrEmpty(view.Event.Parent) ? null : view.Event.Parent,
+        Root = string.IsNullOrEmpty(view.Event.Root) ? null : view.Event.Root,
         Scope = RoomScope,
         Attempts = view.Attempts,
         NextUnix = view.NextUnix
@@ -67,6 +69,13 @@ internal sealed class InboxWakeRequest
     [System.Text.Json.Serialization.JsonPropertyName("text")] public string Text { get; init; } = "";
     [System.Text.Json.Serialization.JsonPropertyName("mentions")] public IReadOnlyList<string> Mentions { get; init; } = Array.Empty<string>();
     [System.Text.Json.Serialization.JsonPropertyName("hop")] public int Hop { get; init; }
+
+    /// <summary>Source id of the causal parent, or null when this event starts the chain.</summary>
+    [System.Text.Json.Serialization.JsonPropertyName("parent")] public string? Parent { get; init; }
+
+    /// <summary>Source id of the chain root. Fan-out hops are counted inside this root.</summary>
+    [System.Text.Json.Serialization.JsonPropertyName("root")] public string? Root { get; init; }
+
     [System.Text.Json.Serialization.JsonPropertyName("scope")] public string Scope { get; init; } = InboxContract.RoomScope;
     [System.Text.Json.Serialization.JsonPropertyName("attempts")] public int Attempts { get; init; }
     [System.Text.Json.Serialization.JsonPropertyName("next_unix")] public long? NextUnix { get; init; }

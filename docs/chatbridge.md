@@ -68,16 +68,17 @@ For each agent:
 |---|---|
 | `{base}/agents/<id>/inbox.jsonl` | Append-only deliveries. `seq` starts at 1 and only increases. |
 | `{base}/agents/<id>/control.jsonl` | Append-only acks (`op: ack`) and retry rows (`op: attempt`). |
+| `{base}/agents/<id>/deferred.jsonl` | Mentions waiting on a busy inbox lock. Filed into `inbox.jsonl` when that lock is free. |
 | `{base}/agents/<id>/room.jsonl` | Room history for that agent. Scope `room` only. |
 | `{base}/agents/<id>/side/<peer>.jsonl` | Side-chat history. Scope `side`. The router never writes this. |
 
 Restart reads those files and continues. Pending events stay pending, in `seq` order. An ack stays acked.
 
-A final `inbox.jsonl` or `control.jsonl` line that does not end in a newline is repaired before the next append. A partial tail is cut back to the last complete line. A complete JSON value that is only missing its newline is terminated. The next event or ack is then its own line and is still there after reload. A newline-terminated corrupt line is skipped and does not glue to the following one.
+A final `inbox.jsonl`, `control.jsonl`, or `deferred.jsonl` line that does not end in a newline is repaired before the next append. Repair appends a newline when the tail is already a complete JSON value, and truncates a partial tail back to the previous newline. The bytes before that tail are not rewritten, so a crash during repair cannot replace valid history with a short write. The next event or ack is then its own line and is still there after reload. A newline-terminated corrupt line is skipped and does not glue to the following one.
 
 Retry backoff after a recorded failure is 1s, 2s, 4s, 8s, 16s, then 30s. The head of the queue blocks later events until it is due, so a retry does not skip ahead.
 
-The per-agent `inbox.lock` is exclusive. The bridge and `inbox ack` can both want it. A busy lock is retried for about 2 seconds. That wait is what keeps a mention from disappearing under ordinary contention. If the lock is still busy after that, or another disk error escapes, the mention is not treated as filed: the room `inbox.jsonl` gets `mention route: not filed: <exception type>` and the socket stays up.
+The per-agent `inbox.lock` is exclusive. The bridge and `inbox ack` can both want it. A busy lock is retried for about 2 seconds. If it is still busy, the mention is appended to `deferred.jsonl` and filed into `inbox.jsonl` the next time that lock is taken: the next route, `inbox pending`, `inbox due`, or a process restart. After that, `inbox pending` shows it. The mention is not dropped. A disk error that is not a busy lock still leaves the mention unstored: the room `inbox.jsonl` gets `mention route: not filed: <exception type>` and the socket stays up.
 
 ## Wake contract
 
@@ -110,6 +111,8 @@ Each object:
   "text": "@dot please look",
   "mentions": ["dot"],
   "hop": 0,
+  "parent": null,
+  "root": "msg:…",
   "scope": "room",
   "attempts": 0,
   "next_unix": null
@@ -117,6 +120,8 @@ Each object:
 ```
 
 `scope` is always `room`. There is no side-chat field. `trip` is the sender trip from the room line, or null when that line had none. It is untrusted identity evidence. A trip on the wake does not mean the sender is trusted, and a null trip does not mean they failed a check. Auto-ack and the hook still decide trust from their own allowlists (`mention_trips`, `task_trips`, `hook.trips`). The wake has no trusted flag.
+
+`parent` is the source id of the causal parent, or null when this event starts the chain. `root` is the source id of that chain. Fan-out hops are counted inside one root.
 
 An in-process host can implement `IAgentWakeAdapter.WakeAsync` instead of the CLI. A thrown exception there is a soft failure: the pump records the exception type (not the message), applies backoff, and returns. It does not tear down the process, and it does not ack the event. The adapter does its own inference outside this repository.
 
@@ -129,7 +134,7 @@ A chat whose sender nick is a configured agent is a reply. It is not filed to an
 - a leading `!fanout` token
 - JSON `"fanout": true`
 
-The hop that counts is the farther of the line's own `"hop"` and the deepest fan-out hop already delivered to that sender. A bare `!fanout` carries hop 0, and `"hop": 0` does not clear a hop the sender has already received. The reply is dropped when that carried hop is already at `mentions.max_fanout_hop` (default 1), so two agents cannot alternate `!fanout` and land each reply at hop 1. The remembered hop is the maximum `hop` on fan-out rows in that agent's inbox, including after a restart. The sender is never a recipient of their own tag. A chat from the bridge's own socket nick is treated as this process's echo and is not routed.
+The hop that counts is the farther of the line's own `"hop"` and the deepest fan-out hop already delivered to that sender in the same causal chain. The chain is the parent's root. A JSON `"parent"` or `"root"` names it. A bare `!fanout` continues the latest delivery to that sender, acked or not. A new human mention is a new root, so an older hop does not apply to it, including after that older event is acked and the process restarts. A bare `!fanout` carries hop 0, and `"hop": 0` does not clear a hop already stored for the chain it continues. The reply is dropped when that carried hop is already at `mentions.max_fanout_hop` (default 1), so two agents cannot alternate `!fanout` inside one chain and land each reply at hop 1. The sender is never a recipient of their own tag. A chat from the bridge's own socket nick is treated as this process's echo and is not routed.
 
 ## Room and side chats
 

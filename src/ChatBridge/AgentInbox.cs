@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -18,6 +19,13 @@ internal sealed class InboxEvent
     [JsonPropertyName("scope")] public string Scope { get; set; } = InboxContract.RoomScope;
     [JsonPropertyName("hop")] public int Hop { get; set; }
     [JsonPropertyName("fanout")] public bool Fanout { get; set; }
+
+    /// <summary>Source id of the causal parent. Null when this event starts a chain.</summary>
+    [JsonPropertyName("parent")] public string? Parent { get; set; }
+
+    /// <summary>Source id of the chain root. Fan-out hops are counted inside one root.</summary>
+    [JsonPropertyName("root")] public string? Root { get; set; }
+
     [JsonPropertyName("ts")] public long? Ts { get; set; }
 }
 
@@ -25,6 +33,16 @@ internal sealed record InboxView(InboxEvent Event, int Attempts, long? NextUnix,
 {
     public bool IsDue(DateTimeOffset now) => NextUnix is null || NextUnix <= now.ToUnixTimeSeconds();
 }
+
+internal enum InboxWriteKind
+{
+    Stored,
+    Duplicate,
+    /// <summary>On deferred.jsonl because the inbox lock timed out. Not in inbox.jsonl yet.</summary>
+    Deferred
+}
+
+internal readonly record struct InboxWrite(InboxWriteKind Kind, InboxEvent Event);
 
 internal static class InboxBackoff
 {
@@ -38,11 +56,14 @@ internal static class InboxBackoff
 
 /// <summary>
 /// Durable per-agent queue. inbox.jsonl is append-only. Acks and retry state are append-only in
-/// control.jsonl, so a restart reloads both and continues in seq order.
+/// control.jsonl, so a restart reloads both and continues in seq order. A mention that cannot take
+/// the inbox lock is appended to deferred.jsonl and filed on the next successful lock.
 /// </summary>
 internal sealed class AgentInbox
 {
     public static readonly TimeSpan DefaultLockBudget = TimeSpan.FromSeconds(2);
+    internal const string DeferredName = "deferred.jsonl";
+    private const string LockBusyMessage = "inbox lock busy";
 
     private readonly string _dir;
     private readonly TimeSpan _lockBudget;
@@ -61,6 +82,9 @@ internal sealed class AgentInbox
     public string DirectoryPath => _dir;
     public string InboxPath => Path.Combine(_dir, "inbox.jsonl");
 
+    /// <summary>Invoked for each event newly appended to inbox.jsonl, including a drained deferral.</summary>
+    internal Action<InboxEvent>? OnFiled { get; set; }
+
     public static AgentInbox Open(string agentDir, TimeSpan? lockBudget = null)
     {
         Directory.CreateDirectory(agentDir);
@@ -69,59 +93,31 @@ internal sealed class AgentInbox
         return inbox;
     }
 
+    /// <summary>File any mentions spilled while the inbox lock was busy.</summary>
+    public void CatchUp() => Pending();
+
     public bool TryAppend(InboxEvent draft, out InboxEvent stored)
     {
-        lock (Gate)
-        {
-            using var _ = Lock();
-            RepairAndReload();
-            if (_byId.TryGetValue(draft.Id, out var existing))
-            {
-                stored = existing;
-                return false;
-            }
-
-            var bySource = FindSource(draft.SourceId);
-            if (bySource is not null)
-            {
-                stored = bySource;
-                return false;
-            }
-
-            var seq = _events.Count == 0 ? 1 : _events.Max(e => e.Seq) + 1;
-            stored = new InboxEvent
-            {
-                Id = draft.Id,
-                Seq = seq,
-                Agent = draft.Agent,
-                SourceId = draft.SourceId,
-                Room = draft.Room,
-                From = draft.From,
-                Trip = draft.Trip,
-                Text = draft.Text,
-                Mentions = draft.Mentions.ToList(),
-                Scope = InboxContract.RoomScope,
-                Hop = draft.Hop,
-                Fanout = draft.Fanout,
-                Ts = draft.Ts
-            };
-            AppendJson(InboxPath, stored);
-            _events.Add(stored);
-            _byId[stored.Id] = stored;
-            _sourceIds.Add(stored.SourceId);
-            return true;
-        }
+        var write = Write(draft);
+        stored = write.Event;
+        return write.Kind == InboxWriteKind.Stored;
     }
 
-    public IReadOnlyList<InboxView> Pending()
+    public InboxWrite Write(InboxEvent draft)
     {
-        lock (Gate)
+        try
         {
-            using var _ = Lock();
-            RepairAndReload();
-            return Ordered().ToList();
+            return UnderLock(filed => AppendOrDuplicate(draft, filed));
+        }
+        catch (IOException ex) when (IsLockBusy(ex))
+        {
+            Spill(draft);
+            return new InboxWrite(InboxWriteKind.Deferred, draft);
         }
     }
+
+    public IReadOnlyList<InboxView> Pending() =>
+        UnderLock(_ => Ordered().ToList());
 
     /// <summary>Unacked events in seq order, stopping before the first one still in backoff.</summary>
     public IReadOnlyList<InboxView> Due(DateTimeOffset now)
@@ -137,12 +133,9 @@ internal sealed class AgentInbox
         return ready;
     }
 
-    public bool Ack(string id, DateTimeOffset now)
-    {
-        lock (Gate)
+    public bool Ack(string id, DateTimeOffset now) =>
+        UnderLock(_ =>
         {
-            using var _ = Lock();
-            RepairAndReload();
             if (!_byId.ContainsKey(id))
                 return false;
             if (_acked.Contains(id))
@@ -150,15 +143,11 @@ internal sealed class AgentInbox
             AppendJson(ControlPath, new ControlLine { Op = "ack", Id = id, At = now.ToUnixTimeSeconds() });
             _acked.Add(id);
             return true;
-        }
-    }
+        });
 
-    public bool RecordFailure(string id, string error, DateTimeOffset now)
-    {
-        lock (Gate)
+    public bool RecordFailure(string id, string error, DateTimeOffset now) =>
+        UnderLock(_ =>
         {
-            using var _ = Lock();
-            RepairAndReload();
             if (!_byId.ContainsKey(id) || _acked.Contains(id))
                 return false;
             var prev = _attempts.GetValueOrDefault(id)?.Count ?? 0;
@@ -175,8 +164,63 @@ internal sealed class AgentInbox
             AppendJson(ControlPath, line);
             _attempts[id] = new AttemptState(attempts, line.NextUnix, error);
             return true;
-        }
+        });
+
+    /// <summary>
+    /// Highest <c>hop</c> on a fan-out row whose chain root is <paramref name="root"/>, acked or not.
+    /// Zero when <paramref name="root"/> is empty or this inbox has no fan-out in that chain.
+    /// Other chains in the same file do not count.
+    /// </summary>
+    public int HighestFanoutHop(string? root)
+    {
+        if (string.IsNullOrEmpty(root))
+            return 0;
+        return UnderLock(_ =>
+        {
+            var max = 0;
+            foreach (var ev in _events)
+            {
+                if (!ev.Fanout || ev.Hop <= max)
+                    continue;
+                if (string.Equals(ChainRoot(ev), root, StringComparison.Ordinal))
+                    max = ev.Hop;
+            }
+
+            return max;
+        });
     }
+
+    /// <summary>Delivery with this id or source id, acked or not.</summary>
+    public InboxEvent? Find(string? idOrSource)
+    {
+        if (string.IsNullOrEmpty(idOrSource))
+            return null;
+        return UnderLock(_ =>
+        {
+            if (_byId.TryGetValue(idOrSource, out var byId))
+                return byId;
+            return _events.FirstOrDefault(e =>
+                string.Equals(e.SourceId, idOrSource, StringComparison.Ordinal)
+                || string.Equals(e.Id, idOrSource, StringComparison.Ordinal));
+        });
+    }
+
+    /// <summary>Highest-seq delivery in this inbox, acked or not. Null when the inbox has none.</summary>
+    public InboxEvent? Latest() =>
+        UnderLock(_ =>
+        {
+            InboxEvent? best = null;
+            foreach (var ev in _events)
+            {
+                if (best is null || ev.Seq > best.Seq)
+                    best = ev;
+            }
+
+            return best;
+        });
+
+    internal static string ChainRoot(InboxEvent ev) =>
+        string.IsNullOrEmpty(ev.Root) ? ev.SourceId : ev.Root;
 
     private IEnumerable<InboxView> Ordered() =>
         _events
@@ -188,32 +232,62 @@ internal sealed class AgentInbox
                 return new InboxView(e, attempt?.Count ?? 0, attempt?.NextUnix, attempt?.Error);
             });
 
-    /// <summary>Highest <c>hop</c> on a fan-out row in this inbox, acked or not. Zero when there is none.</summary>
-    public int HighestFanoutHop()
-    {
-        lock (Gate)
-        {
-            using var _ = Lock();
-            RepairAndReload();
-            var max = 0;
-            foreach (var ev in _events)
-            {
-                if (ev.Fanout && ev.Hop > max)
-                    max = ev.Hop;
-            }
-
-            return max;
-        }
-    }
-
     private InboxEvent? FindSource(string sourceId) =>
         _events.FirstOrDefault(e => string.Equals(e.SourceId, sourceId, StringComparison.Ordinal));
 
-    private void RepairAndReload()
+    private InboxWrite AppendOrDuplicate(InboxEvent draft, List<InboxEvent> filed)
+    {
+        if (string.IsNullOrEmpty(draft.Id) || string.IsNullOrEmpty(draft.SourceId))
+            throw new IOException("inbox event needs an id and a source id");
+        if (_byId.TryGetValue(draft.Id, out var existing))
+            return new InboxWrite(InboxWriteKind.Duplicate, existing);
+        var bySource = FindSource(draft.SourceId);
+        if (bySource is not null)
+            return new InboxWrite(InboxWriteKind.Duplicate, bySource);
+
+        var stored = Materialize(draft);
+        AppendJson(InboxPath, stored);
+        Remember(stored);
+        filed.Add(stored);
+        return new InboxWrite(InboxWriteKind.Stored, stored);
+    }
+
+    private InboxEvent Materialize(InboxEvent draft)
+    {
+        var seq = _events.Count == 0 ? 1 : _events.Max(e => e.Seq) + 1;
+        return new InboxEvent
+        {
+            Id = draft.Id,
+            Seq = seq,
+            Agent = draft.Agent,
+            SourceId = draft.SourceId,
+            Room = draft.Room,
+            From = draft.From,
+            Trip = draft.Trip,
+            Text = draft.Text,
+            Mentions = draft.Mentions?.ToList() ?? new List<string>(),
+            Scope = InboxContract.RoomScope,
+            Hop = draft.Hop,
+            Fanout = draft.Fanout,
+            Parent = string.IsNullOrEmpty(draft.Parent) ? null : draft.Parent,
+            Root = string.IsNullOrEmpty(draft.Root) ? null : draft.Root,
+            Ts = draft.Ts
+        };
+    }
+
+    private void Remember(InboxEvent stored)
+    {
+        _events.Add(stored);
+        _byId[stored.Id] = stored;
+        _sourceIds.Add(stored.SourceId);
+    }
+
+    private void RepairAndReload(List<InboxEvent> filed)
     {
         RepairTornTail(InboxPath);
         RepairTornTail(ControlPath);
         Reload();
+        DrainDeferred(filed);
     }
 
     private void Reload()
@@ -246,15 +320,95 @@ internal sealed class AgentInbox
         }
     }
 
+    /// <summary>
+    /// Move deferred.jsonl into inbox.jsonl. Safe to repeat: source ids already stored are skipped.
+    /// The deferred file is truncated only after the inbox appends succeed.
+    /// </summary>
+    private void DrainDeferred(List<InboxEvent> filed)
+    {
+        if (!File.Exists(DeferredPath))
+            return;
+        using var _ = LockFile(DeferredLockPath);
+        RepairTornTail(DeferredPath);
+        var drafts = ReadLines<InboxEvent>(DeferredPath);
+        if (drafts.Count == 0)
+        {
+            ClearFile(DeferredPath);
+            return;
+        }
+
+        foreach (var draft in drafts)
+        {
+            if (string.IsNullOrEmpty(draft.Id) || string.IsNullOrEmpty(draft.SourceId))
+                continue;
+            if (_byId.ContainsKey(draft.Id) || FindSource(draft.SourceId) is not null)
+                continue;
+            var stored = Materialize(draft);
+            AppendJson(InboxPath, stored);
+            Remember(stored);
+            filed.Add(stored);
+        }
+
+        ClearFile(DeferredPath);
+    }
+
+    private void Spill(InboxEvent draft)
+    {
+        if (string.IsNullOrEmpty(draft.Id) || string.IsNullOrEmpty(draft.SourceId))
+            throw new IOException("inbox event needs an id and a source id");
+        using var _ = LockFile(DeferredLockPath);
+        RepairTornTail(DeferredPath);
+        if (File.Exists(DeferredPath))
+        {
+            foreach (var existing in ReadLines<InboxEvent>(DeferredPath))
+            {
+                if (string.Equals(existing.Id, draft.Id, StringComparison.Ordinal)
+                    || string.Equals(existing.SourceId, draft.SourceId, StringComparison.Ordinal))
+                    return;
+            }
+        }
+
+        AppendJson(DeferredPath, draft);
+    }
+
     private string ControlPath => Path.Combine(_dir, "control.jsonl");
+    private string DeferredPath => Path.Combine(_dir, DeferredName);
+    private string DeferredLockPath => Path.Combine(_dir, "deferred.lock");
+
+    private T UnderLock<T>(Func<List<InboxEvent>, T> body)
+    {
+        var filed = new List<InboxEvent>();
+        try
+        {
+            lock (Gate)
+            {
+                using var stream = Lock();
+                RepairAndReload(filed);
+                return body(filed);
+            }
+        }
+        finally
+        {
+            Notify(filed);
+        }
+    }
+
+    private void Notify(List<InboxEvent> filed)
+    {
+        if (filed.Count == 0 || OnFiled is null)
+            return;
+        foreach (var ev in filed)
+            OnFiled(ev);
+    }
 
     /// <summary>
     /// Exclusive lock. A holder (the bridge filing a mention, or <c>inbox ack</c>) is normal contention.
     /// Wait out <see cref="_lockBudget"/> instead of failing the write on the first busy open.
     /// </summary>
-    private FileStream Lock()
+    private FileStream Lock() => LockFile(Path.Combine(_dir, "inbox.lock"));
+
+    private FileStream LockFile(string path)
     {
-        var path = Path.Combine(_dir, "inbox.lock");
         var started = System.Diagnostics.Stopwatch.StartNew();
         Exception? last = null;
         while (true)
@@ -267,16 +421,28 @@ internal sealed class AgentInbox
             {
                 last = ex;
                 if (started.Elapsed >= _lockBudget)
-                    throw new IOException("inbox lock busy", last);
+                    throw new IOException(LockBusyMessage, last);
                 Thread.Sleep(TimeSpan.FromMilliseconds(20));
             }
         }
     }
 
+    private static bool IsLockBusy(IOException ex) =>
+        ex.Message.Contains(LockBusyMessage, StringComparison.Ordinal);
+
     private static void AppendJson<T>(string path, T value)
     {
         var json = JsonSerializer.Serialize(value, JsonUtil.Opts);
         File.AppendAllText(path, json + "\n");
+    }
+
+    private static void ClearFile(string path)
+    {
+        if (!File.Exists(path))
+            return;
+        using var fs = new FileStream(path, FileMode.Open, FileAccess.Write, FileShare.ReadWrite);
+        fs.SetLength(0);
+        fs.Flush(flushToDisk: true);
     }
 
     private static List<T> ReadLines<T>(string path)
@@ -307,26 +473,76 @@ internal sealed class AgentInbox
     /// <summary>
     /// The last line of a JSONL file must end with a newline. A crash can leave a partial tail.
     /// Leaving that tail in place makes the next append share its line, and reload then skips both.
-    /// A partial tail is cut back to the previous newline. A complete JSON value that is only missing
-    /// its newline is terminated.
+    /// A complete JSON value that is only missing its newline gets that newline appended.
+    /// A partial tail is truncated back to the previous newline. The bytes before that point stay
+    /// where they are: this does not rewrite the file, so a crash cannot replace valid history
+    /// with a short write.
     /// </summary>
-    private static void RepairTornTail(string path)
+    internal static void RepairTornTail(string path)
     {
         if (!File.Exists(path))
             return;
-        var text = File.ReadAllText(path);
-        if (text.Length == 0 || text[^1] == '\n')
+        using var fs = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite);
+        if (fs.Length == 0)
+            return;
+        fs.Seek(-1, SeekOrigin.End);
+        if (fs.ReadByte() == '\n')
             return;
 
-        var nl = text.LastIndexOf('\n');
-        var tail = nl < 0 ? text : text[(nl + 1)..];
-        if (tail.Length == 0)
+        var newlineAt = FindLastNewline(fs);
+        var tailStart = newlineAt < 0 ? 0 : newlineAt + 1;
+        var tailLength = fs.Length - tailStart;
+        if (tailLength <= 0)
             return;
 
-        if (IsCompleteJson(tail))
-            File.WriteAllText(path, text + "\n");
+        var complete = false;
+        if (tailLength <= int.MaxValue)
+        {
+            var bytes = new byte[(int)tailLength];
+            fs.Position = tailStart;
+            fs.ReadExactly(bytes);
+            complete = IsCompleteJson(Encoding.UTF8.GetString(bytes));
+        }
+
+        if (complete)
+        {
+            fs.Seek(0, SeekOrigin.End);
+            fs.WriteByte((byte)'\n');
+        }
         else
-            File.WriteAllText(path, nl < 0 ? "" : text[..(nl + 1)]);
+        {
+            fs.SetLength(tailStart);
+        }
+
+        fs.Flush(flushToDisk: true);
+    }
+
+    private static long FindLastNewline(FileStream fs)
+    {
+        var buffer = new byte[8192];
+        var pos = fs.Length;
+        while (pos > 0)
+        {
+            var take = (int)Math.Min(buffer.Length, pos);
+            pos -= take;
+            fs.Position = pos;
+            var read = 0;
+            while (read < take)
+            {
+                var n = fs.Read(buffer, read, take - read);
+                if (n == 0)
+                    break;
+                read += n;
+            }
+
+            for (var i = read - 1; i >= 0; i--)
+            {
+                if (buffer[i] == (byte)'\n')
+                    return pos + i;
+            }
+        }
+
+        return -1;
     }
 
     private static bool IsCompleteJson(string tail)

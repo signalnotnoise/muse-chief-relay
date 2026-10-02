@@ -8,7 +8,9 @@ internal enum RouteKind
     OwnEcho,
     ReplySuppressed,
     HopLimited,
-    SelfOnly
+    SelfOnly,
+    /// <summary>Durable on deferred.jsonl. The inbox lock timed out, so it is not in inbox.jsonl yet.</summary>
+    Deferred
 }
 
 internal sealed record RouteResult(RouteKind Kind, IReadOnlyList<InboxEvent> Delivered)
@@ -20,7 +22,7 @@ internal sealed record RouteResult(RouteKind Kind, IReadOnlyList<InboxEvent> Del
 /// <summary>
 /// Routes explicit mentions into per-agent inboxes. One delivery per tagged agent.
 /// Agent senders do not fan out again unless the line explicitly requests it, and that
-/// extra hop is capped by <c>mentions.max_fanout_hop</c>.
+/// extra hop is capped by <c>mentions.max_fanout_hop</c> inside one causal chain.
 /// </summary>
 internal sealed class MentionRouter : IMentionSink
 {
@@ -30,8 +32,6 @@ internal sealed class MentionRouter : IMentionSink
     private readonly string _root;
     private readonly ConversationStore _conversations;
     private readonly Dictionary<string, AgentInbox> _inboxes = new(StringComparer.OrdinalIgnoreCase);
-
-    private readonly Dictionary<string, int> _hopFloor = new(StringComparer.OrdinalIgnoreCase);
 
     private MentionRouter(RelayConfig cfg, TimeSpan? lockBudget)
     {
@@ -44,11 +44,12 @@ internal sealed class MentionRouter : IMentionSink
         foreach (var agent in _directory.Agents)
         {
             var inbox = AgentInbox.Open(Path.Combine(_root, agent.Id), lockBudget);
+            inbox.OnFiled = _conversations.AppendRoom;
             _inboxes[agent.Id] = inbox;
-            var hop = inbox.HighestFanoutHop();
-            if (hop > 0)
-                _hopFloor[agent.Id] = hop;
         }
+
+        foreach (var inbox in _inboxes.Values)
+            inbox.CatchUp();
     }
 
     public ConversationStore Conversations => _conversations;
@@ -77,16 +78,20 @@ internal sealed class MentionRouter : IMentionSink
         var sender = _directory.FindByNick(message.From);
         if (sender is not null && !parsed.ExplicitFanout)
             return RouteResult.Of(RouteKind.ReplySuppressed);
-        // Carried hop is the farther of the line's own hop and the deepest fan-out already
-        // delivered to this sender. A bare !fanout has hop 0, which must not reset the chain.
-        var carried = sender is null ? 0 : Math.Max(parsed.Hop, HopFloor(sender.Id));
-        if (sender is not null && parsed.ExplicitFanout && carried >= _maxHop)
-            return RouteResult.Of(RouteKind.HopLimited);
-        var hop = sender is null ? 0 : carried + 1;
 
         var sourceId = MessageIds.Source(message);
+        string? parentSource = null;
+        var root = sourceId;
+        var hop = 0;
+        // A human mention starts a chain. An agent fan-out continues one chain: the named parent
+        // or root, otherwise the latest delivery to that sender. A hop of 0 does not clear the
+        // hop already stored for that chain, and a different chain does not inherit it.
+        if (sender is not null && !TryCarry(sender.Id, parsed, sourceId, out parentSource, out root, out hop))
+            return RouteResult.Of(RouteKind.HopLimited);
+
         var delivered = new List<InboxEvent>();
         var duplicates = 0;
+        var deferred = 0;
         foreach (var agent in parsed.Agents)
         {
             if (agent.OwnsNick(message.From) || (sender is not null && string.Equals(sender.Id, agent.Id, StringComparison.OrdinalIgnoreCase)))
@@ -105,31 +110,71 @@ internal sealed class MentionRouter : IMentionSink
                 Scope = InboxContract.RoomScope,
                 Hop = hop,
                 Fanout = parsed.ExplicitFanout,
+                Parent = parentSource,
+                Root = root,
                 Ts = message.Ts
             };
             if (!_inboxes.TryGetValue(agent.Id, out var inbox))
                 continue;
-            if (!inbox.TryAppend(draft, out var stored))
+            var write = inbox.Write(draft);
+            switch (write.Kind)
             {
-                duplicates++;
-                continue;
+                case InboxWriteKind.Stored:
+                    delivered.Add(write.Event);
+                    break;
+                case InboxWriteKind.Deferred:
+                    deferred++;
+                    break;
+                default:
+                    duplicates++;
+                    break;
             }
-
-            if (stored.Fanout && stored.Hop > HopFloor(agent.Id))
-                _hopFloor[agent.Id] = stored.Hop;
-            _conversations.AppendRoom(stored);
-            delivered.Add(stored);
         }
 
         if (delivered.Count > 0)
             return RouteResult.Of(RouteKind.Delivered, delivered);
+        if (deferred > 0)
+            return RouteResult.Of(RouteKind.Deferred);
         if (duplicates > 0)
             return RouteResult.Of(RouteKind.Duplicate);
         return RouteResult.Of(RouteKind.SelfOnly);
     }
 
-    private int HopFloor(string agentId) =>
-        _hopFloor.TryGetValue(agentId, out var hop) ? hop : 0;
+    private bool TryCarry(string senderId, MentionParseResult parsed, string sourceId, out string? parentSource, out string root, out int hop)
+    {
+        parentSource = null;
+        root = sourceId;
+        hop = 0;
+        if (!_inboxes.TryGetValue(senderId, out var inbox))
+        {
+            if (parsed.Hop >= _maxHop)
+                return false;
+            hop = parsed.Hop + 1;
+            return true;
+        }
+
+        InboxEvent? parent = null;
+        if (!string.IsNullOrEmpty(parsed.Parent))
+            parent = inbox.Find(parsed.Parent);
+        else if (string.IsNullOrEmpty(parsed.Root))
+            parent = inbox.Latest();
+
+        if (parent is not null)
+        {
+            parentSource = parent.SourceId;
+            root = AgentInbox.ChainRoot(parent);
+        }
+        else if (!string.IsNullOrEmpty(parsed.Root))
+        {
+            root = parsed.Root;
+        }
+
+        var carried = Math.Max(parsed.Hop, inbox.HighestFanoutHop(root));
+        if (carried >= _maxHop)
+            return false;
+        hop = carried + 1;
+        return true;
+    }
 }
 
 internal interface IMentionSink
@@ -139,6 +184,7 @@ internal interface IMentionSink
 
 /// <summary>
 /// Socket-side entry. A failure here is logged and swallowed so mention routing cannot drop the relay.
+/// A busy inbox lock is retried, then the mention is spilled to deferred.jsonl and this returns true.
 /// </summary>
 internal static class MentionIngress
 {
@@ -152,8 +198,8 @@ internal static class MentionIngress
         }
         catch (Exception ex) when (ex is not OutOfMemoryException)
         {
-            // Lock contention is retried inside the inbox. If it still fails, say so: a bare
-            // exception name used to look like a handled no-op and the mention was gone.
+            // The inbox already retried the lock and, if it stayed busy, spilled the mention.
+            // Reaching here means that spill did not land, or some other failure did.
             error = ex is IOException or UnauthorizedAccessException
                 ? "not filed: " + ex.GetType().Name
                 : ex.GetType().Name;

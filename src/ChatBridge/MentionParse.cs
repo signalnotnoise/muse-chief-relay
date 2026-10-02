@@ -28,7 +28,12 @@ internal sealed record RoomMessage(string Room, string From, string? Trip, strin
 }
 
 /// <summary>Explicit tags in one room line. Bare words are not mentions.</summary>
-internal sealed record MentionParseResult(IReadOnlyList<AgentRecord> Agents, bool ExplicitFanout, int Hop);
+internal sealed record MentionParseResult(
+    IReadOnlyList<AgentRecord> Agents,
+    bool ExplicitFanout,
+    int Hop,
+    string? Parent,
+    string? Root);
 
 internal static class MentionParse
 {
@@ -43,11 +48,13 @@ internal static class MentionParse
     public static MentionParseResult Parse(string? text, AgentDirectory directory)
     {
         if (string.IsNullOrWhiteSpace(text) || directory.Agents.Count == 0)
-            return new MentionParseResult(Array.Empty<AgentRecord>(), false, 0);
+            return new MentionParseResult(Array.Empty<AgentRecord>(), false, 0, null, null);
 
         var raw = text.Trim();
         var fanout = false;
         var hop = 0;
+        string? parent = null;
+        string? root = null;
         var scan = raw;
         IReadOnlyList<string> addressed = Array.Empty<string>();
 
@@ -62,6 +69,8 @@ internal static class MentionParse
                         hop = parsedHop;
                     else if (obj["hop"] is JsonValue hopLong && hopLong.TryGetValue<long>(out var parsedLong))
                         hop = parsedLong > int.MaxValue ? int.MaxValue : (int)parsedLong;
+                    parent = Token(obj["parent"]);
+                    root = Token(obj["root"]);
                     addressed = Tokens(obj["to"]);
                     scan = Json.Str(obj, "text") ?? "";
                 }
@@ -102,7 +111,14 @@ internal static class MentionParse
             }
         }
 
-        return new MentionParseResult(found, fanout, hop < 0 ? 0 : hop);
+        return new MentionParseResult(found, fanout, hop < 0 ? 0 : hop, parent, root);
+    }
+
+    private static string? Token(JsonNode? node)
+    {
+        if (node is JsonValue value && value.TryGetValue<string>(out var text) && !string.IsNullOrWhiteSpace(text))
+            return text.Trim();
+        return null;
     }
 
     private static IReadOnlyList<string> Tokens(JsonNode? node)
