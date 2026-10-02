@@ -144,3 +144,7 @@ The hop that counts is the farther of the line's own `"hop"` and the deepest fan
 ## Room and side chats
 
 One agent id can be used in the room and in a side chat. Histories are different files, and room reads do not open `side/`. `ComposeRoomReply` returns the room text it was given and does not read side files. Copying a side scope into the room is refused. Nothing in the router writes side text into `inbox.jsonl`, `room.jsonl`, or a wake object.
+
+## v2 client (draft, off by default)
+
+`protocol_v2` defaults to false. The live path is still v1, including when a hello carries `durable`. With the flag off the process does not create `{base}/agents/` and does not write `durable-v2-*.jsonl`. The opt-in client follows `docs/chatbridge-v2-contract.md` §11. A v2 `delivery` is fsynced with its text, then handed to `agents/<id>/inbox.jsonl` and a `v2_handoff` chat line on the room inbox, and only then acked. That handoff is selected with the same @mention, open-question, and other-recipient rules as a v1 chat. The source id is the v1 dedup key for that room message, so a chat and a delivery of the same message are one inbox row and one wire ack. A failed handoff is not acked. Uncertain sends stay held until `chat-bridge reconcile --id <client_msg_id> drop|requeue`. Designed §§2–9 frames are fixtures only. See `docs/chatbridge-v2-client.md`.

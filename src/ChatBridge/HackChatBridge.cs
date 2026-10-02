@@ -21,6 +21,8 @@ internal sealed class HackChatBridge
     private readonly MentionRouter? _mentions;
     private readonly IHivemindMirror? _mirror;
     private readonly bool _voizle;
+    // Null unless protocol_v2 is on and this URL speaks voizle. v1 sessions never open it.
+    private readonly V2Client? _v2;
     // Auto-acks waiting to go out. Filled by the receive loop, drained by the send loop ahead of the outbox,
     // which _sendWake wakes early so an ack doesn't wait out the outbox poll.
     private readonly ConcurrentQueue<JsonObject> _acks = new();
@@ -48,6 +50,9 @@ internal sealed class HackChatBridge
         // Mention inboxes sit beside inbox.jsonl. Off unless mentions.enabled, so a current
         // deployment keeps the jsonl bridge and does not grow an agents/ tree.
         _mentions = cfg.MentionRouting.Enabled ? MentionRouter.Open(cfg) : null;
+        _v2 = cfg.ProtocolV2 && _voizle ? V2Client.Open(cfg.BaseDir) : null;
+        if (_v2 is not null)
+            _v2.Consumers = new V2WakeQueue(cfg, _fileLock);
         // Room-chat mirror into HIVEMIND. Off unless HIVEMIND_MESSAGE_MIRROR=1.
         // Offer only enqueues; a failure must not affect this session.
         _mirror = HivemindMirror.Open(_runtime, line => TryStderr("[chatbridge] " + line));
@@ -59,6 +64,8 @@ internal sealed class HackChatBridge
         public volatile bool Confirmed;
         public bool HelloAccepted;
         public string? EndReason;
+        // Null on the v1 path. Set from the hello when protocol_v2 is on.
+        public V2Plan? Plan;
         // Null result: a v1 hello was accepted. Otherwise a rejection reason, without the "join rejected:" prefix.
         public TaskCompletionSource<string?> Hello { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -290,10 +297,11 @@ internal sealed class HackChatBridge
             var helloWait = await Task.WhenAny(s.Hello.Task, recvTask, joinTimeout);
             if (helloWait == s.Hello.Task && s.Hello.Task.Result is null)
             {
-                await SendVoizleJoinAsync(ws, sendLock, ct);
+                await SendVoizleJoinAsync(ws, sendLock, s, ct);
                 if (!s.Confirmed)
                     WriteState(alive: true, connected: false, reconnecting: false);
-                Console.WriteLine($"[chatbridge] join sent for #{_cfg.Channel} as {_cfg.Nick}; waiting for welcome");
+                var pinned = s.Plan?.Dialect == V2Dialect.Deployed ? "v2 join pinned" : "join sent";
+                Console.WriteLine($"[chatbridge] {pinned} for #{_cfg.Channel} as {_cfg.Nick}; waiting for welcome");
             }
             else if (helloWait == s.Hello.Task)
             {
@@ -322,7 +330,9 @@ internal sealed class HackChatBridge
             // The outbox is drained only after the join is confirmed, so no line is spent on a socket
             // that isn't in the channel yet. The quiet-socket watchdog starts at the same moment:
             // not while the join is still unconfirmed, and not during reconnect backoff.
-            outTask = OutboxLoopAsync(ws, sendLock, pumpCts.Token);
+            outTask = s.Plan?.Dialect == V2Dialect.Deployed && _v2 is not null
+                ? V2OutboxLoopAsync(ws, sendLock, pumpCts.Token)
+                : OutboxLoopAsync(ws, sendLock, pumpCts.Token);
             if (_cfg.ReceiveIdle > TimeSpan.Zero)
             {
                 ArmReceiveIdle();
@@ -354,7 +364,12 @@ internal sealed class HackChatBridge
         if (recvTask.IsCompleted)
             s.EndReason ??= Describe(recvTask, "receive");
         if (outTask.IsCompleted && outTask.IsFaulted)
-            s.EndReason ??= Describe(outTask, "send");
+        {
+            var reason = outTask.Exception!.GetBaseException();
+            s.EndReason ??= reason is V2SessionEndException
+                ? reason.Message
+                : Describe(outTask, "send");
+        }
         if (idleTask.IsFaulted)
             s.EndReason ??= Describe(idleTask, "receive-idle");
 
@@ -400,19 +415,31 @@ internal sealed class HackChatBridge
         LogEvent("out", join); // logged without the pass
     }
 
-    private async Task SendVoizleJoinAsync(IRelaySocket ws, SemaphoreSlim sendLock, CancellationToken ct)
+    private async Task SendVoizleJoinAsync(IRelaySocket ws, SemaphoreSlim sendLock, Session s, CancellationToken ct)
     {
-        var wire = new JsonObject
+        JsonObject wire;
+        if (s.Plan?.Dialect == V2Dialect.Deployed)
         {
-            ["v"] = 1,
-            ["type"] = "join",
-            ["room"] = _cfg.Channel,
-            ["nick"] = _cfg.Nick
-        };
-        if (PublicTrip.ForJoin(_cfg.Trip) is { } trip)
-            wire["trip"] = trip;
+            // §11: pin v2 on this connection only. The owner secret is pass, never the trip.
+            wire = V2Client.JoinFrame(_cfg.Channel, _cfg.Nick, PublicTrip.ForJoin(_cfg.Trip), _cfg.InboxOwnerSecret);
+        }
+        else
+        {
+            wire = new JsonObject
+            {
+                ["v"] = 1,
+                ["type"] = "join",
+                ["room"] = _cfg.Channel,
+                ["nick"] = _cfg.Nick
+            };
+            if (PublicTrip.ForJoin(_cfg.Trip) is { } trip)
+                wire["trip"] = trip;
+        }
+
         await SendAsync(ws, sendLock, wire, ct);
-        LogEvent("out", InboundFrame.ForLog(wire));
+        var logged = (JsonObject)wire.DeepClone();
+        LogRedaction.RedactOwnerFields(logged);
+        LogEvent("out", InboundFrame.ForLog(logged));
     }
 
     private async Task<string> ReceiveLoopAsync(
@@ -443,7 +470,14 @@ internal sealed class HackChatBridge
                 // Any complete server frame refreshes the idle clock once the watchdog is armed.
                 // Chat is not required: info, warn, and presence frames are traffic too.
                 NoteInboundFrame();
-                HandleFrame(raw, s, joinResult);
+                try
+                {
+                    HandleFrame(raw, s, joinResult);
+                }
+                catch (V2SessionEndException ex)
+                {
+                    return ex.Message;
+                }
             }
         }
     }
@@ -456,6 +490,15 @@ internal sealed class HackChatBridge
             if (frame.Object is { } helloObj && frame.Cmd == "hello" && IsVoizleHello(helloObj))
             {
                 s.HelloAccepted = true;
+                if (_v2 is not null)
+                {
+                    s.Plan = V2Negotiation.Decide(helloObj, optIn: true);
+                    if (s.Plan.Dialect == V2Dialect.Deployed)
+                        _v2.BeginDeployed(Path.Combine(_cfg.BaseDir, "outbox.jsonl"));
+                    if (s.Plan.Note is { } note)
+                        LogEvent("note", new JsonObject { ["v2"] = note });
+                }
+
                 s.Hello.TrySetResult(null);
             }
             else
@@ -495,6 +538,18 @@ internal sealed class HackChatBridge
         LogEvent("in", frame.LogNode);
         if (frame.Object is not { } obj)
             return; // logged as raw; nothing else to do
+
+        if (s.Plan?.Dialect == V2Dialect.Deployed && _v2 is not null)
+        {
+            var inbound = _v2.OnFrame(obj);
+            foreach (var wire in inbound.Send)
+                EnqueueWire(wire);
+            FlushV2Notes();
+            if (inbound.WakeOutbox)
+                WakeSender();
+            if (inbound.EndSession is { } end)
+                throw new V2SessionEndException(end);
+        }
 
         if (ack is { Send: true, Text: { } ackText })
         {
@@ -607,6 +662,86 @@ internal sealed class HackChatBridge
         // A welcome with no trip (or a later reconnect that drops it) must clear a trip learned earlier.
         // AutoAcker lives for the process, so leaving the old value would suppress that trip forever.
         _acker.OwnTrip = string.IsNullOrEmpty(trip) ? null : trip;
+    }
+
+    private async Task V2OutboxLoopAsync(IRelaySocket ws, SemaphoreSlim sendLock, CancellationToken ct)
+    {
+        var announcedHold = false;
+        while (true)
+        {
+            ct.ThrowIfCancellationRequested();
+            await DrainV2ControlAsync(ws, sendLock, ct);
+
+            var step = _v2!.NextChat();
+            FlushV2Notes();
+            if (step.ResetSession)
+            {
+                // The deployed accepted frame has no client id. Leave this socket before
+                // sending the next chat, so a late accepted cannot complete that chat.
+                throw new V2SessionEndException("dropped send fenced this session; reconnect before the next chat");
+            }
+
+            if (step.Hold)
+            {
+                // §11: resending after a missed `accepted` creates a second message.
+                // Stop the outbound pump until an explicit reconcile (requeue or drop) or a later accepted.
+                if (!announcedHold)
+                {
+                    announcedHold = true;
+                    LogEvent("note", new JsonObject
+                    {
+                        ["v2"] = "uncertain outbound held for reconcile",
+                        ["client_msg_id"] = step.ClientMsgId
+                    });
+                }
+
+                await _sendWake.WaitAsync(_runtime.OutboxPoll, ct);
+                continue;
+            }
+
+            announcedHold = false;
+            if (step.Frame is { } frame)
+            {
+                // NextChat fsynced `sent` before returning the frame. A throw here leaves
+                // the row uncertain; the next session holds instead of sending it again.
+                await SendAsync(ws, sendLock, frame, ct);
+                LogEvent("out", LogRedaction.Outbound(InboundFrame.ForLog(frame)));
+            }
+
+            await _sendWake.WaitAsync(_runtime.OutboxPoll, ct);
+        }
+    }
+
+    private async Task DrainV2ControlAsync(IRelaySocket ws, SemaphoreSlim sendLock, CancellationToken ct)
+    {
+        while (_acks.TryDequeue(out var frame))
+        {
+            var type = Json.Str(frame, "type") ?? Json.Str(frame, "cmd");
+            if (type is "pull" or "ack")
+            {
+                await SendAsync(ws, sendLock, frame, ct);
+                LogEvent("out", LogRedaction.Outbound(InboundFrame.ForLog(frame)));
+                continue;
+            }
+
+            // Auto-ack chats join the durable queue. They do not bypass an uncertain head.
+            if (Json.Str(frame, "text") is { } text)
+                _v2!.EnqueueLocal(text);
+        }
+    }
+
+    private void EnqueueWire(JsonObject frame)
+    {
+        _acks.Enqueue(frame);
+        WakeSender();
+    }
+
+    private void FlushV2Notes()
+    {
+        if (_v2 is null)
+            return;
+        foreach (var note in _v2.TakeNotes())
+            LogEvent("note", new JsonObject { ["v2"] = note });
     }
 
     private async Task OutboxLoopAsync(IRelaySocket ws, SemaphoreSlim sendLock, CancellationToken ct)

@@ -200,9 +200,13 @@ internal sealed class RelayFixture : IAsyncDisposable
     public int CancelAfterCreates { get; set; }
     public Action<string>? Stdout { get; set; }
     public double? ReceiveIdleSeconds { get; init; }
+    public bool ProtocolV2 { get; init; }
+    public string? InboxOwnerEnv { get; init; }
     public Func<DateTimeOffset>? UtcNow { get; set; }
     public Func<TimeSpan, CancellationToken, Task>? IdleDelay { get; set; }
     public Action? OnBackoff { get; set; }
+    // One lookup for RelayConfig (inbox owner secret) and the HIVEMIND mirror gate.
+    // Null returns null for every name, so a socket script does not read the process environment.
     public Func<string, string?>? Env { get; init; }
     public Action<string>? MirrorOffer { get; init; }
 
@@ -335,8 +339,12 @@ internal sealed class RelayFixture : IAsyncDisposable
         }
         if (ReceiveIdleSeconds is { } idle)
             doc["receive_idle_s"] = idle;
+        if (ProtocolV2)
+            doc["protocol_v2"] = true;
+        if (!string.IsNullOrEmpty(InboxOwnerEnv))
+            doc["inbox_owner_env"] = InboxOwnerEnv;
         File.WriteAllText(path, JsonSerializer.Serialize(doc));
-        return RelayConfig.Load(path, false, Dir.Path, _ => null);
+        return RelayConfig.Load(path, false, Dir.Path, name => Env?.Invoke(name));
     }
 
     private static bool StateFlag(string path, string name)

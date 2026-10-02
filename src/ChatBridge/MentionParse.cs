@@ -141,6 +141,24 @@ internal static class MentionParse
 internal static class MessageIds
 {
     /// <summary>
+    /// Dedup key shared by a v1 room chat and a v2 delivery of that same chat.
+    /// A server message id wins (<c>srv:</c>). Otherwise the hash of room, sender, trip,
+    /// timestamp, and text. The v2 lease id is not part of the key, so the two shapes
+    /// collapse and the second write is a duplicate rather than a second delivery.
+    /// </summary>
+    public static string Overlap(RoomMessage message) => Source(message);
+
+    /// <summary>Same key as <see cref="Overlap(RoomMessage)"/> for the chat inside a v2 delivery.</summary>
+    public static string Overlap(string room, V2QueuedDelivery delivery) =>
+        Source(new RoomMessage(
+            room,
+            delivery.From ?? "",
+            string.IsNullOrWhiteSpace(delivery.Trip) ? null : delivery.Trip,
+            delivery.Text ?? "",
+            delivery.Ts,
+            string.IsNullOrWhiteSpace(delivery.MessageId) ? null : delivery.MessageId.Trim()));
+
+    /// <summary>
     /// Stable id for one room chat. A server id wins. Otherwise the hash of room, sender, trip,
     /// timestamp, and text. Identical lines with no server id and no timestamp collapse, which is
     /// how replay is suppressed.

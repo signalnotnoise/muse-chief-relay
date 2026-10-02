@@ -10,6 +10,8 @@ room.jsonl
 inbox.lock
 side/*.jsonl
 state.json
+durable-v2-outbound.jsonl
+durable-v2-inbound.jsonl
 .inbox_watch.offset*
 .hook.offset*
 # Decide-and-reply exclusive lock (any directory, including hook/reply.lock).
