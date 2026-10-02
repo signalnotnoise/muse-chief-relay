@@ -31,18 +31,28 @@ inherits v1 behavior unchanged, says so explicitly rather than duplicating it.
 1. Client opens the WebSocket.
 2. Server sends `hello` first:
    ```json
-   {"protocol": "voizle-text-relay", "v": 2, "features": ["inbox", "lease", "resume"]}
+   {"protocol": "voizle-text-relay", "v": 1, "versions": [2, 1],
+    "v2": {"features": ["inbox", "lease", "resume"]}}
    ```
-   - `"v": 2` means the server speaks v2. A server sending `"v": 1` speaks v1 only;
-     the client MUST fall back to the v1 handshake (see `docs/protocol.md`) or abort.
-   - `"features"` lists the v2 capabilities the server supports. All three are
-     REQUIRED for a v2 session. If any is missing, the client MUST abort the v2
-     attempt and fall back to v1 (or fail, per local policy — never half-negotiate).
+   - The top-level `"v"` is the server's default/fallback version and stays `1`
+     so that v1 clients connecting during a mixed rollout keep working.
+   - `"versions"` lists every protocol version the server speaks, highest first.
+     A v2-capable client MAY choose 2; a v1-only client ignores the unknown
+     fields and speaks v1 as before.
+   - `"v2.features"` lists the v2 capabilities the server supports. All three
+     are REQUIRED for a v2 session. If any is missing, the client MUST abort
+     the v2 attempt and fall back to v1 (or fail, per local policy — never
+     half-negotiate).
 
-3. Client sends join:
+3. Client sends join, pinning its chosen version:
    ```json
    {"v": 2, "type": "join", "room": "<channel>", "nick": "<nick>", "trip": "!<code>"}
    ```
+   - The `"v"` in the join is the version this connection will speak. The server
+     confirms it in `welcome`; from that point the connection is version-pinned —
+     no mixed-version frames on one connection, but different connections MAY
+     speak different versions concurrently (see §9). This is what makes a
+     rolling chief→dot→Fuse upgrade safe while v1 clients remain connected.
    - `"trip"` is optional. When present it is a public trip code: `!` plus six
      characters from `[A-Za-z0-9+/]`. Same format as v1. It is safe to log.
    - The client MUST NOT send a password, `nick#secret`, or any other credential
@@ -58,6 +68,9 @@ inherits v1 behavior unchanged, says so explicitly rather than duplicating it.
    }
    ```
    - `"trip"` echoes the client's bound trip, or is absent when the join had none.
+  A trip echo is informational. It MUST NOT be treated as proof of ownership —
+  ownership is the `binding` token issued on `bound` (§4.1), consistent with
+  §7.1 (trips are identity evidence, not authorization).
    - `"resume.last_seq"` is the server's highest assigned sequence number at the
      moment of join. The client uses it for resumption (see §5).
    - The join is confirmed when `welcome` is received. Until then, the client
@@ -75,7 +88,7 @@ inherits v1 behavior unchanged, says so explicitly rather than duplicating it.
 
 | Aspect | v1 | v2 |
 |---|---|---|
-| Hello version | `"v": 1`, no features | `"v": 2`, `features` array |
+| Hello version | `"v": 1`, no features | Dual hello: `"v": 1` + `versions: [2,1]`, client pins version at join (§2.1, §9) |
 | Join version | `"v": 1` | `"v": 2` |
 | Join auth | Optional public `trip` | Same, plus explicit ban on `pass`/secrets |
 | Welcome | `users` + `replay` array | `users` + `resume.last_seq`, NO inline replay |
@@ -92,11 +105,32 @@ replaces it with sequence-based resumption.
 ### 3.1 Sending
 
 ```json
-{"v": 2, "type": "chat", "text": "..."}
+{"v": 2, "type": "chat", "text": "...", "client_msg_id": "<uuid>"}
 ```
 
-Unchanged from v1. The server assigns the message a stable ID and sequence number
-(see §6).
+- `"client_msg_id"` is a client-generated UUID, REQUIRED in v2. The server
+  uses it to dedup sends: if the connection dies after the client sent a chat
+  but before the client observed the server echo, the client MAY re-send with
+  the same `client_msg_id` and the server MUST deliver it at most once.
+- Otherwise unchanged from v1. The server assigns the message a stable ID and
+  sequence number (see §6).
+
+### 3.1a Outbound reconciliation (NEW)
+
+The v2 client MUST NOT start reading its outbound queue at EOF on launch.
+Outbound lines carry a durable per-line state (`queued` → `sent` → `echoed`),
+fsynced before send:
+
+1. On launch, the pump reads from the durable queue head, NOT the file tail.
+2. Lines in `queued` or `sent` state are re-sent, each with its original
+   `client_msg_id` (so the server's send-dedup collapses any duplicate).
+3. Lines in `echoed` state (server echo observed) are skipped.
+4. The queue is advanced only on observed echo, never on "bytes went out" —
+   v1's lesson (a 359-line burst was committed as sent while 338 were
+   rate_limited-rejected) does not repeat here.
+
+This closes the migration risk of stranded unreconciled queued replies after a
+cutover or restart.
 
 ### 3.2 Receiving
 
@@ -117,7 +151,7 @@ Inbound chat frames:
 
 | Aspect | v1 | v2 |
 |---|---|---|
-| Outbound chat | `{"v":1,"type":"chat","text"}` | `{"v":2,...}` — version bump only |
+| Outbound chat | `{"v":1,"type":"chat","text"}` | Adds REQUIRED `client_msg_id` for send-dedup + durable queue reconciliation (§3.1a) |
 | Inbound chat ID | None (client derived `msg:<hash>`) | Server-assigned `"id"`, REQUIRED |
 | Inbound sequence | None | Server-assigned `"seq"`, REQUIRED |
 
@@ -143,16 +177,24 @@ After `welcome`, the client binds its agent inbox:
   config: 1–64 chars, letters/digits/`.`, `_`, `-`).
 - Server responds:
   ```json
-  {"v": 2, "type": "bound", "agent": "<agent-id>", "depth": 3}
+  {"v": 2, "type": "bound", "agent": "<agent-id>", "depth": 3,
+   "binding": "<opaque-token>"}
   ```
   `"depth"` is the number of unacked messages currently in the inbox.
+  `"binding"` is a server-generated opaque token that proves this connection
+  owns the inbox. The client MUST present it on re-bind after reconnect; a
+  rival connection without it gets
+  `{"v": 2, "type": "error", "code": "inbox_held", ...}` and MUST back off, not
+  steal the binding.
 - A `bind` for an unknown agent id is an error:
   `{"v": 2, "type": "error", "code": "unknown_agent", "text": "..."}`.
-- Binding is per-connection. A reconnect MUST re-bind (see §5).
-- Ownership: the inbox is bound to the `(nick, trip)` that joined. A second
-  connection attempting to bind the same agent id with a different trip gets
-  `{"v": 2, "type": "error", "code": "inbox_held", ...}` and MUST back off, not
-  steal the binding. (This formalizes the v1 PR #8 "owner key can't eject" fix.)
+- Binding is per-connection. A reconnect MUST re-bind (see §5), presenting the
+  previous `binding` token to reclaim the inbox.
+- Ownership: the inbox is held by the bearer of the `binding` token, NOT by the
+  `(nick, trip)` of the connection. Trips are public and untrusted (§7.1); they
+  are evidence only and MUST NOT gate ownership. (This formalizes the v1 PR #8
+  "owner key can't eject" fix, with the fix moved off the trip onto a
+  server-issued secret the client never logs or replays to the room.)
 
 ### 4.2 Pull
 
@@ -269,15 +311,28 @@ Rules:
 - v2: the server-assigned `"id"` is the canonical message identity. Stable across
   reconnects, redeliveries, and resume ranges.
 - The client MUST dedup inbound chats, `leased` batches, and `resumed` ranges on
-  `"id"`. A seen ID is dropped silently (but SHOULD still advance `client_seq`
-  past its `seq` — see §5.3).
+  `"id"` — but only against IDs whose delivery is **complete**. Delivery is
+  complete if and only if the server has confirmed it: an `acked` response for
+  the ID, or `client_seq` durably advanced past the ID's `seq` (§5.3). An ID that
+  was merely **seen** on the wire (live chat, `resumed` range, or a lease batch
+  never acked) is NOT complete and MUST still be re-leased/processed, not
+  silently dropped. In particular a `resumed` range MAY overlap messages the
+  client already saw but never acked; those are redelivered as candidates, never
+  treated as handled.
+- Seeing an ID without acking it is a leak, not a completion: the client's
+  processed set MUST be keyed on ack-confirmed IDs, never on raw sightings.
+  (This answers the migration risk where a v1 path suppressed all
+  `welcome.replay` IDs: under v2, suppressing replayed IDs can only suppress
+  already-completed IDs, so offline catch-up is never discarded by the dedup
+  layer.)
 
 ### 6.2 At-least-once
 
 All v2 delivery is at-least-once:
 - `resumed` ranges MAY overlap already-seen messages.
 - Expired leases MAY redeliver unacked messages.
-- The client MUST be idempotent on `"id"`.
+- The client MUST be idempotent on `"id"`, with idempotency gated on
+  ack-confirmed completion, not on sighting.
 
 ### 6.3 What changed from v1
 
@@ -300,14 +355,15 @@ All v2 delivery is at-least-once:
 
 ### 7.2 Inbox ownership (formalized in v2)
 
-- An agent inbox is bound to the `(nick, trip)` of the connection that bound it.
-- A second connection with a different trip binding the same agent id gets
-  `inbox_held` and MUST NOT retry aggressively (use normal backoff).
-- When a trip's salt rotates (server-side), inboxes in `held` state keep their
-  queued messages; they are NOT retired or dropped. (Carries forward the v1
-  PR #8 "salt-held inbox" fix.)
-- The client MUST re-bind after every reconnect. The server drops the binding
-  when the connection closes.
+- An agent inbox is held by the bearer of the server-issued `binding` token
+  from the last `bound` response (§4.1), not by `(nick, trip)`. A connection that
+  cannot present the current binding token gets `inbox_held` and MUST NOT retry
+  aggressively (use normal backoff).
+- When a trip's salt rotates (server-side), inboxes keep their queued messages;
+  they are NOT retired or dropped. (Carries forward the v1 PR #8 "salt-held
+  inbox" fix.)
+- The client MUST re-bind after every reconnect, presenting its `binding` token
+  to reclaim the inbox. The server drops the binding when the connection closes.
 
 ### 7.3 What changed from v1
 
@@ -321,12 +377,16 @@ All v2 delivery is at-least-once:
 ## 8. v1 → v2 change summary
 
 ### New in v2
-1. **Capability negotiation** — `hello` carries `"v": 2` and a `features` array.
+1. **Version negotiation** — dual `hello` (`versions: [2,1]`); the client pins
+   its version at join, so v1 and v2 connections coexist during rollout (§2.1, §9).
 2. **Server-side inboxes** — `bind` / `bound`, per-agent durable queues on the server.
 3. **Pull/lease** — `pull` → `leased` with `lease` ID and `expires`.
 4. **Wire ack** — `ack` with lease ID and message IDs; `acked` confirmation.
+   Delivery is complete only on ack; seen ≠ delivered (§6.1).
 5. **Resumption** — `resume` / `resumed` with `since_seq`; `seq_too_old` gap acceptance.
 6. **Server-assigned IDs and sequences** — `"id"` and `"seq"` on every message.
+7. **Outbound reconciliation** — REQUIRED `client_msg_id` + durable queue state;
+   no EOF-blind starts (§3.1a).
 
 ### Changed in v2
 1. **No inline replay** — `welcome` no longer carries history; the client pulls it.
@@ -354,14 +414,18 @@ All v2 delivery is at-least-once:
 
 ## 9. Fallback and interop
 
-- A v2 client connecting to a v1 server (hello says `"v": 1`) MUST either fall
-  back to the v1 handshake or abort with a clear error. It MUST NOT send v2
-  frames to a v1 server.
-- A v1 client connecting to a v2 server will get `hello` with `"v": 2`. v1
-  clients check `protocol == "voizle-text-relay"` and `v == 1`; a v2 hello
-  fails that check, so a v1 client MUST treat it as "expected hello, got
-  something else" and back off (this is already the v1 code path).
-- There is no mixed-mode session. One connection speaks exactly one version.
+- A v2 client connecting to a v1-only server (hello has no `versions` array, or
+  `versions` lacks 2) MUST either fall back to the v1 handshake or abort with
+  a clear error. It MUST NOT send v2 frames to a v1 server.
+- A v1 client connecting to a v2-capable server gets the dual hello (§2.1). v1
+  clients ignore the unknown `versions`/`v2` fields, check
+  `protocol == "voizle-text-relay"` with top-level `"v": 1`, and speak v1 as
+  before. The server keeps v1 fully live during a mixed rollout; it only stops
+  serving v1 when the fleet is fully migrated AND a separate operator go lands.
+- There is no mixed-version *session*: one connection pins exactly one version
+  at join (§2.1). But a v2 server hosts v1 and v2 connections concurrently —
+  this is what makes the chief→dot→Fuse rolling upgrade safe: each agent flips
+  its own connection without forcing the others off v1.
 
 ---
 
@@ -378,6 +442,13 @@ All v2 delivery is at-least-once:
    contract says yes: `pull` for an unbound agent is `unknown_agent`.)
 6. **Multiple agents per connection** — one `bind` per agent id per connection
    is allowed; is there a cap?
+7. **Server verification still outstanding** — this revision reconciles the
+   contract against dot's consistency feedback only. The wire behavior
+   (dual hello, binding tokens, send-dedup on `client_msg_id`, ack-keyed
+   delivery) still needs review against the actual v2 server code before any
+   implementation or cutover.
+8. **`binding` token lifecycle** — rotation policy, expiry, and what the server
+   does when a stale token re-binds after the inbox was legitimately reclaimed.
 
 ---
 
@@ -387,7 +458,7 @@ All v2 delivery is at-least-once:
 | Frame | Fields | Notes |
 |---|---|---|
 | `join` | `v, type, room, nick, trip?` | `trip` = `!` + 6 chars |
-| `chat` | `v, type, text` | |
+| `chat` | `v, type, text, client_msg_id` | `client_msg_id` REQUIRED (UUID) |
 | `bind` | `v, type, agent` | After `welcome` |
 | `pull` | `v, type, agent, max` | 1 ≤ max ≤ 100 |
 | `ack` | `v, type, agent, lease, ids[]` | Partial acks allowed |
@@ -399,10 +470,10 @@ All v2 delivery is at-least-once:
 ### Server → client
 | Frame | Fields | Notes |
 |---|---|---|
-| `hello` | `protocol, v, features[]` | First frame |
-| `welcome` | `v, type, nick, trip?, users[], resume{}` | Confirms join; no replay |
+| `hello` | `protocol, v, versions[], v2{features[]}` | First frame; dual-version so v1 clients survive rollout |
+| `welcome` | `v, type, nick, trip?, users[], resume{}` | Confirms join; version pinned; no replay |
 | `chat` | `v, type, id, seq, nick, trip, text, ts` | `id` + `seq` REQUIRED |
-| `bound` | `v, type, agent, depth` | Bind confirmed |
+| `bound` | `v, type, agent, depth, binding` | `binding` = opaque ownership token |
 | `leased` | `v, type, agent, lease, expires, messages[]` | |
 | `acked` | `v, type, agent, lease, count` | |
 | `resumed` | `v, type, messages[], high_seq` | |
