@@ -119,6 +119,75 @@ test("workspace key is sha256 of the channel and never the channel", () => {
   assert.equal(slugNamedAsChannel.reason, "key");
 });
 
+test("voizle millisecond timestamps are stored as epoch seconds", async () => {
+  const ms = 1790970720123;
+  const seconds = 1790970720;
+  const plan = hive.planRoomMirror(chat({ ts: ms }));
+  assert.equal(plan.ok, true);
+  assert.equal(plan.message.ts, seconds);
+  assert.equal(plan.workspace.createdTs, seconds);
+
+  const even = hive.planRoomMirror(chat({ ts: 1720000000000 }));
+  assert.equal(even.ok, true);
+  assert.equal(even.message.ts, 1720000000);
+
+  const alreadySeconds = hive.planRoomMirror(chat({ ts: 1700000000 }));
+  assert.equal(alreadySeconds.ok, true);
+  assert.equal(alreadySeconds.message.ts, 1700000000);
+
+  const ceiling = hive.planRoomMirror(chat({ ts: 100000000000 }));
+  assert.equal(ceiling.ok, true);
+  assert.equal(ceiling.message.ts, 100000000000);
+
+  const msCeiling = hive.planRoomMirror(chat({ ts: 100000000000000 }));
+  assert.equal(msCeiling.ok, true);
+  assert.equal(msCeiling.message.ts, 100000000000);
+
+  const past = hive.planRoomMirror(chat({ ts: 100000000000001 }));
+  assert.equal(past.ok, false);
+  assert.equal(past.reason, "type");
+  const negative = hive.planRoomMirror(chat({ ts: -1 }));
+  assert.equal(negative.ok, false);
+  assert.equal(negative.reason, "type");
+  const fraction = hive.planRoomMirror(chat({ ts: 1700000000.5 }));
+  assert.equal(fraction.ok, false);
+  assert.equal(fraction.reason, "type");
+
+  assert.equal(hive.validateDocument("messages", {
+    workspaceKey: KEY,
+    threadKey: "room",
+    sender: "Ada",
+    text: "hello",
+    ts: ms,
+  }), "type");
+
+  const logs = [];
+  let written = null;
+  const mirror = createMessageMirror({
+    env: { HIVEMIND_MESSAGE_MIRROR: "1" },
+    hivemind: {
+      async createOrVerifyWorkspace(data) {
+        assert.equal(data.createdTs, seconds);
+        return { status: "created" };
+      },
+      async createOrVerifyMessage(data) {
+        written = data;
+        return { status: "created" };
+      },
+    },
+    log(message) { logs.push(message); },
+    retryDelays: [],
+  });
+  const result = await mirror.observeAcceptedChat(chat({ ts: ms }));
+  assert.equal(result.status, "created");
+  assert.equal(written.ts, seconds);
+  assert.equal(logs.join("\n").includes("refused"), false);
+
+  const refused = await mirror.observeAcceptedChat(chat({ ts: 100000000000001 }));
+  assert.equal(refused.status, "error");
+  assert.match(logs.join("\n"), /refused \(type\)/);
+});
+
 test("message document id is the room uuid and oversize text is refused", async () => {
   const store = memoryStore();
   const logs = [];

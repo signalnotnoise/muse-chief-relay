@@ -38,7 +38,15 @@ internal static class MirrorPayload
         "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
         RegexOptions.CultureInvariant | RegexOptions.Compiled);
 
+    /// <summary>
+    /// Seconds ceiling for a stored HIVEMIND timestamp (year 5138).
+    /// A voizle chat <c>ts</c> is Unix milliseconds from <c>Date.now()</c>
+    /// and is larger than this. Those values are not stored raw.
+    /// </summary>
     public const long TsMax = 100_000_000_000L;
+
+    /// <summary>Inclusive ceiling for a Unix-millisecond stamp, equal to <see cref="TsMax"/> seconds.</summary>
+    public const long TsMaxMillis = TsMax * 1000L;
 
     public readonly record struct Result(bool Ok, string Json, string Reason);
 
@@ -70,7 +78,22 @@ internal static class MirrorPayload
             return new Result(false, "", "missing");
         if (text.Length > 8192)
             return new Result(false, "", "length");
-        var ts = Epoch(chat, "time") ?? Epoch(chat, "ts") ?? nowSeconds;
+        long ts;
+        if (Epoch(chat, "time") is { } fromTime)
+        {
+            if (!ToEpochSeconds(fromTime, out ts))
+                return new Result(false, "", "type");
+        }
+        else if (Epoch(chat, "ts") is { } fromTs)
+        {
+            if (!ToEpochSeconds(fromTs, out ts))
+                return new Result(false, "", "type");
+        }
+        else
+        {
+            ts = nowSeconds;
+        }
+
         if (ts < 0 || ts > TsMax)
             return new Result(false, "", "type");
 
@@ -95,6 +118,28 @@ internal static class MirrorPayload
         if (value.TryGetValue<int>(out var small))
             return small;
         return null;
+    }
+
+    /// <summary>
+    /// Seconds pass through. A value above <see cref="TsMax"/> and at most
+    /// <see cref="TsMaxMillis"/> is Unix milliseconds and becomes whole seconds.
+    /// </summary>
+    private static bool ToEpochSeconds(long raw, out long seconds)
+    {
+        if (raw >= 0 && raw <= TsMax)
+        {
+            seconds = raw;
+            return true;
+        }
+
+        if (raw > TsMax && raw <= TsMaxMillis)
+        {
+            seconds = raw / 1000L;
+            return seconds >= 0 && seconds <= TsMax;
+        }
+
+        seconds = 0;
+        return false;
     }
 }
 
