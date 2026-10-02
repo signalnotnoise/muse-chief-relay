@@ -110,7 +110,7 @@ that client name the operation and the status code. They do not include the key,
 or the document body. If Appwrite is unset or the read fails, the same git/jsonl fetch runs.
 That fallback is not a production cutover: the static page still works with the variables unset.
 
-Room chat is not written to Appwrite unless `HIVEMIND_MESSAGE_MIRROR` is `1`. Unset or `0` does not create workspace or message documents, even when `APPWRITE_*` is set. The mirror is asynchronous: a failure is an operation name and a status code, and ChatBridge still delivers the chat. The stored message uses the room UUID as its document id, the sender nick, the text, and a workspace key that is the SHA-256 of the channel. The channel name, trip, and join password are not fields on that document. Leave the flag off until that mirror has been reviewed.
+Room chat is not written to Appwrite unless `HIVEMIND_MESSAGE_MIRROR` is `1`. Unset or `0` does not create workspace or message documents, even when `APPWRITE_*` is set. The mirror is asynchronous: a failure is an operation name and a status code, and ChatBridge still delivers the chat. The in-memory mirror queue is 32. A larger burst is appended to `{base}/hivemind-mirror-queue.jsonl` (helper JSON only) and drained later. A spill that cannot be written is refused and logged without the message text. The stored message uses the room UUID as its document id, the sender nick, the text, and a workspace key that is the SHA-256 of the channel. The channel name, trip, and join password are not fields on that document. Leave the flag off until that mirror has been reviewed.
 
 ## Knowledge graph
 

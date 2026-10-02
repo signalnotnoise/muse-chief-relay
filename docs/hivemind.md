@@ -37,11 +37,13 @@ The helper uses the existing Node Appwrite client (`web/muse/hivemindClient.js`)
 | Workspace `key` | Lowercase SHA-256 hex of the trimmed channel, same as a board key. A caller may also pass a slug. The channel name is not stored. `name` and `description` are left unset. |
 | Workspace `createdTs` | Epoch seconds. First write wins. A later chat that finds the workspace already stored leaves that timestamp in place and is not a conflict. |
 | Message document id | The room message UUID (`id` on the chat frame). A create that conflicts (409, or the document is already there) is success: the stored document is left as-is. |
-| Message fields | `workspaceKey`, `threadKey` (default `room`), `sender` (nick only), `text`, `ts` (epoch seconds). |
+| Message fields | `workspaceKey`, `threadKey` (default `room`), `sender` (nick only), `text`, `ts` (epoch seconds). Voizle chat `ts` is Unix milliseconds (`Date.now()`). A value above 100000000000 and at most 100000000000000 is stored as whole seconds. A hack.chat `time` already in seconds is unchanged. A larger value is refused. |
 | Text | Longer than 8192 characters is refused. It is not truncated and not written. |
 | Left out | Trip, join password, pass, token, and the channel name. |
 
-Retries are bounded (the helper tries a few times, then stops). The bridge queue holds at most 32 chats; a full queue is refused and logged. Logs stay `hivemind <operation> failed (<code>)` or `hivemind message mirror refused (<reason>)`. They do not include the API key, the channel, or the message text.
+Retries are bounded (the helper tries a few times, then stops). The bridge keeps at most 32 chats in memory while the helper runs (one Node process at a time). A larger burst is not dropped. Each extra offer is appended to `{base}/hivemind-mirror-queue.jsonl` and drained when a memory slot is free. That file is one helper JSON object per line (`id`, `workspaceKey`, `sender`, `text`, `ts`, `threadKey`). It does not hold the channel name, trip, or join password. A restart reads it again from the start. Appwrite dedup (the room UUID; a 409 leaves the stored document) makes that replay safe. A torn tail is skipped when it is not JSON. If the file cannot be written, that offer is refused and logged, and the chat path still returns. The Node helper's own pending list is also 32, but the bridge starts one process per offer, so a burst does not fill it.
+
+Logs stay `hivemind message mirror deferred (queue)` (kept on disk), `hivemind message mirror refused (<reason>)`, or `hivemind <operation> failed (<code>)`. They do not include the API key, the channel, or the message text.
 
 The helper is `node web/muse/messageMirror.js` on the bridge host (`HIVEMIND_MIRROR_NODE` and `HIVEMIND_MIRROR_SCRIPT` override the binary and the script path). It needs the `web/muse` dependencies, including `node-appwrite`. With the flag left at `0`, the bridge never starts that process. A chat whose frame `id` is not a UUID is refused and not written. The relay has to stamp that id; this repo does not invent one.
 

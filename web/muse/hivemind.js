@@ -74,7 +74,12 @@ const SCHEMA = {
 
 const TEXT_MAX = 8192;
 const SENDER_MAX = 64;
+// Stored message ts and workspace createdTs are epoch seconds. 1e11 is year
+// 5138 in seconds, and it is still below a modern Date.now() value. Voizle
+// chat `ts` is Unix milliseconds. A value in (TS_MAX, TS_MAX_MS] is divided
+// by 1000 before the write. validateMessage keeps the seconds ceiling.
 const TS_MAX = 100000000000;
+const TS_MAX_MS = TS_MAX * 1000;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 function own(object, key) {
@@ -343,6 +348,13 @@ function messageDocumentId(id) {
   return UUID_RE.test(value) ? value : "";
 }
 
+function epochSeconds(raw) {
+  if (!Number.isSafeInteger(raw) || raw < 0) return null;
+  if (raw <= TS_MAX) return raw;
+  if (raw <= TS_MAX_MS) return Math.floor(raw / 1000);
+  return null;
+}
+
 function failPlan(reason) {
   return { ok: false, reason: reason };
 }
@@ -385,8 +397,9 @@ function planRoomMirror(input, nowSeconds) {
 
   let ts;
   if (own(input, "ts") && input.ts != null && input.ts !== "") {
-    if (!Number.isSafeInteger(input.ts) || input.ts < 0 || input.ts > TS_MAX) return failPlan("type");
-    ts = input.ts;
+    const seconds = epochSeconds(input.ts);
+    if (seconds == null) return failPlan("type");
+    ts = seconds;
   } else {
     const now = Number.isSafeInteger(nowSeconds) ? nowSeconds : Math.floor(Date.now() / 1000);
     if (!Number.isSafeInteger(now) || now < 0 || now > TS_MAX) return failPlan("type");
