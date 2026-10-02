@@ -37,7 +37,7 @@ The helper uses the existing Node Appwrite client (`web/muse/hivemindClient.js`)
 | Workspace `key` | Lowercase SHA-256 hex of the trimmed channel, same as a board key. A caller may also pass a slug. The channel name is not stored. `name` and `description` are left unset. |
 | Workspace `createdTs` | Epoch seconds. First write wins. A later chat that finds the workspace already stored leaves that timestamp in place and is not a conflict. |
 | Message document id | The room message UUID (`id` on the chat frame). A create that conflicts (409, or the document is already there) is success: the stored document is left as-is. |
-| Message fields | `workspaceKey`, `threadKey` (default `room`), `sender` (nick only), `text`, `ts` (epoch seconds). |
+| Message fields | `workspaceKey`, `threadKey` (default `room`), `sender` (nick only), `text`, `ts` (epoch seconds). A chat `time` or `ts` in milliseconds is converted before it is stored. |
 | Text | Longer than 8192 characters is refused. It is not truncated and not written. |
 | Left out | Trip, join password, pass, token, and the channel name. |
 

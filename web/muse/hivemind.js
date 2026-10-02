@@ -347,6 +347,18 @@ function failPlan(reason) {
   return { ok: false, reason: reason };
 }
 
+// Epoch seconds for a chat stamp. Live Voizle frames send milliseconds
+// (~1.7e12), which sit above TS_MAX. A value above that cap is milliseconds
+// when truncating to seconds still fits. Seconds at or below the cap stay.
+// The subtraction form is exact for safe integers; raw / 1000 is not.
+function unixSeconds(raw) {
+  if (!Number.isSafeInteger(raw) || raw < 0) return null;
+  if (raw <= TS_MAX) return raw;
+  const seconds = (raw - (raw % 1000)) / 1000;
+  if (Number.isSafeInteger(seconds) && seconds <= TS_MAX) return seconds;
+  return null;
+}
+
 // Build the workspace and message documents for one accepted room chat.
 // The channel string is hashed and then dropped. trip, password, and any
 // other extra fields are not copied. Text longer than 8192 is refused.
@@ -385,12 +397,14 @@ function planRoomMirror(input, nowSeconds) {
 
   let ts;
   if (own(input, "ts") && input.ts != null && input.ts !== "") {
-    if (!Number.isSafeInteger(input.ts) || input.ts < 0 || input.ts > TS_MAX) return failPlan("type");
-    ts = input.ts;
+    const seconds = unixSeconds(input.ts);
+    if (seconds === null) return failPlan("type");
+    ts = seconds;
   } else {
     const now = Number.isSafeInteger(nowSeconds) ? nowSeconds : Math.floor(Date.now() / 1000);
-    if (!Number.isSafeInteger(now) || now < 0 || now > TS_MAX) return failPlan("type");
-    ts = now;
+    const seconds = unixSeconds(now);
+    if (seconds === null) return failPlan("type");
+    ts = seconds;
   }
 
   const workspace = { key: workspaceKey, createdTs: ts };

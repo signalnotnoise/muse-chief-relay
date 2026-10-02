@@ -42,6 +42,25 @@ internal static class MirrorPayload
 
     public readonly record struct Result(bool Ok, string Json, string Reason);
 
+    /// <summary>
+    /// Epoch seconds for a chat stamp. Live Voizle frames send <c>time</c> and
+    /// <c>ts</c> in milliseconds (~1.7e12), which sit above <see cref="TsMax"/>.
+    /// A value above that cap is milliseconds when dividing by 1000 still fits
+    /// in the seconds range. Seconds at or below the cap are unchanged. Anything
+    /// else is returned as-is so the caller can refuse it.
+    /// </summary>
+    internal static long UnixSeconds(long raw)
+    {
+        if (raw > TsMax)
+        {
+            var seconds = raw / 1000;
+            if (seconds >= 0 && seconds <= TsMax)
+                return seconds;
+        }
+
+        return raw;
+    }
+
     /// <summary>Lowercase hex SHA-256 of the trimmed channel. Same bytes as the Node board key.</summary>
     public static string WorkspaceKey(string? channel)
     {
@@ -70,7 +89,7 @@ internal static class MirrorPayload
             return new Result(false, "", "missing");
         if (text.Length > 8192)
             return new Result(false, "", "length");
-        var ts = Epoch(chat, "time") ?? Epoch(chat, "ts") ?? nowSeconds;
+        var ts = UnixSeconds(Epoch(chat, "time") ?? Epoch(chat, "ts") ?? nowSeconds);
         if (ts < 0 || ts > TsMax)
             return new Result(false, "", "type");
 

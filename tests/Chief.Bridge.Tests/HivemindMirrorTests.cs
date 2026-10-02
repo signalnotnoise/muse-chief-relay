@@ -54,6 +54,67 @@ public class HivemindMirrorTests
     }
 
     [Fact]
+    public void Millisecond_stamps_become_unix_seconds_and_invalid_ones_are_refused()
+    {
+        var seconds = MirrorPayload.Build(Frame("time", "1700000000"), "abc", 10);
+        Assert.True(seconds.Ok);
+        Assert.Contains("\"ts\":1700000000,", seconds.Json);
+
+        var atCap = MirrorPayload.Build(Frame("ts", "100000000000"), "abc", 10);
+        Assert.True(atCap.Ok);
+        Assert.Contains("\"ts\":100000000000,", atCap.Json);
+
+        // Production inbox values look like 1790970272775. time wins when both are set.
+        var liveTs = MirrorPayload.Build(Frame("ts", "1790970272775"), "abc", 10);
+        Assert.True(liveTs.Ok);
+        Assert.Contains("\"ts\":1790970272,", liveTs.Json);
+        Assert.DoesNotContain("1790970272775", liveTs.Json);
+
+        var liveTime = MirrorPayload.Build(Frame("time", "1790970272775"), "abc", 10);
+        Assert.True(liveTime.Ok);
+        Assert.Contains("\"ts\":1790970272,", liveTime.Json);
+
+        var both = JsonNode.Parse($$"""
+            {"cmd":"chat","nick":"Ada","text":"hello","id":"{{Uuid}}","time":1790970272775,"ts":1700000000}
+            """)!.AsObject();
+        var preferred = MirrorPayload.Build(both, "abc", 10);
+        Assert.True(preferred.Ok);
+        Assert.Contains("\"ts\":1790970272,", preferred.Json);
+
+        // Just above the seconds cap is still a plausible millisecond instant.
+        var justOver = MirrorPayload.Build(Frame("ts", "100000000001"), "abc", 10);
+        Assert.True(justOver.Ok);
+        Assert.Contains("\"ts\":100000000,", justOver.Json);
+
+        Assert.Equal("type", MirrorPayload.Build(Frame("time", "-1"), "abc", 10).Reason);
+        Assert.Equal("type", MirrorPayload.Build(Frame("ts", "-5"), "abc", 10).Reason);
+        // 1e12 ms is 2001-09-09. It is above the seconds cap and still a valid millisecond instant.
+        var oneE12 = MirrorPayload.Build(Frame("ts", "1000000000000"), "abc", 10);
+        Assert.True(oneE12.Ok);
+        Assert.Contains("\"ts\":1000000000,", oneE12.Json);
+
+        // Milliseconds of a stamp past TsMax no longer fit after conversion.
+        Assert.Equal("type", MirrorPayload.Build(Frame("ts", "100000000001000"), "abc", 10).Reason);
+        Assert.Equal("type", MirrorPayload.Build(Frame("ts", "9000000000000000"), "abc", 10).Reason);
+
+        var offers = new List<string>();
+        var logs = new List<string>();
+        var mirror = HivemindMirror.Open(new BridgeRuntime
+        {
+            Env = key => key == "HIVEMIND_MESSAGE_MIRROR" ? "1" : null,
+            MirrorOffer = offers.Add
+        }, logs.Add);
+        Assert.NotNull(mirror);
+        mirror!.Offer(Frame("ts", "1790970272775"), "abc");
+        Assert.Empty(logs);
+        Assert.Contains("\"ts\":1790970272,", Assert.Single(offers));
+
+        mirror.Offer(Frame("ts", "-1"), "abc");
+        Assert.Equal("hivemind message mirror refused (type)", Assert.Single(logs));
+        Assert.Single(offers);
+    }
+
+    [Fact]
     public void Oversize_text_and_a_non_uuid_are_refused()
     {
         var missing = JsonNode.Parse("""{"cmd":"chat","nick":"Ada","text":"hello"}""")!.AsObject();
@@ -177,6 +238,11 @@ public class HivemindMirrorTests
             return sent == 1 && done();
         });
     }
+
+    private static JsonObject Frame(string stampField, string stampJson) =>
+        JsonNode.Parse($$"""
+            {"cmd":"chat","nick":"Ada","text":"hello","id":"{{Uuid}}","{{stampField}}":{{stampJson}}}
+            """)!.AsObject();
 
     private static string ChatFrame(string text) =>
         $$"""
