@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
-from mention_hook import poll, next_event, acknowledge
+from mention_hook import poll, next_event, acknowledge, dedup_key
 
 
 class MentionTests(unittest.TestCase):
@@ -40,15 +40,52 @@ class MentionTests(unittest.TestCase):
         self.assertEqual(acknowledge(self.db,event['event_id']),1)
         self.assertIsNone(next_event(self.db))
 
-    def test_v2_handoff_wakes_and_a_raw_delivery_does_not(self):
-        self.append('hello from the durable queue', 30, kind='delivery')
-        row = {'dir': 'in', 'v2_handoff': 'd1', 'msg': {'type': 'chat', 'id': 'v2:d1', 'nick': 'fixture', 'text': 'hello from the durable queue'}}
+    def handoff(self, text, delivery_id, nick='fixture', message_id=None, ts=None):
+        msg = {'type': 'chat', 'id': 'v2:' + delivery_id, 'nick': nick, 'text': text}
+        if message_id is not None:
+            msg['messageId'] = message_id
+        if ts is not None:
+            msg['ts'] = ts
+        row = {'dir': 'in', 'v2_handoff': delivery_id, 'msg': msg}
         with self.inbox.open('a') as f:
             f.write(json.dumps(row) + '\n')
+
+    def test_v2_handoff_keeps_v1_selection(self):
+        participants = ['Fixture', 'Other']
+        self.append('@dot help', 1, nick='Fixture', kind='delivery')
+        self.handoff('This is working now', 'plain', nick='Fixture')
+        self.handoff('@Other can you check?', 'other-at', nick='Fixture')
+        self.handoff('Other, can you check?', 'other-name', nick='Fixture')
+        self.handoff('Does anyone know why this failed?', 'question', nick='Fixture')
+        self.handoff('@dot help', 'mention', nick='Fixture')
+        self.assertEqual(poll(self.inbox, self.db, participants)['queued'], 2)
+        reasons = []
+        for _ in range(2):
+            event = next_event(self.db)
+            reasons.append(event['reason'])
+            self.assertEqual(acknowledge(self.db, event['event_id']), 1)
+        self.assertEqual(sorted(reasons), ['addressed_to_dot', 'open_question_candidate'])
+        self.assertIsNone(next_event(self.db))
+
+    def test_v1_chat_and_v2_handoff_share_a_dedup_key(self):
+        v1 = {'type': 'chat', 'id': 'room-msg-1', 'nick': 'fixture', 'trip': 'Zz99Yy', 'text': '@dot status?', 'ts': 1710000000}
+        handoff = {'type': 'chat', 'id': 'v2:lease-9', 'messageId': 'room-msg-1', 'nick': 'fixture', 'trip': 'Zz99Yy', 'text': '@dot status?', 'ts': 1710000000}
+        bridged = {'type': 'chat', 'id': 'room-msg-1', 'messageId': 'room-msg-1', 'nick': 'fixture', 'trip': 'Zz99Yy', 'text': '@dot status?', 'ts': 1710000000}
+        self.assertEqual(dedup_key(v1), dedup_key(handoff))
+        self.assertEqual(dedup_key(v1), dedup_key(bridged))
+        bare_v1 = {'type': 'chat', 'nick': 'fixture', 'trip': 'Zz99Yy', 'text': '@dot status?', 'ts': 1710000001}
+        bare_handoff = {'type': 'chat', 'id': 'v2:lease-10', 'nick': 'fixture', 'trip': 'Zz99Yy', 'text': '@dot status?', 'ts': 1710000001}
+        self.assertEqual(dedup_key(bare_v1), dedup_key(bare_handoff))
+        with self.inbox.open('a') as f:
+            f.write(json.dumps({'dir': 'in', 'msg': v1}) + '\n')
+            f.write(json.dumps({'dir': 'in', 'v2_handoff': 'lease-9', 'msg': handoff}) + '\n')
         self.assertEqual(poll(self.inbox, self.db)['queued'], 1)
         event = next_event(self.db)
-        self.assertEqual(event['reason'], 'v2_handoff')
-        self.assertEqual(event['message']['text'], 'hello from the durable queue')
+        self.assertEqual(event['reason'], 'addressed_to_dot')
+        self.assertEqual(event['message']['text'], '@dot status?')
+        self.assertEqual(acknowledge(self.db, event['event_id']), 1)
+        self.assertIsNone(next_event(self.db))
+        self.assertEqual(poll(self.inbox, self.db)['queued'], 0)
 
     def test_replay_is_not_a_new_mention(self):
         message={'type':'chat','id':10,'nick':'fixture','text':'@dot historical'}

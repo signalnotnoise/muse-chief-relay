@@ -84,8 +84,12 @@ internal static class V2Payload
 /// <summary>
 /// Before a v2 ack: fsync the payload into <c>agents/&lt;id&gt;/inbox.jsonl</c> (the
 /// <c>inbox due</c> wake) and a <c>v2_handoff</c> chat line on the room <c>inbox.jsonl</c>
-/// (<c>mention_hook</c>, <c>watch</c>, and <c>hook</c>). v1 with the flag off never constructs this.
-/// A busy agent-inbox lock spills to <c>deferred.jsonl</c> and still counts as durable.
+/// (<c>mention_hook</c>, <c>watch</c>, and <c>hook</c>). The agent-inbox source id is
+/// <see cref="MessageIds.Overlap(string, V2QueuedDelivery)"/>, the same key a v1 chat of
+/// that message already uses, so the second copy is a duplicate. The room line keeps the
+/// room message id when the delivery has one, and does not use the lease id as that id.
+/// v1 with the flag off never constructs this. A busy agent-inbox lock spills to
+/// <c>deferred.jsonl</c> and still counts as durable.
 /// </summary>
 internal sealed class V2WakeQueue : IV2ConsumerQueue
 {
@@ -148,7 +152,7 @@ internal sealed class V2WakeQueue : IV2ConsumerQueue
     {
         var inbox = AgentInbox.Open(Path.Combine(_agentsRoot, _agentId!));
         inbox.OnFiled = new ConversationStore(_agentsRoot).AppendRoom;
-        var sourceId = "v2:" + delivery.DeliveryId;
+        var sourceId = MessageIds.Overlap(_room, delivery);
         var write = inbox.Write(new InboxEvent
         {
             Id = MessageIds.Delivery(_agentId!, sourceId),
@@ -172,9 +176,17 @@ internal sealed class V2WakeQueue : IV2ConsumerQueue
             ["cmd"] = "chat",
             ["type"] = "chat",
             ["nick"] = delivery.From,
-            ["text"] = delivery.Text,
-            ["id"] = "v2:" + delivery.DeliveryId
+            ["text"] = delivery.Text
         };
+        // The lease id is not the room message id. Copy the message id the v1 chat
+        // already carries so mention_hook's dedup key matches. No id: the hook hashes
+        // the same content fields a v1 chat without an id uses.
+        if (!string.IsNullOrWhiteSpace(delivery.MessageId))
+        {
+            var messageId = delivery.MessageId.Trim();
+            msg["id"] = messageId;
+            msg["messageId"] = messageId;
+        }
         if (!string.IsNullOrEmpty(delivery.Trip))
             msg["trip"] = delivery.Trip;
         if (delivery.Ts is { } ts)

@@ -18,6 +18,99 @@ public class ChatBridgeV2Tests
         """{"v":2,"type":"welcome","nick":"n","replay":[],"inboxAuth":true}""";
 
     [Fact]
+    public void V1_chat_and_v2_delivery_of_one_message_share_the_dedup_key()
+    {
+        AssertOneOverlap("room-msg-1");
+        AssertOneOverlap(null);
+    }
+
+    private static void AssertOneOverlap(string? messageId)
+    {
+        using var dir = new TempDir();
+        var path = dir.File("config.json");
+        File.WriteAllText(path, """
+            {
+              "channel": "room",
+              "nick": "dot",
+              "url": "ws://127.0.0.1:9/relay",
+              "base": ".",
+              "protocol_v2": true,
+              "mentions": { "enabled": true },
+              "agents": [ { "id": "dot", "nicks": ["dot"] } ]
+            }
+            """);
+        var cfg = RelayConfig.Load(path, false, dir.Path, _ => null);
+        Assert.True(cfg.ProtocolV2);
+
+        const string text = "@dot status?";
+        const long ts = 1710000000;
+        var v1 = new RoomMessage("room", "alex", "Zz99Yy", text, ts, messageId);
+        var router = MentionRouter.Open(cfg);
+        router.Accept(v1);
+        Assert.Single(router.InboxFor("dot").Pending());
+
+        var queued = new V2QueuedDelivery(
+            "lease-9",
+            1,
+            text,
+            "alex",
+            "Zz99Yy",
+            ts,
+            messageId);
+        var key = MessageIds.Overlap(v1);
+        Assert.Equal(key, MessageIds.Overlap("room", queued));
+        Assert.StartsWith(messageId is null ? "msg:" : "srv:", key, StringComparison.Ordinal);
+        if (messageId is not null)
+            Assert.Equal("srv:" + messageId, key);
+
+        var client = V2Client.Open(dir.Path);
+        client.Consumers = new V2WakeQueue(cfg, new object());
+        var delivery = new JsonObject
+        {
+            ["type"] = "delivery",
+            ["deliveryId"] = "lease-9",
+            ["leaseGeneration"] = 1,
+            ["nick"] = "alex",
+            ["text"] = text,
+            ["trip"] = "Zz99Yy",
+            ["ts"] = ts
+        };
+        if (messageId is not null)
+            delivery["id"] = messageId;
+
+        var acked = client.OnFrame(delivery);
+        var ack = Assert.Single(acked.Send);
+        Assert.Equal("ack", ack["type"]!.GetValue<string>());
+        Assert.Equal("lease-9", ack["deliveryId"]!.GetValue<string>());
+        Assert.Equal(1, Num(ack["leaseGeneration"]));
+
+        var chat = new JsonObject
+        {
+            ["type"] = "chat",
+            ["nick"] = "alex",
+            ["text"] = text,
+            ["trip"] = "Zz99Yy",
+            ["ts"] = ts
+        };
+        if (messageId is not null)
+            chat["id"] = messageId;
+        Assert.Empty(client.OnFrame(chat).Send);
+        Assert.Empty(client.OnFrame(delivery).Send);
+
+        var pending = MentionRouter.Open(cfg).InboxFor("dot").Pending();
+        var filed = Assert.Single(pending);
+        Assert.Equal(key, filed.Event.SourceId);
+
+        var room = File.ReadAllText(Path.Combine(dir.Path, "inbox.jsonl"));
+        Assert.Contains("\"v2_handoff\":\"lease-9\"", room, StringComparison.Ordinal);
+        Assert.DoesNotContain("\"id\":\"v2:lease-9\"", room, StringComparison.Ordinal);
+        if (messageId is not null)
+            Assert.Contains("\"id\":\"" + messageId + "\"", room, StringComparison.Ordinal);
+        else
+            Assert.DoesNotContain("\"id\":", room, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Protocol_v2_defaults_off()
     {
         using var dir = new TempDir();
@@ -408,7 +501,9 @@ public class ChatBridgeV2Tests
                 Assert.Contains("\"v2_handoff\":\"d1\"", room, StringComparison.Ordinal);
                 var agentInbox = File.ReadAllText(Path.Combine(fx.Dir.Path, "agents", "n", "inbox.jsonl"));
                 Assert.Contains("hello from fixture", agentInbox, StringComparison.Ordinal);
-                Assert.Contains("\"source_id\":\"v2:d1\"", agentInbox, StringComparison.Ordinal);
+                var source = MessageIds.Overlap(new RoomMessage("throwaway-test", "alex", "Zz99Yy", "hello from fixture", null, null));
+                Assert.Contains("\"source_id\":\"" + source + "\"", agentInbox, StringComparison.Ordinal);
+                Assert.DoesNotContain("\"source_id\":\"v2:d1\"", agentInbox, StringComparison.Ordinal);
                 var ack = fx.Script.Sent.Select(Parse).Last(o => Json.Str(o, "type") == "ack");
                 Assert.Equal("d1", ack["deliveryId"]!.GetValue<string>());
                 Assert.Equal(1, Num(ack["leaseGeneration"]));

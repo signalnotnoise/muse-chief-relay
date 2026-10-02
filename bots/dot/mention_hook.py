@@ -2,8 +2,13 @@
 """One-shot @dot inbox hook. Produces local events; never contacts a model or network.
 
 Reads the room inbox.jsonl that ChatBridge appends. A v2 handoff is a chat line
-with v2_handoff set; a raw delivery frame is not a wake. The per-agent queue under
-agents/dot/ is a separate file. Mentions stay off unless mentions.enabled is true.
+with v2_handoff set. It uses the same @mention, open-question, and other-recipient
+filters as a v1 chat, and it does not wake on its own. A raw delivery frame is not
+a wake. The dedup key is the room message id when that id is present. A lease id
+shaped v2:<deliveryId> is not that id. With no message id, the key is the same
+content fields a v1 chat without an id uses, so one logical message is queued once.
+The per-agent queue under agents/dot/ is a separate file. Mentions stay off unless
+mentions.enabled is true.
 An opt-in v2 handoff can also file that agent inbox; protocol_v2 defaults off.
 A sender trip on either path is untrusted evidence. approved_recipients is the
 send gate. This module does not treat a trip as authorization.
@@ -37,12 +42,41 @@ def classify(text, participants=()):
     return None
 
 
-def event_key(msg):
-    if msg.get('id') is not None:
-        stable = {'id': msg['id']}
+def _lease_id(value):
+    return isinstance(value, str) and value.startswith('v2:')
+
+
+def logical_message_id(msg):
+    """Room message id shared by a v1 chat and a v2 handoff. A lease id is not one."""
+    if not isinstance(msg, dict):
+        return None
+    for key in ('messageId', 'message_id'):
+        value = msg.get(key)
+        if value is not None and not _lease_id(value):
+            return value
+    raw = msg.get('id')
+    if raw is not None and not _lease_id(raw):
+        return raw
+    return None
+
+
+def dedup_key(msg):
+    """One key for a v1 chat and a v2 handoff of the same room message.
+
+    The room message id wins. ``v2:<deliveryId>`` does not, so a handoff that
+    only names its lease falls through to the content fields a v1 chat with
+    no id already uses.
+    """
+    logical = logical_message_id(msg)
+    if logical is not None:
+        stable = {'id': logical}
     else:
         stable = {key: msg.get(key) for key in ('nick', 'trip', 'text', 'ts', 'time')}
     return hashlib.sha256(json.dumps(stable, sort_keys=True).encode()).hexdigest()
+
+
+def event_key(msg):
+    return dedup_key(msg)
 
 
 def open_db(path):
@@ -131,13 +165,10 @@ def poll(inbox, database, participants=(), mention_only=False):
                     text = msg.get('text')
                     if not isinstance(text, str):
                         continue
-                    # v2_handoff is a chat line the bridge fsynced before the wire ack.
-                    # A raw delivery frame has no marker and stays ignored.
-                    handoff = row.get('v2_handoff')
-                    if isinstance(handoff, str) and handoff:
-                        reason = 'v2_handoff'
-                    else:
-                        reason = ('addressed_to_dot' if MENTION.search(text) else None) if mention_only else classify(text, participants)
+                    # v2_handoff is only a marker that this chat was fsynced before the
+                    # wire ack. Selection stays the v1 rules. A raw delivery never
+                    # reaches here: its type is not chat.
+                    reason = ('addressed_to_dot' if MENTION.search(text) else None) if mention_only else classify(text, participants)
                     if reason is None:
                         continue
                     payload = {'event_id': key, 'source': 'dot-relay-mention', 'untrusted': True, 'reason': reason,
