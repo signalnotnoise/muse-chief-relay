@@ -2,7 +2,7 @@
 
 Status: **DRAFT FOR GROUP REVIEW — not implemented, not deployed**  
 Date: 2026-10-03  
-Draft owner: dot; proposed implementation/readiness owner: Fuse, subject to acceptance
+Draft owner: dot; proposed technical implementation/readiness owner: Fuse, subject to Alex's designation and the named owner's acceptance
 
 ## Smallest implementation slice
 
@@ -10,7 +10,7 @@ Draft owner: dot; proposed implementation/readiness owner: Fuse, subject to acce
 - Inherit replies only from a validated same-room parent; reject missing, cross-room, or conflicting parent links.
 - Persist visible unassigned/rejected outcomes and reasons in the proposed reserved diagnostic sink, without guessing a workspace.
 - Freeze the routing envelope before queued writes; verify canonical content and routing on duplicate UUIDs and restart/retry.
-- Demonstrate the happy path and negative cases with fixtures, then close the schema/wire readiness gates before any separately authorized rollout; leave legacy records and permissions unchanged.
+- Prove the wire metadata path with a fixture before implementing the frozen envelope; then demonstrate the routing cases and close readiness gates before any separately authorized rollout, leaving legacy records and permissions unchanged.
 
 ## 1. Goal and boundary
 
@@ -64,7 +64,7 @@ Process in this order:
 
 1. Validate authoritative message ID, current-room provenance, sender, body, and timestamp. Invalid authority/identity input is rejected before a database write; persist a minimal local diagnostic and expose the failure. Do not generate a UUID or trust a client room claim to make it fit.
 2. If `parentMessageId` is present, validate its UUID and resolve that exact parent before considering a destination. Verify authoritative provenance equality. Missing parent, cross-room parent, or unverifiable parent is a routing rejection even when an explicit workspace key is also supplied.
-3. A routable parent must carry a validated v1 routing record. Legacy rows without that evidence cannot establish inheritance. If an explicit key accompanies a reply, it must equal the parent's frozen `workspaceKey`; a different key is a routing rejection. Do not prefer the explicit key over a linked parent.
+3. A routable parent must carry a validated v1 routing record. Legacy rows without that evidence cannot establish inheritance. After the parent checks, a reply with an explicitly present malformed or reserved-sink key is `rejected/workspace_invalid`; it never falls through to inheritance. Presence includes an empty or null supplied value; only an absent key is unstamped. A syntactically valid non-reserved explicit key must then equal the parent's frozen `workspaceKey`; a different key is `rejected/reply_workspace_mismatch`. Do not prefer the explicit key over a linked parent.
 4. For an unstamped reply to an assigned parent, use its frozen key and validate that key is still available at this decision point. For a reply to a parent whose outcome is unassigned/rejected, retain an unassigned outcome; do not infer a workspace from its room.
 5. For a new message with no parent, validate the explicit key against the registry. A valid existing key is assigned. Missing, malformed/reserved, or unavailable/deleted keys get the explicit unassigned representation below. A lookup error is a held pre-decision state, not proof that a key is absent; show `workspace_lookup_pending` and retry the lookup without guessing.
 6. Freeze the result and persist the queue envelope. After freezing, all delivery retries use it unchanged, without reading current UI selection, rehashing the channel into a destination, or rerunning registry/parent routing.
@@ -75,20 +75,21 @@ Process in this order:
 | Reply, valid same-room assigned parent, no key | `assigned` | `parent_inherited` | Parent's key |
 | Reply, matching explicit key and valid parent | `assigned` | `parent_confirmed` | Parent's key |
 | New message without a key | `unassigned` | `workspace_missing` | Reserved sink |
-| Malformed key or direct attempt to select reserved sink | `unassigned` | `workspace_invalid` | Reserved sink |
+| New message with malformed key or direct attempt to select reserved sink | `unassigned` | `workspace_invalid` | Reserved sink |
 | Selected/inherited key absent or deleted at decision time | `unassigned` | `workspace_unavailable` | Reserved sink |
 | Reply with nonexistent parent | `rejected` | `parent_missing` | Reserved sink; no workspace attachment |
 | Parent in another room | `rejected` | `parent_room_mismatch` | Reserved sink; no workspace attachment |
 | Parent UUID invalid | `rejected` | `parent_id_invalid` | Reserved sink; omit malformed parent value |
 | Parent lacks trustworthy routing/provenance | `rejected` | `parent_unverifiable` | Reserved sink; no workspace attachment |
-| Explicit reply key differs from parent's key | `rejected` | `reply_workspace_mismatch` | Reserved sink; no workspace attachment |
+| Reply with malformed or reserved-sink key, parent otherwise valid | `rejected` | `workspace_invalid` | Reserved sink; no workspace attachment |
+| Valid non-reserved explicit reply key differs from parent's key | `rejected` | `reply_workspace_mismatch` | Reserved sink; no workspace attachment |
 | Unstamped reply to unassigned/rejected parent | `unassigned` | `parent_unassigned` | Reserved sink |
 
 These are mirror-routing outcomes. They do not retroactively unsend an already accepted relay chat. “Rejected” means the requested workspace attachment is refused and visibly diagnosed.
 
 A rejected-parent row in the reserved sink is only a diagnostic record of that refusal. It is not a valid routed reply, silent reassignment, or permission to attach to another parent. No ordinary workspace view includes it; only the explicitly labeled routing-issues view does. Retaining `parentMessageId` there records the rejected request without establishing an accepted reply relationship.
 
-A reply with an invalid key still undergoes parent checks first. A key different from the parent remains `reply_workspace_mismatch`; removing that link automatically is forbidden. If the user deliberately clears the reply link and sends again, that is a new action and a new message UUID, evaluated as a new message. Do not mutate/relabel the original row to satisfy it.
+A reply with an invalid key still undergoes parent checks first, then rejects with `workspace_invalid`; only a valid non-reserved key reaches the parent-key equality check. Neither invalid nor mismatching keys may silently become `parent_inherited`, and removing the link automatically is forbidden. If the user deliberately clears the reply link and sends again, that is a new action and a new message UUID, evaluated as a new message. Do not mutate/relabel the original row to satisfy it.
 
 A missing parent is a terminal rejection for that accepted message under this minimal v1. This avoids an unbounded late reroute. Transient lookup/network failure is not a missing parent: retain the unresolved envelope in a durable pre-decision hold and expose `parent_lookup_pending`. Resolution may continue there, but an assigned route may never enter the write queue before its parent check succeeds.
 
@@ -99,6 +100,8 @@ Reserve the key **`routing-unassigned-v1`**. It matches the existing key grammar
 Before enablement, the readiness owner must verify the key is unused and arrange the separately authorized reserved-row creation, with an unmistakable display name such as “Unassigned routing.” A preexisting different use is a gate, not permission to take it over. A sink row preserves the required non-null `workspaceKey` while `routingOutcome` and `routingReason` distinguish unassigned and rejected messages.
 
 Persist those outcome/reason fields alongside the message and show a visible “Unassigned” or “Routing rejected” state with the reason. An operational log alone is not enough. If the database write fails, retain the frozen envelope and its reason durably and show mirror-pending/failure status; do not report a persisted row until it is verified.
+
+The smallest v1 diagnostic read model is **server/operator-side and API-key-only**: an authorized service reads persisted routing-issue rows and exposes their message ID, outcome, reason, and pending/conflict state in an explicitly labeled operator report/view. No API key is sent to the browser, no sink-row read-permission carve-out is added, and existing permissions remain unchanged. This is a proposed read model, not a claim that the current web client or an existing endpoint supports it. Before enablement, the designated owner must identify and demonstrate the exact server/operator surface and explicitly accept server-side-only diagnosis for this slice. Browser-visible diagnostics require a separately specified and reviewed service-mediated read path; until then, do not claim they are implemented or visible in the browser.
 
 ## 5. Frozen v1 envelope and schema delta
 
@@ -114,7 +117,7 @@ Keep existing fields and limits. Do not change workspace `name`, `description`, 
 | `ts` | Accepted-event timestamp normalized once to epoch seconds | Existing required integer; retain established supported range; never replace with retry time |
 | `routingVersion` | Exactly integer `1` | New optional integer at collection level to retain old rows; required by v1 validator |
 | `parentMessageId` | Canonical UUID when linked | New optional string, maximum 36; omit when absent/invalid |
-| `roomProvenance` | Server-context-derived value above | New optional string, size at least 68; required by v1 validator |
+| `roomProvenance` | Server-context-derived value above; exactly 68 characters under `rp1_` | New optional string, proposed maximum size 68; v1 validator requires `rp1_` plus exactly 64 lowercase hex characters; another encoding needs a version change |
 | `routingOutcome` | `assigned`, `unassigned`, or `rejected` | New optional string, proposed size 16; required by v1 validator |
 | `routingReason` | Stable code from decision table | New optional string, proposed size 64; required by v1 validator |
 
@@ -149,6 +152,8 @@ Legacy backfill/reclassification remains deferred. There is no permission-model 
 
 Use fixtures and a mocked registry/store first. Names/UUIDs below are synthetic. No live service credentials are needed.
 
+**Gate 0, before frozen-envelope implementation:** produce a wire/adapter fixture proving the proposed routing metadata and authoritative room context survive composer submission → accepted relay event → bridge input, with the spill/helper handoff shape identified. This must precede work on durable frozen-envelope serialization and retry. If the path strips metadata or its provenance cannot be established, stop there and report the missing bounded adapter/wire support; do not claim that a passing resolver mock closes this gate. The completed integration trace below must later demonstrate spill/helper preservation as well.
+
 Registry fixture: existing selectable keys `project-alpha` and `project-beta`, plus the separately prepared reserved sink. Define synthetic room proofs `P` and `Q` by applying the specified provenance function to two distinct fixture room identities.
 
 1. **New message:** accepted message `11111111-1111-4111-8111-111111111111`, explicit `project-alpha`, no parent, room proof `P`. Persist exactly one row with key `project-alpha`, version 1, `assigned/explicit`.
@@ -156,25 +161,27 @@ Registry fixture: existing selectable keys `project-alpha` and `project-beta`, p
 3. **Matching explicit reply:** the same parent and explicit `project-alpha` produce `assigned/parent_confirmed` for a fresh UUID.
 4. **Missing parent:** a fresh reply referencing an absent fixture UUID produces `rejected/parent_missing`, visible in the reserved sink. No ordinary workspace receives it.
 5. **Cross-room parent:** the parent from case 1 with child proof `Q` produces `rejected/parent_room_mismatch`, even if the explicit key matches.
-6. **Conflicting reply key:** the parent from case 1 plus explicit `project-beta` produces `rejected/reply_workspace_mismatch`; it is not silently detached or rerouted.
+6. **Conflicting/invalid reply key:** the parent from case 1 plus explicit `project-beta` produces `rejected/reply_workspace_mismatch`; it is not silently detached or rerouted. The composer demo warns and blocks a known selected-key/parent-key mismatch before sending, while the accepted-event validator still rejects a bypassed mismatch. Separate malformed, empty/null, and reserved-sink reply-key fixtures produce `rejected/workspace_invalid`, never inherited assignment.
 7. **Unassigned cases:** separate new UUIDs cover missing key, malformed/reserved key, and unavailable/deleted key; each gets the correct persisted reason. Registry/network failure instead holds unresolved and makes no absence claim.
 8. **Retry/restart:** freeze case 2, change current UI selection, and crash at both pre-write and post-create/pre-ack points. Restart from durable state; payload, key, parent, provenance, outcome/reason remain identical and there is one row.
 9. **Collision/conflict:** a replay with JSON properties reordered verifies; a replay with the same UUID but different text, timestamp, parent, key, or provenance does not. A raced 409 with mismatched content and a 409 whose follow-up read fails are not success.
 10. **Boundary checks:** UUID/document-ID length, 64-character workspace key, 68-character provenance, 8192-character text, optional-field absence, reserved-key collision, parent lacking v1 provenance, metadata stripped in transit, and existing v0 rows all have explicit assertions.
 
-Acceptance evidence must include the persisted or mocked final rows and reasons, not only successful UI selection or a message on the relay. The final integration trace must cover composer → accepted relay event → bridge input → durable queue/spill → helper → verified store row → visible view state. A mocked test is not a live verification.
+Acceptance evidence must include the persisted or mocked final rows and reasons, not only successful UI selection or a message on the relay. The final integration trace must cover composer → accepted relay event → bridge input → durable queue/spill → helper → verified store row → visible server/operator routing-issues state. A browser view remains gated on its service-mediated read path. A mocked test is not a live verification.
 
 ## 9. Bounded readiness gates and handoff
 
-One named owner must hold the implementation/readiness checklist end to end; **Fuse is proposed, not presumed assigned**. dot owns this draft and consolidates group review. Review can settle this contract without enabling anything.
+One named technical owner must hold the implementation/readiness checklist end to end. **Alex must designate that owner, and the named person must accept; Fuse remains proposed, not assigned.** This does not assign the technical readiness work to Alex or claim that anyone has accepted it. dot owns this draft and consolidates group review. Review can settle this contract without enabling anything.
 
 Before a separately authorized rollout, that owner supplies:
 
+- First, the Gate 0 accepted-event wire/adapter fixture above, before frozen-envelope implementation. Missing support remains a bounded implementation blocker, not a reason to launch an unrelated server/security audit.
 - Exact deployed Appwrite API/server/SDK version and a read-only schema inventory: collection IDs, field types/sizes/requiredness/defaults, index definitions/status, and the unresolved `threadKey` discrepancy. Do not paste credentials or private documents into the review.
 - A specific additive schema plan preserving old records. New v1 fields stay optional for existing data but are mandatory in the v1 writer. Verify the proposed string sizes rather than assuming document-ID limits also describe field capacity. Appwrite's [attribute model](https://appwrite.io/docs/references/cloud/models/attributeString) exposes configured size, requiredness, and status.
 - The exact query plan and only its necessary indexes: workspace-key lookup/uniqueness and workspace-filtered time ordering, plus any declared routing-issue view. Parent lookup is by document ID and does not need an invented parent index. Check index length limits against the actual deployed version; do not guess. Every required new attribute/index must be `available`, not merely accepted for creation; [index status](https://appwrite.io/docs/references/cloud/models/index) is asynchronous.
 - Proof that the chosen reserved key is unused and can be prepared without repurposing an existing workspace; proof that workspace keys cannot be reused.
-- The accepted-event metadata/provenance trace and a wire fixture establishing that metadata is retained and room claims cannot be substituted by the client at the trusted adapter boundary. Missing support is a small implementation blocker, not a reason to launch an unrelated server/security audit.
+- The completed accepted-event metadata/provenance trace through durable spill and helper, establishing that metadata is retained and room claims cannot be substituted by the client at the trusted adapter boundary.
+- The exact API-key-only server/operator routing-issues read surface and acceptance of server-side-only diagnosis for the smallest slice. Verify persisted reasons can actually be read there; do not substitute a log line, browser permission change, or presumed web-client access. Any browser-facing service-mediated path remains separately specified and reviewed.
 - Passing minimum cases above, explicit handling of existing pending v0 queues, bounded durable retry/hold behavior, and a disable/rollback plan that stops new v1 writes without deleting or rewriting rows.
 - Review of the precise implementation diff and explicit production go-ahead through the approved workflow. The mirror gate stays off until then.
 
