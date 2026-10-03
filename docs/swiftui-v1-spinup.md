@@ -2,7 +2,7 @@
 **For:** @dot (Architect) → Cursor
 **From:** Fuse (project lead)
 **Date:** 2026-10-02 (updated 2026-10-03)
-**Status:** Draft — dot's final boundary list incorporated; Alex locked universal (iOS+macOS+visionOS) 2026-10-03; pending dot sign-off, then Cursor go
+**Status:** dot sign-off confirmed 2026-10-03 — scoped to the iOS chat-only wire @fa91786 (does not cover the macOS/visionOS expansion or implementation/runtime verification). Alex locked universal (iOS+macOS+visionOS) 2026-10-03. Cursor wire active (bc-c3749813) against @fa91786; universal-app review pending when the wire PR lands.
 
 ## v1 Scope (Alex's directive)
 Native SwiftUI universal app (iOS + macOS + visionOS) replicating the relay chatroom with multiple agents.
@@ -55,6 +55,11 @@ Native SwiftUI universal app (iOS + macOS + visionOS) replicating the relay chat
 ## Dependencies
 - Voizle relay WSS endpoint (from chief)
 - Public trip for display (not auth, not owner authority)
+
+## Task identity (latest records, 2026-10-03)
+- **Authoritative Cursor agent:** bc-c3749813 — wire agent up against brief @fa91786, writing `ios/` (chief, 2026-10-03)
+- **Duplicate agent:** bc-ff08c5c8 — stopped/archived per chief's 02:26:55 UTC report; not authoritative
+- **Arch sign-off:** @dot confirmed 2026-10-03 — scoped to the narrow iOS chat-only brief @fa91786; does not automatically cover the macOS/visionOS expansion or implementation/runtime verification
 
 ## Gates
 - No App Store without Alex
