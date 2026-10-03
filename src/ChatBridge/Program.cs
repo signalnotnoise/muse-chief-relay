@@ -32,6 +32,8 @@ internal static class Program
                 "hook" => await CmdHookAsync(cli),
                 "inbox" => CmdInbox(cli),
                 "reconcile" => CmdReconcile(cli),
+                "stop" => CmdStop(cli),
+                "restart" => await CmdRestartAsync(cli),
                 "help" => CmdHelp(),
                 _ => await RunAsync(cli)
             };
@@ -46,16 +48,80 @@ internal static class Program
     private static async Task<int> RunAsync(CliArgs cli)
     {
         var cfg = RelayConfig.Load(cli.ConfigPath, allowExampleFallback: true);
-        using var cts = new CancellationTokenSource();
-        // SIGTERM / SIGINT: cancel and let RunForeverAsync finish, so the final state.json write
-        // (alive=false) and the "stopped" line happen.
-        using var signals = new ShutdownSignals(cts, sig => Console.WriteLine($"[chatbridge] {sig} received, shutting down…"));
+        return await RunOwnedAsync(cfg);
+    }
 
-        Console.WriteLine(
-            $"[chatbridge] config={cfg.ConfigPath} ({cfg.Source}) channel={cfg.Channel} nick={cfg.Nick} base={cfg.BaseDir}");
-        var bridge = new HackChatBridge(cfg);
-        await bridge.RunForeverAsync(cts.Token);
-        return 0;
+    /// <summary>
+    /// Hold the state-directory lock, then the host identity lock, and only then construct the
+    /// bridge. Construction opens the outbox and the other writers under <c>base</c>. The socket
+    /// opens later, inside <see cref="HackChatBridge.RunForeverAsync"/>. Both locks stay held
+    /// through reconnects until this method returns (clean shutdown or crash, which drops them).
+    /// </summary>
+    private static async Task<int> RunOwnedAsync(RelayConfig cfg)
+    {
+        var statePath = BridgeInstance.StateLockPath(cfg.BaseDir);
+        var identityPath = BridgeInstance.IdentityLockPath(cfg);
+        var state = InstanceFileLock.TryAcquire(statePath, InstanceLockKind.State);
+        if (state is null)
+        {
+            BridgeInstance.ReportAlreadyRunning("state", statePath);
+            return BridgeInstance.ExitAlreadyRunning;
+        }
+
+        using (state)
+        {
+            var identity = InstanceFileLock.TryAcquire(identityPath, InstanceLockKind.Identity);
+            if (identity is null)
+            {
+                BridgeInstance.ReportAlreadyRunning("host identity", identityPath);
+                return BridgeInstance.ExitAlreadyRunning;
+            }
+
+            using (identity)
+            {
+                using var cts = new CancellationTokenSource();
+                // SIGTERM / SIGINT: cancel and let RunForeverAsync finish, so the final state.json write
+                // (alive=false) and the "stopped" line happen, then the locks are released.
+                using var signals = new ShutdownSignals(cts, sig => Console.WriteLine($"[chatbridge] {sig} received, shutting down…"));
+
+                Console.WriteLine(
+                    $"[chatbridge] config={cfg.ConfigPath} ({cfg.Source}) channel={cfg.Channel} nick={cfg.Nick} base={cfg.BaseDir}");
+                var bridge = new HackChatBridge(cfg);
+                await bridge.RunForeverAsync(cts.Token);
+                return 0;
+            }
+        }
+    }
+
+    private static int CmdStop(CliArgs cli)
+    {
+        RequireNoArgs(cli, "stop");
+        var cfg = RelayConfig.Load(cli.ConfigPath, allowExampleFallback: false);
+        var stop = BridgeInstance.Stop(cfg);
+        (stop.Kind == InstanceStopKind.Stopped ? Console.Out : Console.Error).WriteLine(stop.Detail);
+        return stop.Code;
+    }
+
+    private static async Task<int> CmdRestartAsync(CliArgs cli)
+    {
+        RequireNoArgs(cli, "restart");
+        var cfg = RelayConfig.Load(cli.ConfigPath, allowExampleFallback: false);
+        var stop = BridgeInstance.Stop(cfg);
+        if (!stop.MayStart)
+        {
+            Console.Error.WriteLine(stop.Detail);
+            return stop.Code;
+        }
+
+        if (stop.Kind == InstanceStopKind.Stopped)
+            Console.WriteLine(stop.Detail);
+        return await RunOwnedAsync(cfg);
+    }
+
+    private static void RequireNoArgs(CliArgs cli, string command)
+    {
+        if (cli.Rest.Count > 0)
+            throw new ArgumentException($"{command}: unknown argument '{cli.Rest[0]}'");
     }
 
     private static async Task<int> CmdWatchAsync(CliArgs cli)
@@ -162,6 +228,9 @@ internal static class Program
               [--config <path> | <path>]        Run the bridge until SIGTERM / Ctrl+C.
                                                 Transient failures retry forever (backoff 1s–30s
                                                 with jitter). A bad config exits 2; it is not retried.
+                                                Exit 4 when this state directory, or this host's
+                                                endpoint/room/nick, already has an owner. The lock
+                                                is taken before any socket opens. Same host only.
               say [--config <path>] <text>      Append one chat line to {base}/outbox.jsonl and exit.
                                                 Refuses CLI/shell probe text (exit 1, not queued).
               status [--config <path>] [--state <file>]
@@ -188,6 +257,14 @@ internal static class Program
               inbox pending --agent <id>       Print every unacked room event, including those in backoff.
               inbox ack --agent <id> <event>   Acknowledge one event. Idempotent. Exit 1 if the id is unknown.
               inbox fail --agent <id> <event>  Record a soft adapter failure and its backoff. Exit 1 if unknown.
+              stop [--config <path>]           SIGTERM the process that holds this state directory's
+                                                instance lock, including while it is connected.
+                                                Exit 0 after that owner releases the lock. Exit 1
+                                                when it is not running, or when the holder cannot
+                                                be verified. Does not use state.json's pid.
+              restart [--config <path>]        Stop the verified owner, then run this process as
+                                                the replacement. A holder that cannot be verified
+                                                is left running and this process does not start.
               reconcile --id <client_msg_id> requeue|drop
                                                 Operator path for one uncertain v2 send. Does not connect
                                                 and does not turn protocol_v2 on. drop does not send, and a late
@@ -200,7 +277,7 @@ internal static class Program
             The inbox commands are the adapter contract (docs/chatbridge.md). They do not call a model.
             Config for the bridge run: --config or the first argument, then MUSE_RELAY_CONFIG, then
             CHATBRIDGE_CONFIG, then ./config.json, then ./config.example.json (with a warning).
-            Config for say/status/watch/hook/inbox/reconcile: --config, then MUSE_RELAY_CONFIG, then
+            Config for say/status/watch/hook/inbox/reconcile/stop/restart: --config, then MUSE_RELAY_CONFIG, then
             CHATBRIDGE_CONFIG, then ./config.json. No other fallback.
             An explicit path that doesn't exist is an error; it never falls through to another file.
             Use -- to end options, e.g. say -- --config is literal text.
@@ -318,12 +395,14 @@ internal static class Program
         }
 
         var cfg = RelayConfig.Load(cli.ConfigPath, allowExampleFallback: false);
+        var instance = BridgeInstance.Probe(BridgeInstance.StateLockPath(cfg.BaseDir));
         Console.WriteLine($"config: {cfg.ConfigPath} ({cfg.Source})");
         Console.WriteLine($"channel: {cfg.Channel}");
         Console.WriteLine($"nick: {cfg.Nick}");
         var statePath = Path.Combine(cfg.BaseDir, "state.json");
         Console.WriteLine($"state: {statePath}");
-        PrintBridgeState(statePath);
+        PrintBridgeState(statePath, instance);
+        Console.WriteLine(BridgeInstance.StatusLine(cfg));
         var now = DateTimeOffset.UtcNow;
         var hook = cfg.ReadHook(now);
         Console.WriteLine($"hook: {hook.Detail}");
@@ -430,11 +509,13 @@ internal static class Program
         }
     }
 
-    private static void PrintBridgeState(string statePath)
+    private static void PrintBridgeState(string statePath, InstanceProbe instance)
     {
         if (!File.Exists(statePath))
         {
             Console.WriteLine("alive: false (state.json missing)");
+            if (instance.Held && instance.Pid is int owner)
+                Console.WriteLine($"pid: {owner} (running)");
             return;
         }
 
@@ -454,10 +535,25 @@ internal static class Program
                 Console.WriteLine($"at: {atSecs} ({DateTimeOffset.FromUnixTimeSeconds(atSecs).ToLocalTime():yyyy-MM-dd HH:mm:ss zzz})");
             if (root.TryGetProperty("pid", out var pidEl) && pidEl.TryGetInt32(out var pid))
             {
-                var running = ProcessInfo.IsRunning(pid);
-                Console.WriteLine(running ? $"pid: {pid} (running)"
-                    : Flag("alive") ? $"pid: {pid} (not running: the bridge died without a clean stop; this state is stale)"
-                    : $"pid: {pid} (not running)");
+                if (instance.Held && instance.Pid is int owner)
+                {
+                    Console.WriteLine($"pid: {owner} (running)");
+                    if (owner != pid)
+                        Console.WriteLine($"state pid: {pid} (stale)");
+                }
+                else
+                {
+                    var running = ProcessInfo.IsRunning(pid);
+                    Console.WriteLine(running
+                        ? $"pid: {pid} (not the bridge: the state lock is free)"
+                        : Flag("alive")
+                            ? $"pid: {pid} (not running: the bridge died without a clean stop; this state is stale)"
+                            : $"pid: {pid} (not running)");
+                }
+            }
+            else if (instance.Held && instance.Pid is int runningOwner)
+            {
+                Console.WriteLine($"pid: {runningOwner} (running)");
             }
         }
         catch (Exception ex) when (ex is JsonException or IOException)

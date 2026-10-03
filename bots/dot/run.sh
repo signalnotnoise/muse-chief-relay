@@ -3,6 +3,8 @@
 # chat-bridge and src/ChatBridge are the same program. mentions.enabled
 # stays off unless the local config turns it on. A trip on
 # chatbridge.inbox.wake is untrusted evidence.
+# A second launch is refused inside that process, before it opens a socket.
+# This script does not check, and it is not the lock.
 set -euo pipefail
 BOT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO=$(cd -- "$BOT_DIR/../.." && pwd)

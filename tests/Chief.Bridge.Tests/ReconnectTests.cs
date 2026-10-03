@@ -554,63 +554,70 @@ internal sealed class LocalChat : IAsyncDisposable
                 return;
             }
 
-            Interlocked.Increment(ref _handshakes);
-            if (Interlocked.Decrement(ref _rejectsLeft) >= 0)
-            {
-                try
-                {
-                    ctx.Response.StatusCode = 500;
-                    ctx.Response.Close();
-                }
-                catch { /* client already gone */ }
-                continue;
-            }
+            // Two bridges can share this stand-in (different rooms, same endpoint). Handling the
+            // socket inline would hold the accept loop until that socket closed.
+            _ = HandleAsync(ctx);
+        }
+    }
 
-            if (!_accept || !ctx.Request.IsWebSocketRequest)
-            {
-                try { ctx.Response.Abort(); } catch { /* ignore */ }
-                continue;
-            }
-
-            WebSocket? ws = null;
+    private async Task HandleAsync(HttpListenerContext ctx)
+    {
+        Interlocked.Increment(ref _handshakes);
+        if (Interlocked.Decrement(ref _rejectsLeft) >= 0)
+        {
             try
             {
-                var accepted = await ctx.AcceptWebSocketAsync(subProtocol: null);
-                ws = accepted.WebSocket;
-                // The bridge treats every non-hack.chat host, including this localhost stand-in, as v1.
-                var hello = Encoding.UTF8.GetBytes(
-                    JsonSerializer.Serialize(new { v = 1, type = "hello", protocol = "voizle-text-relay" }));
-                await ws.SendAsync(hello, WebSocketMessageType.Text, true, CancellationToken.None);
-                var buf = new byte[1024];
-                var welcomed = false;
-                while (ws.State == WebSocketState.Open && !_cts.IsCancellationRequested)
+                ctx.Response.StatusCode = 500;
+                ctx.Response.Close();
+            }
+            catch { /* client already gone */ }
+            return;
+        }
+
+        if (!_accept || !ctx.Request.IsWebSocketRequest)
+        {
+            try { ctx.Response.Abort(); } catch { /* ignore */ }
+            return;
+        }
+
+        WebSocket? ws = null;
+        try
+        {
+            var accepted = await ctx.AcceptWebSocketAsync(subProtocol: null);
+            ws = accepted.WebSocket;
+            // The bridge treats every non-hack.chat host, including this localhost stand-in, as v1.
+            var hello = Encoding.UTF8.GetBytes(
+                JsonSerializer.Serialize(new { v = 1, type = "hello", protocol = "voizle-text-relay" }));
+            await ws.SendAsync(hello, WebSocketMessageType.Text, true, CancellationToken.None);
+            var buf = new byte[1024];
+            var welcomed = false;
+            while (ws.State == WebSocketState.Open && !_cts.IsCancellationRequested)
+            {
+                var incoming = await ws.ReceiveAsync(buf, _cts.Token);
+                if (incoming.MessageType == WebSocketMessageType.Close)
+                    break;
+                if (welcomed || !incoming.EndOfMessage)
+                    continue;
+                welcomed = true;
+                var welcome = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new
                 {
-                    var incoming = await ws.ReceiveAsync(buf, _cts.Token);
-                    if (incoming.MessageType == WebSocketMessageType.Close)
-                        break;
-                    if (welcomed || !incoming.EndOfMessage)
-                        continue;
-                    welcomed = true;
-                    var welcome = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new
-                    {
-                        v = 1,
-                        type = "welcome",
-                        sessionId = "local",
-                        room = "throwaway-test",
-                        nick = _nick,
-                        users = new[] { new { sessionId = "local", nick = _nick } }
-                    }));
-                    await ws.SendAsync(welcome, WebSocketMessageType.Text, true, CancellationToken.None);
-                }
+                    v = 1,
+                    type = "welcome",
+                    sessionId = "local",
+                    room = "throwaway-test",
+                    nick = _nick,
+                    users = new[] { new { sessionId = "local", nick = _nick } }
+                }));
+                await ws.SendAsync(welcome, WebSocketMessageType.Text, true, CancellationToken.None);
             }
-            catch
-            {
-                // the bridge closed, or the test ended
-            }
-            finally
-            {
-                try { ws?.Abort(); } catch { /* ignore */ }
-            }
+        }
+        catch
+        {
+            // the bridge closed, or the test ended
+        }
+        finally
+        {
+            try { ws?.Abort(); } catch { /* ignore */ }
         }
     }
 

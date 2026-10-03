@@ -75,6 +75,10 @@ Limits you should know about:
 - The trip is shown once the relay confirms the join (`joined as alex !Ab12Cd`, and under *trip*
   in the sidebar). Tell operators that trip out-of-band so they can add it to their trusted list.
 
+## Instance lock
+
+A second bridge process on the same host is refused before it opens a socket. The lock files are `{base}/bridge.instance.lock` and a hash under `/tmp/chatbridge-identity`. The hash covers the endpoint, the room, and the nick. The room name, trip, password, token, and hook secret are not written into the file name, the lock file, or the `already running`, `stop`, and `instance:` lines. The lock is same-host. It does not stop a second host from joining.
+
 ## Channel names
 
 The channel name is the only thing keeping a hack.chat channel private. The interactive Muse

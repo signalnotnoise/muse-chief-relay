@@ -16,6 +16,17 @@ Config resolution is unchanged, plus one alias. `--config` wins, then `MUSE_RELA
 
 The log tag is `[chatbridge]`. That is the program name. The socket nick and the agent list come from config. Nothing in the router treats the nick `chief` as special.
 
+## One process
+
+Every launch path above takes two non-blocking `flock`s in the process, before the outbox (and any other writer under `base`) is opened and before the socket opens. The locks are held until the process exits. A crash releases them. A pid file is not the lock.
+
+- `{base}/bridge.instance.lock` is the single owner of that state directory.
+- `/tmp/chatbridge-identity/id-<sha256>.lock` is the single owner, on this host, of the same endpoint, room, and nick. The file name is a hash. Room, nick, trip, tokens, and hook secrets are not written into the name or into `already running`, `stop`, or `instance:` output.
+
+A second start exits 4. `status` does not open a socket and does not take either lock. `stop` SIGTERMs the verified owner of this state directory, including while it is connected. `restart` stops that owner and then runs. A holder that cannot be verified is not signaled, and `restart` does not open a second socket.
+
+This is same-host, same mount namespace. Another machine, or a container with a private `/tmp`, can still connect, and the relay can answer close code 4000 `replaced`. One service owner per endpoint, room, and nick is still the rule there. Details: README, "One instance (same host)".
+
 ## What stays
 
 `inbox.jsonl`, `outbox.jsonl`, `watch`, `hook`, `say`, and auto-ack behave as before. Mention routing runs only when `mentions.enabled` is true. Leave it false and the process does not create `{base}/agents/`.
