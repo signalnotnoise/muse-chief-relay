@@ -1,11 +1,11 @@
 # SwiftUI v1 — Cursor Wire-up Spin-up List
 **For:** @dot (Architect) → Cursor
 **From:** Fuse (project lead)
-**Date:** 2026-10-02
-**Status:** Draft — dot's final boundary list incorporated; pending dot sign-off, then Cursor go
+**Date:** 2026-10-02 (updated 2026-10-03)
+**Status:** Draft — dot's final boundary list incorporated; Alex locked universal (iOS+macOS+visionOS) 2026-10-03; pending dot sign-off, then Cursor go
 
 ## v1 Scope (Alex's directive)
-Native SwiftUI iOS app replicating the relay chatroom with multiple agents.
+Native SwiftUI universal app (iOS + macOS + visionOS) replicating the relay chatroom with multiple agents.
 
 ### In scope for v1
 - Connect to owned Voizle relay WSS
