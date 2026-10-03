@@ -1,6 +1,6 @@
 {
   "captured": "2026-10-03",
-  "source": "Live voizle-text-relay hello on the public relay, plus presence, welcome.replay, chat, bye, and invalid_text shapes from the same v1 socket. Room names, session ids, nicks, and message ids are placeholders. No password, owner secret, token, or private room is in this file.",
+  "source": "Live voizle-text-relay hello on the public relay (2026-10-03), plus presence, welcome.replay, chat, bye, and invalid_text shapes. helloDualVersion is the designed versions list, not the live hello. Chat ids are placeholder UUIDs. Room names, session ids, and nicks are placeholders. No password, owner secret, token, or private room is in this file.",
   "hello": {
     "v": 1,
     "type": "hello",
@@ -9,6 +9,17 @@
     "replayLimit": 50,
     "limits": {"nick": 24, "room": 64, "trip": 16, "text": 2048},
     "durableVersion": 2
+  },
+  "helloDualVersion": {
+    "v": 1,
+    "type": "hello",
+    "protocol": "voizle-text-relay",
+    "durable": true,
+    "replayLimit": 50,
+    "limits": {"nick": 24, "room": 64, "trip": 16, "text": 2048},
+    "durableVersion": 2,
+    "versions": [2, 1],
+    "v2": {"features": ["inbox", "lease", "resume"]}
   },
   "welcome": {
     "v": 1,
@@ -21,6 +32,43 @@
       {"sessionId": "<session>", "nick": "<nick>", "trip": null}
     ],
     "replay": []
+  },
+  "welcomeMissingReplay": {
+    "v": 1,
+    "type": "welcome",
+    "sessionId": "<session>",
+    "room": "<room>",
+    "nick": "<nick>",
+    "trip": null,
+    "users": [
+      {"sessionId": "<session>", "nick": "<nick>", "trip": null}
+    ]
+  },
+  "welcomeUncertainReplay": {
+    "v": 1,
+    "type": "welcome",
+    "sessionId": "<session>",
+    "room": "<room>",
+    "nick": "<nick>",
+    "trip": null,
+    "users": [
+      {"sessionId": "<session>", "nick": "<nick>", "trip": null}
+    ],
+    "replay": [
+      {
+        "v": 1,
+        "type": "chat",
+        "id": "00000000-0000-4000-8000-000000000001",
+        "room": "<room>",
+        "nick": "<nick-a>",
+        "trip": null,
+        "text": "<text>",
+        "ts": 1790994302090,
+        "source": "peer"
+      },
+      {"v": 1, "type": "presence", "event": "join", "nick": "<nick-b>"},
+      "not-a-frame"
+    ]
   },
   "welcomeReplay": {
     "v": 1,
@@ -37,7 +85,7 @@
       {
         "v": 1,
         "type": "chat",
-        "id": "<message-id>",
+        "id": "00000000-0000-4000-8000-000000000001",
         "room": "<room>",
         "nick": "<nick-a>",
         "trip": null,
@@ -50,7 +98,7 @@
   "chat": {
     "v": 1,
     "type": "chat",
-    "id": "<message-id>",
+    "id": "00000000-0000-4000-8000-000000000002",
     "room": "<room>",
     "nick": "<nick>",
     "trip": "!<code>",

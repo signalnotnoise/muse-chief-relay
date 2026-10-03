@@ -31,6 +31,9 @@ public struct HelloCapabilities: Equatable, Sendable {
     public var roomLimit: Int
     public var tripLimit: Int
     public var textLimit: Int
+    /// Present when hello carries `versions`. This client records it and still joins v1.
+    public var versionsFieldPresent: Bool
+    public var advertisedVersions: [Int]
     /// This client never opts into durable join, pull, or ack.
     public var optedIntoDurable: Bool
 
@@ -43,21 +46,25 @@ public struct HelloCapabilities: Equatable, Sendable {
 
 public enum HelloParse: Equatable, Sendable {
     case accepted(HelloCapabilities)
-    case rejected(String)
+    /// The first frame was not a hello. The caller may back off and try again.
+    case retry(String)
+    /// The server spoke a hello this client will not negotiate. Stop. Do not send another version.
+    case stop(String)
 }
 
 public enum HelloFrame {
     public static func parse(_ object: [String: Any]) -> HelloParse {
         guard WireJSON.string(object["type"]) == "hello" else {
-            return .rejected("expected hello")
+            return .retry("expected hello")
         }
         guard WireJSON.string(object["protocol"]) == "voizle-text-relay" else {
-            return .rejected("expected voizle-text-relay")
+            return .stop("expected voizle-text-relay")
         }
         guard WireJSON.int(object["v"]) == 1 else {
-            return .rejected("expected hello v 1")
+            return .stop("expected hello v 1")
         }
         let limits = WireJSON.object(object["limits"]) ?? [:]
+        let versions = WireJSON.array(object["versions"]) ?? []
         let capabilities = HelloCapabilities(
             durableAdvertised: WireJSON.bool(object["durable"]) ?? false,
             durableVersion: WireJSON.int(object["durableVersion"]),
@@ -66,6 +73,8 @@ public enum HelloFrame {
             roomLimit: WireJSON.int(limits["room"]) ?? HelloCapabilities.fallbackRoomLimit,
             tripLimit: WireJSON.int(limits["trip"]) ?? HelloCapabilities.fallbackTripLimit,
             textLimit: WireJSON.int(limits["text"]) ?? HelloCapabilities.fallbackTextLimit,
+            versionsFieldPresent: object["versions"] != nil,
+            advertisedVersions: versions.compactMap { WireJSON.int($0) },
             optedIntoDurable: false
         )
         return .accepted(capabilities)
@@ -100,7 +109,15 @@ public enum ClientFrame {
 }
 
 public enum ChatIdentity {
-    /// Server id wins. Otherwise a stable hash of room, nick, trip, timestamp, and text.
+    /// Canonical lowercase UUID, or nil when the server id is missing or not a UUID.
+    public static func canonicalServerID(_ raw: String?) -> String? {
+        guard let raw else { return nil }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let uuid = UUID(uuidString: trimmed) else { return nil }
+        return uuid.uuidString.lowercased()
+    }
+
+    /// UUID chat id wins. Otherwise a stable hash of room, nick, trip, timestamp, and text.
     public static func key(
         room: String,
         nick: String,
@@ -109,7 +126,7 @@ public enum ChatIdentity {
         text: String,
         serverID: String?
     ) -> String {
-        if let serverID = serverID?.trimmingCharacters(in: .whitespacesAndNewlines), !serverID.isEmpty {
+        if let serverID = canonicalServerID(serverID) {
             return "srv:" + serverID
         }
         let tripBody = canonicalTrip(trip) ?? ""

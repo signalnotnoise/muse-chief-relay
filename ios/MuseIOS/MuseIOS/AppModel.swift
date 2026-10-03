@@ -131,9 +131,15 @@ final class AppModel: ObservableObject {
         SummaryBuilder.make(items: session.items, includeReplay: includeReplayInSummary)
     }
 
+    func discardSummary() {
+        summaryText = nil
+        summaryNote = nil
+    }
+
     func refreshSummary() async {
         summaryBusy = true
         summaryText = nil
+        let includeReplay = includeReplayInSummary
         let context = summaryContext()
         let gate = OnDeviceSummary.gate()
         if gate.usesOrdinaryChat {
@@ -143,7 +149,13 @@ final class AppModel: ObservableObject {
             return
         }
         do {
-            summaryText = try await OnDeviceSummary.summarize(context)
+            let text = try await OnDeviceSummary.summarize(context)
+            guard includeReplay == includeReplayInSummary else {
+                discardSummary()
+                summaryBusy = false
+                return
+            }
+            summaryText = text
             summaryNote = context.privacyNote
         } catch {
             summaryText = nil
@@ -166,8 +178,8 @@ final class AppModel: ObservableObject {
             self.apply(self.session.socketClosed(now: Date()))
         }
         socket.onSendResult = { [weak self] localID, ok in
-            guard let self, !ok, !localID.isEmpty else { return }
-            self.session.transportFailed(localID: localID, now: Date())
+            guard let self, !ok else { return }
+            self.apply(self.session.transportFailed(localID: localID, now: Date()))
         }
     }
 

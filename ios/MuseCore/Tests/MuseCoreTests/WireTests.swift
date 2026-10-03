@@ -21,7 +21,27 @@ final class WireTests: XCTestCase {
         XCTAssertEqual(caps.nickLimit, 24)
         XCTAssertEqual(caps.roomLimit, 64)
         XCTAssertEqual(caps.tripLimit, 16)
+        XCTAssertFalse(caps.versionsFieldPresent)
+        XCTAssertEqual(caps.advertisedVersions, [])
         XCTAssertFalse(caps.optedIntoDurable)
+    }
+
+    func testDualVersionHelloIsRecordedAndNotASecondProtocol() throws {
+        let hello = try fixtureObject("helloDualVersion")
+        guard case .accepted(let caps) = HelloFrame.parse(hello) else {
+            return XCTFail("dual-version hello rejected")
+        }
+        XCTAssertTrue(caps.versionsFieldPresent)
+        XCTAssertEqual(caps.advertisedVersions, [2, 1])
+        XCTAssertFalse(caps.optedIntoDurable)
+        XCTAssertEqual(WireJSON.int(hello["v"]), 1)
+    }
+
+    func testWrongHelloVersionStops() {
+        let wrong = HelloFrame.parse(["v": 2, "type": "hello", "protocol": "voizle-text-relay"])
+        guard case .stop = wrong else { return XCTFail("expected stop") }
+        let other = HelloFrame.parse(["v": 1, "type": "welcome"])
+        guard case .retry = other else { return XCTFail("expected retry") }
     }
 
     func testJoinIsV1DisplayTripOnly() throws {
@@ -73,7 +93,8 @@ final class WireTests: XCTestCase {
         let replay = try XCTUnwrap(WireJSON.array(welcome["replay"]))
         let chat = try XCTUnwrap(replay.first as? [String: Any])
         XCTAssertEqual(WireJSON.string(chat["type"]), "chat")
-        XCTAssertEqual(WireJSON.string(chat["id"]), "<message-id>")
+        XCTAssertEqual(WireJSON.string(chat["id"]), "00000000-0000-4000-8000-000000000001")
+        XCTAssertNotNil(ChatIdentity.canonicalServerID(WireJSON.string(chat["id"])))
         XCTAssertEqual(WireJSON.int64(chat["ts"]), 1_790_994_302_090)
         XCTAssertEqual(WireJSON.string(chat["source"]), "peer")
         let label = OriginalTime.label(unixMilliseconds: 1_790_994_302_090)
@@ -82,10 +103,14 @@ final class WireTests: XCTestCase {
     }
 
     func testServerIDDedupKeyIgnoresText() {
-        let a = ChatIdentity.key(room: "<room>", nick: "a", trip: nil, unixMilliseconds: 1, text: "one", serverID: "same")
-        let b = ChatIdentity.key(room: "<room>", nick: "a", trip: nil, unixMilliseconds: 1, text: "two", serverID: "same")
-        XCTAssertEqual(a, "srv:same")
+        let id = "123E4567-E89B-12D3-A456-426614174000"
+        let a = ChatIdentity.key(room: "<room>", nick: "a", trip: nil, unixMilliseconds: 1, text: "one", serverID: id)
+        let b = ChatIdentity.key(room: "<room>", nick: "a", trip: nil, unixMilliseconds: 1, text: "two", serverID: id.lowercased())
+        XCTAssertEqual(a, "srv:" + id.lowercased())
         XCTAssertEqual(a, b)
+        let notUUID = ChatIdentity.key(room: "<room>", nick: "a", trip: nil, unixMilliseconds: 1, text: "one", serverID: "same")
+        XCTAssertTrue(notUUID.hasPrefix("msg:"))
+        XCTAssertNotEqual(notUUID, a)
         let hashed = ChatIdentity.key(room: "<room>", nick: "a", trip: "!Ab12Cd", unixMilliseconds: 5, text: "one", serverID: nil)
         XCTAssertTrue(hashed.hasPrefix("msg:"))
         XCTAssertNotEqual(hashed, ChatIdentity.key(room: "<room>", nick: "a", trip: "!Ab12Cd", unixMilliseconds: 5, text: "two", serverID: nil))

@@ -50,11 +50,13 @@ struct SummarySheet: View {
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") {
-                        model.summaryText = nil
-                        model.summaryNote = nil
+                        model.discardSummary()
                         dismiss()
                     }
                 }
+            }
+            .onChange(of: model.includeReplayInSummary) { _, _ in
+                model.discardSummary()
             }
         }
     }

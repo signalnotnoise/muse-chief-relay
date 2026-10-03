@@ -82,6 +82,9 @@ public struct ReplayBanner: Equatable, Sendable {
     public var alreadyVisible: Int
     public var coverageLabel: String
     public var connectionGapLabel: String
+    /// Set when welcome.replay was missing or contained rows that were not chat.
+    public var uncertainLabel: String?
+    public var replayUncertain: Bool { uncertainLabel != nil }
 }
 
 public enum SessionEffect: Equatable, Sendable {
@@ -203,7 +206,8 @@ public struct ChatSession: Equatable, Sendable {
         guard phase == .connecting || phase == .awaitingHello || phase == .awaitingWelcome || phase == .joined else {
             return []
         }
-        let wasJoined = phase == .joined || hasJoinedOnce
+        let uptime = connectedAt.map { now.timeIntervalSince($0) } ?? 0
+        let reachedWelcome = phase == .joined
         markPendingUnconfirmed(caption: "Not confirmed. This was not sent again.")
         lastCloseAt = now
         connectedAt = nil
@@ -212,7 +216,7 @@ public struct ChatSession: Equatable, Sendable {
             statusText = inBackground ? "Paused. Reconnects when Muse is active." : "Disconnected"
             return []
         }
-        let delay = nextDelay(confirmed: wasJoined, uptime: 0)
+        let delay = nextDelay(confirmed: reachedWelcome, uptime: uptime)
         phase = .waitingToReconnect
         statusText = "Reconnecting…"
         return [.scheduleReconnect(milliseconds: delay)]
@@ -228,10 +232,22 @@ public struct ChatSession: Equatable, Sendable {
             switch HelloFrame.parse(object) {
             case .accepted(let hello):
                 capabilities = hello
-                textLimit = max(1, hello.textLimit)
+                textLimit = hello.textLimit > 0 ? hello.textLimit : HelloCapabilities.fallbackTextLimit
                 if hello.durableAdvertised, !notedDurableAdvertisement {
                     notedDurableAdvertisement = true
                     appendSystem("Server advertised durable delivery. This client stays on v1 chat and does not opt in.")
+                }
+                if hello.versionsFieldPresent {
+                    appendSystem("Hello included a versions list. Join stays v1. This client does not send a dual-version hello.")
+                }
+                let limitIssues = issuesAgainst(hello)
+                if !limitIssues.isEmpty {
+                    joinIssues = limitIssues
+                    appendSystem(limitIssues.joined(separator: " "))
+                    wantConnected = false
+                    phase = .stopped
+                    statusText = "Join not sent"
+                    return [.closeSocket, .cancelReconnect]
                 }
                 phase = .awaitingWelcome
                 statusText = "Joining…"
@@ -239,10 +255,15 @@ public struct ChatSession: Equatable, Sendable {
                     return [.send(text: frame, localID: "")]
                 }
                 return []
-            case .rejected(let reason):
+            case .retry(let reason):
                 appendSystem("Hello was not accepted (\(reason)).")
-                phase = .awaitingHello
                 return failAndRetry(now: now, confirmed: false)
+            case .stop(let reason):
+                appendSystem("Hello was not accepted (\(reason)). This client stays on v1.")
+                wantConnected = false
+                phase = .stopped
+                statusText = "Hello was not accepted"
+                return [.closeSocket, .cancelReconnect]
             }
         }
 
@@ -307,8 +328,15 @@ public struct ChatSession: Equatable, Sendable {
         return .sent(effects)
     }
 
-    public mutating func transportFailed(localID: String, now: Date) {
+    @discardableResult
+    public mutating func transportFailed(localID: String, now: Date) -> [SessionEffect] {
+        if localID.isEmpty {
+            guard phase == .awaitingWelcome || phase == .awaitingHello else { return [] }
+            appendSystem("The join did not go out. It will be sent again after the next hello. No chat was sent.")
+            return failAndRetry(now: now, confirmed: false)
+        }
         markUnconfirmed(localID: localID, caption: "The relay did not take this. It was not sent again.")
+        return []
     }
 
     public mutating func enterBackground(now: Date) -> [SessionEffect] {
@@ -380,6 +408,48 @@ public struct ChatSession: Equatable, Sendable {
         return issues
     }
 
+    private func issuesAgainst(_ hello: HelloCapabilities) -> [String] {
+        if hello.nickLimit <= 0 || hello.roomLimit <= 0 || hello.tripLimit <= 0 || hello.textLimit <= 0 {
+            return ["Hello limits were not usable. The join was not sent."]
+        }
+        var issues: [String] = []
+        if Composer.utf16Count(identity.room) > hello.roomLimit {
+            issues.append("Room is longer than the \(hello.roomLimit)-character limit from hello. It was not shortened or sent.")
+        }
+        if Composer.utf16Count(identity.nick) > hello.nickLimit {
+            issues.append("Nick is longer than the \(hello.nickLimit)-character limit from hello. It was not shortened or sent.")
+        }
+        if let trip = wireTrip, Composer.utf16Count(trip) > hello.tripLimit {
+            issues.append("Trip is longer than the \(hello.tripLimit)-character limit from hello. It was not shortened or sent.")
+        }
+        return issues
+    }
+
+    private struct ReplayWindow {
+        var chats: [[String: Any]]
+        var skipped: Int
+        var listMissing: Bool
+    }
+
+    private func replayWindow(_ object: [String: Any]) -> ReplayWindow {
+        guard let raw = object["replay"] else {
+            return ReplayWindow(chats: [], skipped: 0, listMissing: true)
+        }
+        guard let list = WireJSON.array(raw) else {
+            return ReplayWindow(chats: [], skipped: 0, listMissing: true)
+        }
+        var chats: [[String: Any]] = []
+        var skipped = 0
+        for entry in list {
+            guard let row = entry as? [String: Any], WireJSON.string(row["type"]) == "chat" else {
+                skipped += 1
+                continue
+            }
+            chats.append(row)
+        }
+        return ReplayWindow(chats: chats, skipped: skipped, listMissing: false)
+    }
+
     private mutating func applyWelcome(_ object: [String: Any], now: Date) -> [SessionEffect] {
         guard phase == .awaitingWelcome || phase == .joined else { return [] }
         phase = .joined
@@ -391,14 +461,26 @@ public struct ChatSession: Equatable, Sendable {
             self.users = users.compactMap(Self.user)
         }
         let echoedTrip = WireJSON.string(object["trip"])
-        let replay = WireJSON.array(object["replay"]) ?? []
-        let chats = replay.compactMap { $0 as? [String: Any] }.filter { WireJSON.string($0["type"]) == "chat" }
+        let window = replayWindow(object)
         let limit = capabilities?.replayLimit ?? HelloCapabilities.fallbackReplayLimit
-        let coverage = coverageLabel(received: chats.count, limit: limit)
+        let coverage: String
+        let uncertain: String?
+        if window.listMissing {
+            coverage = "coverage uncertain"
+            uncertain = "welcome had no replay list, so no catch-up lines were added"
+        } else {
+            coverage = coverageLabel(received: window.chats.count, limit: limit)
+            if window.skipped > 0 {
+                let noun = window.skipped == 1 ? "entry was" : "entries were"
+                uncertain = "\(window.skipped) replay \(noun) not chat and not shown"
+            } else {
+                uncertain = nil
+            }
+        }
         let gap = GapLabel.make(from: lastCloseAt, to: now)
         var shown = 0
         var already = 0
-        for chat in chats {
+        for chat in window.chats {
             if applyChat(chat, origin: .replay(coverage: coverage, gap: gap), now: now) {
                 shown += 1
             } else {
@@ -408,11 +490,15 @@ public struct ChatSession: Equatable, Sendable {
         banner = ReplayBanner(
             label: "recentReplay",
             shown: shown,
-            received: chats.count,
+            received: window.chats.count,
             alreadyVisible: already,
             coverageLabel: coverage,
-            connectionGapLabel: gap
+            connectionGapLabel: gap,
+            uncertainLabel: uncertain
         )
+        if let uncertain {
+            appendSystem(uncertain)
+        }
         let who = identity.nick + (echoedTrip.map { " \($0)" } ?? " (no trip)")
         appendSystem("Joined as \(who). Trip is display only.")
         statusText = "Joined"
@@ -429,7 +515,7 @@ public struct ChatSession: Equatable, Sendable {
         let text = WireJSON.string(object["text"]) ?? ""
         let nick = WireJSON.string(object["nick"]) ?? ""
         let trip = WireJSON.string(object["trip"])
-        let serverID = WireJSON.string(object["id"])
+        let serverID = ChatIdentity.canonicalServerID(WireJSON.string(object["id"]))
         let stamp = WireJSON.int64(object["ts"]) ?? WireJSON.int64(object["time"])
         let room = WireJSON.string(object["room"]) ?? identity.room
         let key = ChatIdentity.key(
@@ -447,19 +533,24 @@ public struct ChatSession: Equatable, Sendable {
         }) {
             seenKeys.insert(key)
             pending.removeAll { $0 == localID }
-            if let index = items.firstIndex(where: { $0.id == localID }) {
-                items[index].serverID = serverID
-                items[index].trip = trip
-                items[index].originalUnixMilliseconds = stamp
-                items[index].originalTimeLabel = OriginalTime.label(unixMilliseconds: stamp)
-                items[index].kind = .liveChat
-                items[index].delivery = .relayAccepted
-                items[index].receipt = .accepted
+            guard let serverID, let index = items.firstIndex(where: { $0.id == localID }) else {
+                markUnconfirmed(
+                    localID: localID,
+                    caption: "The echo had no chat id, so this send stays unconfirmed. It was not sent again."
+                )
+                return true
             }
+            items[index].serverID = serverID
+            items[index].trip = trip
+            items[index].originalUnixMilliseconds = stamp
+            items[index].originalTimeLabel = OriginalTime.label(unixMilliseconds: stamp)
+            items[index].kind = .liveChat
+            items[index].delivery = .relayAccepted
+            items[index].receipt = .accepted
             return true
         }
 
-        if case .replay = origin, nick == identity.nick, let localID = items.first(where: {
+        if case .replay = origin, let serverID, nick == identity.nick, let localID = items.first(where: {
             $0.mine && $0.delivery == .unconfirmed && $0.serverID == nil && $0.text == text
         })?.id {
             seenKeys.insert(key)
@@ -558,7 +649,7 @@ public struct ChatSession: Equatable, Sendable {
                 statusText = "Join rejected"
                 return [.closeSocket, .cancelReconnect]
             }
-            return failAndRetry(now: now, confirmed: hasJoinedOnce)
+            return failAndRetry(now: now, confirmed: false)
         }
         appendSystem(text.isEmpty ? "Error" : text)
         if code == "invalid_text", let localID = pending.first {

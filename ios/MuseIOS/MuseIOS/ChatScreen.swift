@@ -144,6 +144,11 @@ struct ReplayHeader: View {
             Text(banner.coverageLabel)
                 .font(.footnote)
                 .foregroundStyle(.secondary)
+            if let uncertain = banner.uncertainLabel {
+                Text(uncertain)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
             Text(banner.connectionGapLabel)
                 .font(.footnote)
                 .foregroundStyle(.secondary)
