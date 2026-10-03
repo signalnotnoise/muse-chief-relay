@@ -1,5 +1,6 @@
 using System.Net.Http.Headers;
 using System.Text;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 
 namespace ChatBridge;
@@ -25,12 +26,18 @@ internal enum HookStep
 /// byte offset on a line boundary, partial lines left for later, truncation and rotation detected, first run
 /// starts at the end of the inbox. The bridge's own nick is skipped; with <c>trips</c> set, so is every
 /// other sender whose trip isn't listed.</item>
-/// <item>Deliver first, save second: the offset moves past a batch only after a 2xx. Chats held by the cooldown
-/// or a failed fire stay on disk past the saved offset, so a restart or crash re-sends them instead of losing
-/// them (a crash between the 2xx and the save can send one batch twice).</item>
-/// <item>At most one fire per <c>cooldown_s</c>. Chats that arrive inside it go out together in the next fire.
-/// A failed fire (non-2xx, timeout, network error) is retried after <c>max(cooldown_s, 1)</c>, doubling up to
-/// <c>max_retry_s</c>.</item>
+/// <item>Deliver first, save second: the offset moves past chats only after each one was accepted (HTTP 2xx)
+/// or copied into the retry file. Chats held by the cooldown stay on disk past the saved offset. A crash
+/// between the 2xx and the save can send one piece twice; it does not drop a chat.</item>
+/// <item>A reconnect replay can append a large backlog in one poll. That backlog is POSTed in pieces, oldest
+/// first. Each piece is at most <c>max_batch</c> chats and at most <see cref="MaxPayloadBytes"/> UTF-8 bytes,
+/// so one oversized body cannot come back HTTP 400 and stall the queue. Pieces of one backlog go out in the
+/// same step, without waiting <c>cooldown_s</c> between them.</item>
+/// <item>At most one burst per <c>cooldown_s</c>. Chats that arrive inside it go out together in the next burst.
+/// A piece that fails (non-2xx, timeout, network error) is written to the retry file and retried after
+/// <c>max(cooldown_s, 1)</c>, doubling up to <c>max_retry_s</c>. An HTTP 400 on a piece that still holds more
+/// than one chat is split and retried in the same step. The failed piece does not hold later pieces or chats
+/// that arrive afterward.</item>
 /// <item>Wakes on file-system events, with a poll every <c>poll_s</c> as the fallback.</item>
 /// </list>
 /// </summary>
@@ -47,9 +54,26 @@ internal sealed class HookPoller : IDisposable
     private readonly TextWriter _log;
     private readonly string _inbox;
 
+    private readonly string _retryPath;
+    private List<WatchedChat> _retry;
+    private bool _retryUnreadable;
+
     private DateTimeOffset _nextAllowed = DateTimeOffset.MinValue;
+    private DateTimeOffset _retryNotBefore = DateTimeOffset.MinValue;
+    private int _retryFailures;
     private bool _warned;
     private HookStatus _s;
+
+    /// <summary>
+    /// Largest JSON body this poller will POST, in UTF-8 bytes. A live reconnect dump of about 83 chats
+    /// came back HTTP 400 and then retried forever as one pile. 32 KiB stays under the usual 100 KiB JSON
+    /// body limit (and under a 64 KiB proxy cap) that those receivers answer with 400. One chat that is
+    /// still larger after <c>max_text</c> is sent alone.
+    /// </summary>
+    internal const int MaxPayloadBytes = 32 * 1024;
+
+    /// <summary>Tests can tighten this. Production leaves it at <see cref="MaxPayloadBytes"/>.</summary>
+    internal int PayloadByteLimit { get; set; } = MaxPayloadBytes;
 
     public HookPoller(RelayConfig cfg, HookSecrets secrets, HttpMessageHandler? handler = null,
         Func<DateTimeOffset>? clock = null, TextWriter? log = null)
@@ -62,6 +86,8 @@ internal sealed class HookPoller : IDisposable
         _inbox = Path.Combine(cfg.BaseDir, "inbox.jsonl");
         var state = _h.StatePath(cfg.BaseDir);
         _watcher = new InboxWatcher(_inbox, state, cfg.Nick);
+        _retryPath = state + ".retry";
+        _retry = LoadRetry();
         _status = new HookStatusWriter(HookStatus.PathFor(state), _log);
         _trips = new HashSet<string>(_h.Trips, StringComparer.Ordinal);
         _http = new HttpClient(handler ?? new SocketsHttpHandler { AllowAutoRedirect = false })
@@ -129,10 +155,10 @@ internal sealed class HookPoller : IDisposable
         var now = _clock().ToUnixTimeSeconds();
         _s = _s with { State = HookStatus.Stopped, StoppedAt = now, HeartbeatAt = now };
         _status.Write(_s);
-        _log.WriteLine($"[chatbridge] hook: stopped{(_s.Pending > 0 ? $"; {_s.Pending} chat(s) not yet delivered stay queued in the inbox for the next start" : "")}");
+        _log.WriteLine($"[chatbridge] hook: stopped{(_s.Pending > 0 ? $"; {_s.Pending} chat(s) not yet delivered stay queued for the next start" : "")}");
     }
 
-    /// <summary>One poll: consume what doesn't qualify, and fire the qualifying chats if the cooldown allows.</summary>
+    /// <summary>One poll: consume what doesn't qualify, and fire due chats in size-capped pieces.</summary>
     public async Task<HookStep> StepAsync(CancellationToken ct)
     {
         var poll = _watcher.Poll();
@@ -142,61 +168,93 @@ internal sealed class HookPoller : IDisposable
             _log.WriteLine($"[chatbridge] hook: warning: {w}");
         }
 
-        var chats = poll.Chats.Where(Qualifies).ToList();
-        if (chats.Count == 0)
-        {
-            _watcher.Commit(poll);
-            _s = _s with { Pending = 0 };
-            return HookStep.Idle;
-        }
-
-        _s = _s with { Pending = chats.Count };
+        var fresh = poll.Chats.Where(Qualifies).ToList();
         var now = _clock();
-        if (now < _nextAllowed)
-            return HookStep.Held;
+        var retryDue = _retry.Count > 0 && now >= _retryNotBefore;
+        var freshDue = fresh.Count > 0 && now >= _nextAllowed;
 
-        var result = await FireWhileHeartbeatingAsync(chats, ct);
+        if (!retryDue && !freshDue)
+        {
+            if (fresh.Count == 0)
+                _watcher.Commit(poll);
+            _s = _s with { Pending = _retry.Count + fresh.Count };
+            return _retry.Count + fresh.Count > 0 ? HookStep.Held : HookStep.Idle;
+        }
+
+        var batch = new List<WatchedChat>((retryDue ? _retry.Count : 0) + (freshDue ? fresh.Count : 0));
+        if (retryDue)
+            batch.AddRange(_retry);
+        if (freshDue)
+            batch.AddRange(fresh);
+
+        var outcome = await DeliverAsync(batch, ct);
         now = _clock();
-        var nowS = now.ToUnixTimeSeconds();
-        if (result.Ok)
-        {
+
+        var kept = new List<WatchedChat>();
+        if (!retryDue)
+            kept.AddRange(_retry);
+        kept.AddRange(outcome.Failed);
+        SaveRetry(kept);
+        _retry = kept;
+
+        // Fresh chats are either delivered or copied into the retry file. Held chats stay past the offset.
+        if (fresh.Count == 0 || freshDue)
             _watcher.Commit(poll);
-            _nextAllowed = now + TimeSpan.FromSeconds(_h.CooldownSeconds);
-            _s = _s with
-            {
-                LastFireAt = nowS, LastResult = result.Result, LastOk = true, LastCount = chats.Count, LastOkAt = nowS,
-                Pending = 0, Failures = 0, NextRetryAt = null, FiredOk = _s.FiredOk + 1
-            };
-        }
-        else
+
+        var nowS = now.ToUnixTimeSeconds();
+        if (outcome.Failed.Count > 0)
         {
-            var failures = _s.Failures + 1;
+            _retryFailures++;
             var baseDelay = Math.Max(_h.CooldownSeconds, 1);
-            var delay = Math.Min(_h.MaxRetrySeconds, baseDelay * Math.Pow(2, Math.Min(failures - 1, 30)));
-            _nextAllowed = now + TimeSpan.FromSeconds(delay);
-            _s = _s with
-            {
-                LastFireAt = nowS, LastResult = result.Result, LastOk = false, LastCount = chats.Count,
-                Failures = failures, NextRetryAt = _nextAllowed.ToUnixTimeSeconds(), FiredFailed = _s.FiredFailed + 1
-            };
+            var delay = Math.Min(_h.MaxRetrySeconds, baseDelay * Math.Pow(2, Math.Min(_retryFailures - 1, 30)));
+            _retryNotBefore = now + TimeSpan.FromSeconds(delay);
+        }
+        else if (_retry.Count == 0)
+        {
+            _retryFailures = 0;
+            _retryNotBefore = DateTimeOffset.MinValue;
         }
 
-        _log.WriteLine($"[chatbridge] hook: fired {chats.Count} chat(s) -> {result.Result}" +
-                       (result.Ok ? "" : $"; retry in {(_nextAllowed - now).TotalSeconds:0}s"));
+        // A retry that succeeds during the cooldown must not push that window out. Only a burst that
+        // actually sent fresh chats starts the next gap.
+        if (freshDue && outcome.OkPieces > 0)
+            _nextAllowed = now + TimeSpan.FromSeconds(_h.CooldownSeconds);
+
+        var failed = outcome.Failed.Count > 0;
+        var last = failed ? outcome.LastFail! : outcome.LastOk!;
+        _s = _s with
+        {
+            LastFireAt = nowS,
+            LastResult = last.Result,
+            LastOk = !failed,
+            LastCount = failed ? outcome.Failed.Count : outcome.Delivered,
+            LastOkAt = outcome.OkPieces > 0 ? nowS : _s.LastOkAt,
+            Pending = _retry.Count + (freshDue ? 0 : fresh.Count),
+            Failures = _retryFailures,
+            NextRetryAt = _retry.Count > 0 ? _retryNotBefore.ToUnixTimeSeconds() : null,
+            FiredOk = _s.FiredOk + (outcome.OkPieces > 0 && !failed ? 1 : 0),
+            FiredFailed = _s.FiredFailed + (failed ? 1 : 0)
+        };
+
+        foreach (var piece in outcome.Leaves)
+        {
+            _log.WriteLine($"[chatbridge] hook: fired {piece.Count} chat(s) -> {piece.Result.Result}" +
+                           (piece.Result.Ok || !failed ? "" : $"; retry in {(_retryNotBefore - now).TotalSeconds:0}s"));
+        }
+
         Heartbeat(force: true);
-        return result.Ok ? HookStep.Fired : HookStep.Failed;
+        return failed ? HookStep.Failed : HookStep.Fired;
     }
 
     private bool Qualifies(WatchedChat c) =>
         _trips.Count == 0 || (PublicTrip.Canonical(c.Trip) is { } t && _trips.Contains(t));
 
-    /// <summary>The payload: <c>{"source","channel","chats":[{nick,trip,text,ts}]}</c>, plus <c>"omitted": n</c>
-    /// when more than <c>max_batch</c> chats were waiting (the newest are sent).</summary>
+    /// <summary>The payload: <c>{"source","channel","chats":[{nick,trip,text,ts}]}</c>. Text is cut to
+    /// <c>max_text</c>. The caller splits a larger backlog into pieces; this does not drop chats.</summary>
     public JsonObject BuildPayload(IReadOnlyList<WatchedChat> chats)
     {
-        var send = chats.Count > _h.MaxBatch ? chats.Skip(chats.Count - _h.MaxBatch).ToList() : chats;
         var arr = new JsonArray();
-        foreach (var c in send)
+        foreach (var c in chats)
         {
             var j = c.ToJson();
             if (c.Text is { } t && t.Length > _h.MaxText)
@@ -204,10 +262,133 @@ internal sealed class HookPoller : IDisposable
             arr.Add(j);
         }
 
-        var o = new JsonObject { ["source"] = _h.Source, ["channel"] = _cfg.Channel, ["chats"] = arr };
-        if (chats.Count > send.Count)
-            o["omitted"] = chats.Count - send.Count;
-        return o;
+        return new JsonObject { ["source"] = _h.Source, ["channel"] = _cfg.Channel, ["chats"] = arr };
+    }
+
+    internal static int Utf8Bytes(JsonObject payload) =>
+        Encoding.UTF8.GetByteCount(payload.ToJsonString(JsonUtil.Opts));
+
+    /// <summary>Oldest first. A piece grows until one more chat would pass <c>max_batch</c> or
+    /// <see cref="PayloadByteLimit"/>. A single chat that is already over the byte cap is its own piece.</summary>
+    private List<List<WatchedChat>> SplitPieces(IReadOnlyList<WatchedChat> chats)
+    {
+        var pieces = new List<List<WatchedChat>>();
+        var cur = new List<WatchedChat>();
+        foreach (var chat in chats)
+        {
+            cur.Add(chat);
+            if (cur.Count > 1 && (cur.Count > _h.MaxBatch || Utf8Bytes(BuildPayload(cur)) > PayloadByteLimit))
+            {
+                cur.RemoveAt(cur.Count - 1);
+                pieces.Add(cur);
+                cur = new List<WatchedChat> { chat };
+            }
+        }
+
+        if (cur.Count > 0)
+            pieces.Add(cur);
+        return pieces;
+    }
+
+    private sealed class DeliverOutcome
+    {
+        public int Delivered;
+        public int OkPieces;
+        public FireResult? LastOk;
+        public FireResult? LastFail;
+        public List<WatchedChat> Failed { get; } = new();
+        public List<(int Count, FireResult Result)> Leaves { get; } = new();
+    }
+
+    /// <summary>POST every piece. An HTTP 400 that still contains more than one chat is split in this step
+    /// so a body the receiver refuses for size does not pin the rest of the backlog.</summary>
+    private async Task<DeliverOutcome> DeliverAsync(IReadOnlyList<WatchedChat> chats, CancellationToken ct)
+    {
+        var outcome = new DeliverOutcome();
+        var pending = new LinkedList<List<WatchedChat>>();
+        foreach (var piece in SplitPieces(chats))
+            pending.AddLast(piece);
+
+        while (pending.First is { } node)
+        {
+            pending.RemoveFirst();
+            var piece = node.Value;
+            var result = await FireWhileHeartbeatingAsync(piece, ct);
+            if (result.Ok)
+            {
+                outcome.Delivered += piece.Count;
+                outcome.OkPieces++;
+                outcome.LastOk = result;
+                outcome.Leaves.Add((piece.Count, result));
+                continue;
+            }
+
+            if (result.HttpStatus == 400 && piece.Count > 1)
+            {
+                _log.WriteLine($"[chatbridge] hook: HTTP 400 for {piece.Count} chat(s); splitting");
+                var mid = piece.Count / 2;
+                pending.AddFirst(piece.GetRange(mid, piece.Count - mid));
+                pending.AddFirst(piece.GetRange(0, mid));
+                continue;
+            }
+
+            outcome.LastFail = result;
+            outcome.Failed.AddRange(piece);
+            outcome.Leaves.Add((piece.Count, result));
+        }
+
+        return outcome;
+    }
+
+    private List<WatchedChat> LoadRetry()
+    {
+        var list = new List<WatchedChat>();
+        if (!File.Exists(_retryPath))
+            return list;
+        try
+        {
+            foreach (var line in File.ReadLines(_retryPath))
+            {
+                if (string.IsNullOrWhiteSpace(line))
+                    continue;
+                if (JsonNode.Parse(line) is not JsonObject o)
+                    throw new JsonException("retry line is not an object");
+                list.Add(new WatchedChat(Json.Str(o, "nick"), Json.Str(o, "trip"), Json.Str(o, "text"), o["ts"]?.DeepClone()));
+            }
+
+            return list;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
+        {
+            // Leave the file in place. SaveRetry refuses to replace it, and the offset is not moved
+            // on this poll, so a later start can still send the chats.
+            _retryUnreadable = true;
+            _log.WriteLine($"[chatbridge] hook: warning: retry file unreadable ({ex.GetType().Name}); leaving it in place");
+            return new List<WatchedChat>();
+        }
+    }
+
+    private void SaveRetry(IReadOnlyList<WatchedChat> chats)
+    {
+        if (_retryUnreadable)
+            throw new IOException("retry file unreadable");
+
+        if (chats.Count == 0)
+        {
+            if (File.Exists(_retryPath))
+                File.Delete(_retryPath);
+            return;
+        }
+
+        var dir = Path.GetDirectoryName(Path.GetFullPath(_retryPath));
+        if (!string.IsNullOrEmpty(dir))
+            Directory.CreateDirectory(dir);
+        var tmp = $"{_retryPath}.tmp.{Environment.ProcessId}";
+        var sb = new StringBuilder();
+        foreach (var c in chats)
+            sb.Append(c.ToJson().ToJsonString(JsonUtil.Opts)).Append('\n');
+        File.WriteAllText(tmp, sb.ToString());
+        File.Move(tmp, _retryPath, overwrite: true);
     }
 
     /// <summary>

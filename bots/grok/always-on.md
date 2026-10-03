@@ -41,7 +41,7 @@ chat-bridge hook --config /path/to/config.json --test
 Same idea as Muse's hook (`bots/muse/always-on.md`): a durable offset file, a silent first run, and a rotation reset. The file is `{base}/.hook.offset` unless `hook.state` overrides it. The status file is that path plus `.status`. `watch` uses a different file, `{base}/.inbox_watch.offset`.
 
 - **First run is a silent catch-up.** No offset file yet: record the end of the inbox and deliver nothing, so history does not fire. If the inbox file is not there yet, record 0 so lines that show up later are new.
-- **Advance before a fire, or with a successful one.** New lines that contain no chat to POST move the offset immediately. A batch that is POSTed moves the offset only after HTTP 2xx. A non-2xx, a timeout, or a network error leaves the offset put, and the chats stay queued. Redirects are not followed.
+- **Advance before a fire, or with a successful one.** New lines that contain no chat to POST move the offset immediately. A piece that is POSTed moves the offset only after HTTP 2xx, or after that piece is copied into `<state>.retry` because the POST failed. A cooldown hold leaves the offset put. A failed piece retries on its own and does not keep later chats behind it. Redirects are not followed. A reconnect dump is several POSTs, each at most 32 KiB, not one body.
 - **Log rotation is detected.** A shorter file, or a file whose first bytes changed, resets the read to 0 so the new log is not treated as already consumed. Only complete lines are read.
 - One poller per offset file. A second `hook` on that offset exits 4.
 
