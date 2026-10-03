@@ -14,7 +14,9 @@ internal sealed class LocalHook : IDisposable
     private readonly CancellationTokenSource _cts = new();
     public ConcurrentQueue<int> Responses { get; } = new();
     public TimeSpan Delay { get; set; } = TimeSpan.Zero;
-    public ConcurrentQueue<(DateTime At, string? Auth, string? ContentType, string Body)> Requests { get; } = new();
+    public ConcurrentQueue<(DateTime At, string? Auth, string? ContentType, string Body, int Status)> Requests { get; } = new();
+    /// <summary>Return an HTTP status for this body, or null to use <see cref="Responses"/> / 200.</summary>
+    public Func<string, int?>? StatusFor { get; set; }
     public string Url { get; }
 
     public LocalHook(string path = "hook/s3cr3t-path-9f2")
@@ -51,10 +53,11 @@ internal sealed class LocalHook : IDisposable
 
             using var r = new StreamReader(ctx.Request.InputStream, Encoding.UTF8);
             var body = await r.ReadToEndAsync();
-            Requests.Enqueue((DateTime.UtcNow, ctx.Request.Headers["Authorization"], ctx.Request.ContentType, body));
+            var status = StatusFor?.Invoke(body) ?? (Responses.TryDequeue(out var code) ? code : 200);
+            Requests.Enqueue((DateTime.UtcNow, ctx.Request.Headers["Authorization"], ctx.Request.ContentType, body, status));
             if (Delay > TimeSpan.Zero)
                 await Task.Delay(Delay);
-            ctx.Response.StatusCode = Responses.TryDequeue(out var code) ? code : 200;
+            ctx.Response.StatusCode = status;
             try
             {
                 ctx.Response.Close();
@@ -457,17 +460,85 @@ public class HookPollerTests
     }
 
     [Fact]
-    public async Task Long_texts_and_big_batches_are_trimmed()
+    public async Task Long_texts_and_big_batches_are_sent_in_pieces()
     {
         using var r = new Rig(h => { h.MaxText = 5; h.MaxBatch = 2; });
         var p = r.New();
         await p.StepAsync(default);
         r.Add(Chat("Alex", "first-long", Alex) + Chat("Alex", "second-long", Alex) + Chat("Alex", "third-long", Alex));
         await p.StepAsync(default);
-        var body = r.Server.Last();
-        Assert.Equal(new[] { "secon", "third" }, body["chats"]!.AsArray().Select(c => (string)c!["text"]!));
-        Assert.Equal(1, (int)body["omitted"]!);
+        var bodies = r.Server.Requests.Select(q => (JsonObject)JsonNode.Parse(q.Body)!).ToList();
+        Assert.Equal(2, bodies.Count);
+        Assert.Equal(new[] { "first", "secon" }, bodies[0]["chats"]!.AsArray().Select(c => (string)c!["text"]!));
+        Assert.Equal(new[] { "third" }, bodies[1]["chats"]!.AsArray().Select(c => (string)c!["text"]!));
+        Assert.All(bodies, b => Assert.Null(b["omitted"]));
     }
+
+    [Fact]
+    public async Task Large_backlog_stays_under_the_failing_size_and_a_failed_piece_does_not_block()
+    {
+        using var r = new Rig(h => { h.CooldownSeconds = 0; h.MaxRetrySeconds = 30; });
+        var p = r.New();
+        await p.StepAsync(default);
+
+        // Long enough that one POST of the whole reconnect dump is over the size that returns HTTP 400.
+        string TextFor(int i) => i == 40 ? "BLOCK" + new string('y', 695) : $"c{i:D2}" + new string('y', 696);
+        var watched = Enumerable.Range(0, 83)
+            .Select(i => new WatchedChat("Alex", Alex, TextFor(i), JsonValue.Create(1_790_500_100L + i)))
+            .ToList();
+        Assert.True(HookPoller.Utf8Bytes(p.BuildPayload(watched)) > HookPoller.MaxPayloadBytes);
+
+        var failBlock = true;
+        r.Server.StatusFor = body =>
+        {
+            if (Encoding.UTF8.GetByteCount(body) > HookPoller.MaxPayloadBytes)
+                return 400;
+            if (failBlock && body.Contains("\"text\":\"BLOCK", StringComparison.Ordinal))
+                return 400;
+            return null;
+        };
+
+        r.Add(string.Concat(Enumerable.Range(0, 83).Select(i => Chat("Alex", TextFor(i), Alex, ts: 1_790_500_100L + i))));
+        Assert.Equal(HookStep.Failed, await p.StepAsync(default));
+
+        Assert.True(r.Server.Requests.Count > 1);
+        foreach (var req in r.Server.Requests)
+        {
+            var n = Encoding.UTF8.GetByteCount(req.Body);
+            Assert.True(n <= HookPoller.MaxPayloadBytes, $"POST was {n} bytes");
+            Assert.Null(((JsonObject)JsonNode.Parse(req.Body)!)["omitted"]);
+        }
+
+        var delivered = TextsOf(r.Server.Requests.Where(q => q.Status == 200)).ToList();
+        var blocked = TextFor(40);
+        Assert.Equal(watched.Select(c => c.Text).Where(t => t != blocked).OrderBy(t => t), delivered.OrderBy(t => t));
+        Assert.DoesNotContain(blocked, delivered);
+        Assert.Equal(1, p.Status.Pending);
+        Assert.Contains("BLOCK", File.ReadAllText(r.Dir.File(".hook.offset.retry")));
+
+        var beforeRetry = r.Server.Requests.Count;
+        r.Add(Chat("Alex", "after the dump", Alex, ts: 1_790_500_999));
+        Assert.Equal(HookStep.Fired, await p.StepAsync(default));
+        var fresh = r.Server.Requests.Skip(beforeRetry).ToList();
+        var freshBody = Assert.Single(fresh);
+        Assert.Equal(200, freshBody.Status);
+        Assert.Equal(new[] { "after the dump" }, TextsOf(fresh));
+        Assert.DoesNotContain("BLOCK", freshBody.Body);
+        Assert.Equal(1, p.Status.Pending);
+
+        failBlock = false;
+        var p2 = r.New();
+        Assert.Equal(HookStep.Fired, await p2.StepAsync(default));
+        var allDelivered = TextsOf(r.Server.Requests.Where(q => q.Status == 200)).ToList();
+        var expected = watched.Select(c => c.Text!).Append("after the dump").OrderBy(t => t).ToList();
+        Assert.Equal(expected, allDelivered.OrderBy(t => t).ToList());
+        Assert.Equal(0, p2.Status.Pending);
+        Assert.False(File.Exists(r.Dir.File(".hook.offset.retry")));
+        r.AssertNoSecrets();
+    }
+
+    private static IEnumerable<string> TextsOf(IEnumerable<(DateTime At, string? Auth, string? ContentType, string Body, int Status)> requests) =>
+        requests.SelectMany(q => ((JsonObject)JsonNode.Parse(q.Body)!)["chats"]!.AsArray().Select(c => (string)c!["text"]!));
 
     [Fact]
     public async Task Status_file_records_the_last_fire_and_classifies_as_running()

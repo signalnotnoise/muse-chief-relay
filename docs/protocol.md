@@ -86,21 +86,23 @@ local call `chat-bridge hook` makes (compatibility command `Chief.Bridge hook`) 
 
   ```json
   {"source":"chief-bridge-hook","channel":"your-channel-name",
-   "chats":[{"nick":"Alex","trip":"Ab12Cd","text":"hello chief","ts":1790500100}],
-   "omitted":3}
+   "chats":[{"nick":"Alex","trip":"Ab12Cd","text":"hello chief","ts":1790500100}]}
   ```
 
   `chats` holds inbound `chat` frames in log order: `trip` is `null` for untripped senders (only
   possible when `hook.trips` is empty), `text` is cut to `hook.max_text` characters, `ts` is the
-  hack.chat timestamp as logged. At most `hook.max_batch` chats are sent (the newest ones); `omitted`
-  appears only when older ones were left out. `source` is `hook.source`. The shape matches the
-  earlier local `hookpoll.py` (whose `source` was `hackchat-hookpoll`).
+  hack.chat timestamp as logged. One POST holds at most `hook.max_batch` chats and at most 32 KiB.
+  A larger backlog, including a reconnect replay written into the inbox in one go, is several POSTs
+  in the same step, oldest first. Chats are not left out. `source` is `hook.source`. The shape matches
+  the earlier local `hookpoll.py` (whose `source` was `hackchat-hookpoll`), without an `omitted` count.
 - **Who's in it:** chats from the trips in `hook.trips`, or every sender except the bridge's own nick
   when that list is empty. Never outbound lines or the bridge's own echoes.
-- **Response:** any 2xx means delivered; the body is ignored. Anything else, a redirect, a timeout or a
-  network error means "retry later". Delivery is at-least-once: a crash between the 2xx and saving the
-  offset can repeat one batch, so the receiver should treat the payload as a wake-up, and the agent
-  should read the actual chats with `watch`.
+- **Response:** any 2xx means that piece was delivered; the body is ignored. Anything else, a redirect,
+  a timeout or a network error means "retry that piece later". An HTTP 400 on a piece that still has
+  more than one chat is split and tried again immediately, so a body rejected for size does not stall
+  the rest of the backlog or chats that arrive after it. Delivery is at-least-once: a crash between the
+  2xx and saving the offset can repeat one piece, so the receiver should treat the payload as a wake-up,
+  and the agent should read the actual chats with `watch`.
 - **Timing:** the first chat after a quiet spell is sent at once (file-system events, or the
   `hook.poll_s` poll, default 5 s). Later chats wait for `hook.cooldown_s` (default 15 s) after the
   previous fire and are sent together.

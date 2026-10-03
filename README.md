@@ -248,7 +248,7 @@ Config (`hook` block; omit it and `hook` refuses to run):
 | `trips` | `[]` | Only chats from these trips fire the hook, and only they are sent. `[]` means every sender except the bridge's own nick. A leading `!` is dropped. |
 | `state` | `.hook.offset` | Offset file (relative to `base`); the status file is this plus `.status`. Both are gitignored. |
 | `source` | `chief-bridge-hook` | The payload's `source` field |
-| `max_text` / `max_batch` | `2000` / `50` | Chat text is cut to `max_text` characters; at most the newest `max_batch` chats go in one fire |
+| `max_text` / `max_batch` | `2000` / `50` | Chat text is cut to `max_text` characters. One POST holds at most `max_batch` chats and at most 32 KiB. A larger backlog is several POSTs, oldest first |
 
 Payload (`Content-Type: application/json`), the same shape as the local `hookpoll.py` it replaces:
 
@@ -256,13 +256,13 @@ Payload (`Content-Type: application/json`), the same shape as the local `hookpol
 {"source":"chief-bridge-hook","channel":"your-channel-name","chats":[{"nick":"Alex","trip":"Ab12Cd","text":"hello chief","ts":1790500100}]}
 ```
 
-`"omitted": n` is added when more than `max_batch` chats were waiting.
+A reconnect replay can append dozens of chats before the next poll. Those go out as several bodies in that same step. Each body stays at or under 32 KiB, which is under the usual webhook limit that answers HTTP 400 for a too-large JSON body. No chat is dropped to make a body fit.
 
 How it behaves:
 
 - **Reading** uses the same code as `watch`, with its own offset file: byte offsets on line boundaries, a half-written line waits for its newline, a truncated or rotated inbox starts over from 0, and the first run starts at the end so history never fires. The bridge's own nick is skipped, as are other frames, outbound copies and malformed lines.
-- **Deliver first, save second.** The offset moves past a batch only after a **2xx**. Chats held by the cooldown or a failed fire stay on disk past the saved offset, so a restart or a crash sends them instead of losing them. A crash between the 2xx and the save can send one batch twice. (The Python `hookpoll.py` saved the offset first and kept pending chats in memory only.)
-- **Failures** (any non-2xx, a timeout, a network error) are retried with backoff: `max(cooldown_s, 1)`, doubling, capped at `max_retry_s`. Redirects aren't followed, so a 3xx counts as a failure, and the key is never re-sent to another host.
+- **Deliver first, save second.** The offset moves past a chat after a **2xx**, or after that chat has been copied into `<state>.retry` because its piece failed. Chats held by the cooldown stay on disk past the saved offset. A restart or a crash sends them instead of losing them. A crash between the 2xx and the save can send one piece twice. (The Python `hookpoll.py` saved the offset first and kept pending chats in memory only.)
+- **Failures** (any non-2xx, a timeout, a network error) retry that piece with backoff: `max(cooldown_s, 1)`, doubling, capped at `max_retry_s`. An HTTP 400 for a piece that still has more than one chat is split and tried again in the same step, so a body rejected for size does not pin the queue. Later pieces, and chats that arrive afterward, are not held behind that retry. Redirects aren't followed, so a 3xx counts as a failure, and the key is never re-sent to another host.
 - **One poller per offset file.** `hook` takes an exclusive lock on `<state>.lock` and holds it until the process exits (a crash releases it). A second `hook` on that offset exits **4**. The status file is a report, not the lock: two processes can both read "not running" before either writes a heartbeat.
 - **SIGTERM / Ctrl+C** stops it cleanly: status `stopped`, exit 0. Anything not yet delivered stays queued in the inbox for the next start.
 - **Exit codes:** 0 stopped cleanly or `--test` OK, 2 usage/config error (including a missing environment variable), 4 already running, 5 `--test` got a non-2xx or no answer.
