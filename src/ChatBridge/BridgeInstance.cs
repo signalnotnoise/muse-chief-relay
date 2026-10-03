@@ -365,7 +365,7 @@ internal static class Posix
             return new HolderQuery(HolderState.Unknown, null);
         }
 
-        var needle = $"{major:x}:{minor:x}:{ino}";
+        var needle = $"{major:x2}:{minor:x2}:{ino}";
         foreach (var raw in text.Split('\n'))
         {
             var parts = raw.Split(' ', StringSplitOptions.RemoveEmptyEntries);
