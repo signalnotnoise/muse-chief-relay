@@ -223,3 +223,25 @@ test("composer recalls sent messages with ArrowUp/ArrowDown", () => {
   const hist = fs.readFileSync(path.join(srcDir, "composerHistory.js"), "utf8");
   assert.doesNotMatch(hist, /localStorage|sessionStorage|document|window|console\./);
 });
+
+test("workspace folder view: sidebar folders narrow the transcript to the thread", () => {
+  const app = fs.readFileSync(appVue, "utf8");
+  // Workspaces derive from the transcript (ask lines + goal cards) and each
+  // folder button opens a focused view.
+  assert.match(app, /from\s+"\.\/workspaceFolder\.js"/);
+  assert.match(app, /deriveWorkspaces/);
+  assert.match(app, /messageInWorkspace/);
+  assert.match(app, /aria-label="Workspaces"/);
+  assert.match(app, /v-for="ws in workspaces"/);
+  assert.match(app, /@click="openWorkspaceKey = ws\.key"/);
+  // Opening a folder filters the transcript; the header names the filter and
+  // offers the way back, with an honest empty state.
+  assert.match(app, /v-for="row in visibleMessages"/);
+  assert.match(app, /v-if="openWorkspace"/);
+  assert.match(app, /unrelated chats hidden/);
+  assert.match(app, /@click="closeWorkspace"/);
+  assert.match(app, /Nothing in this folder yet/);
+  // The published fallback bundle carries the folder view.
+  const published = readPublished();
+  assert.match(published, /Nothing in this folder yet/);
+});

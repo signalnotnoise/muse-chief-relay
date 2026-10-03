@@ -6,6 +6,7 @@ import SiteHeader from "./SiteHeader.vue";
 import { useChat } from "./useChat.js";
 import { isBoardRoute } from "./navRoute.js";
 import { buildWorkspaceAsk } from "./workspaceAsk.js";
+import { deriveWorkspaces, messageInWorkspace } from "./workspaceFolder.js";
 
 const field =
   "rounded-lg border border-line bg-panel-2 px-2.5 py-[0.55rem] text-ink outline-none focus:border-focus focus:shadow-[0_0_0_3px_var(--color-focus-ring)] aria-invalid:border-danger";
@@ -79,6 +80,23 @@ const openTasks = computed(() => {
   if (!tasks) return 0;
   return tasks.filter((t) => t.state === "open" || t.state === "claimed").length;
 });
+
+// Folder-style workspace view: workspaces are derived from the transcript
+// (ask lines + the room-side watcher's goal cards). Opening one narrows the
+// transcript to that workspace's thread — unrelated chats are filtered out.
+const openWorkspaceKey = ref(null);
+const workspaces = computed(() => deriveWorkspaces(messages.value));
+const openWorkspace = computed(
+  () => workspaces.value.find((w) => w.key === openWorkspaceKey.value) || null
+);
+const visibleMessages = computed(() =>
+  openWorkspace.value
+    ? messages.value.filter((row) => messageInWorkspace(row, openWorkspace.value))
+    : messages.value
+);
+function closeWorkspace() {
+  openWorkspaceKey.value = null;
+}
 
 // New-workspace goal sheet: the intuitive way to ask for a workspace is one
 // line, goal first (`workspace: <goal>`). The sheet collects the goal — the
@@ -328,6 +346,37 @@ function onWorkspaceCreate() {
                 <div><span class="text-dim">you</span> <span id="meta-nick" class="font-mono text-[0.74rem] text-ink">{{ metaNick }}</span></div>
                 <div><span class="text-dim">trip</span> <span id="meta-trip" class="font-mono text-[0.74rem] text-ink">{{ metaTrip }}</span></div>
               </div>
+              <!-- Workspaces: folder-style list derived from the transcript's
+                   `workspace:` ask lines and the room-side watcher's goal
+                   cards. Opening one narrows the transcript to that
+                   workspace's thread. Hidden on narrow screens like the
+                   board link — the folder view is a desktop-first surface. -->
+              <section aria-label="Workspaces" class="grid shrink-0 gap-1.5 max-[820px]:hidden">
+                <h2 class="m-0 text-xs font-semibold tracking-[0.06em] text-muted uppercase">Workspaces</h2>
+                <ul v-if="workspaces.length" class="m-0 grid list-none gap-1 p-0">
+                  <li v-for="ws in workspaces" :key="ws.key">
+                    <button
+                      type="button"
+                      class="grid w-full cursor-pointer grid-cols-[auto_minmax(0,1fr)] items-center gap-2 rounded-md px-1.5 py-1 text-left text-chat transition-colors hover:bg-row-hover focus-visible:outline-solid focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-focus"
+                      :class="{ 'bg-row-hover': openWorkspaceKey === ws.key }"
+                      :aria-pressed="openWorkspaceKey === ws.key"
+                      :title="'Open workspace: ' + ws.goal"
+                      @click="openWorkspaceKey = ws.key"
+                    >
+                      <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true" class="shrink-0 text-muted">
+                        <path d="M1.5 4.5c0-.8.7-1.5 1.5-1.5h3l1.2 1.5h5.3c.8 0 1.5.7 1.5 1.5v5c0 .8-.7 1.5-1.5 1.5h-9.5c-.8 0-1.5-.7-1.5-1.5v-5z" />
+                      </svg>
+                      <span class="min-w-0">
+                        <span class="block truncate text-[0.85rem] font-medium">{{ ws.goal }}</span>
+                        <span class="block truncate text-[0.7rem] text-dim">{{ ws.requester ? '@' + ws.requester : '' }}{{ ws.cardId ? '' : ' · waiting on room setup' }}</span>
+                      </span>
+                    </button>
+                  </li>
+                </ul>
+                <p v-else class="m-0 px-1.5 text-[0.75rem] leading-snug text-dim">
+                  No workspaces yet — ask with <code class="font-mono">workspace: &lt;goal&gt;</code> or the + Workspace button.
+                </p>
+              </section>
               <!-- Narrow: hidden here (the header Board tab is one tap away),
                    so nothing board-related sits above the chat on phones. -->
               <a
@@ -348,6 +397,24 @@ function onWorkspaceCreate() {
                   @clear="clearAttentionItem"
                 />
               </div>
+              <!-- Folder view header: while a workspace is open, the transcript
+                   below narrows to that workspace's thread. -->
+              <div v-if="openWorkspace" class="shrink-0 border-b border-line bg-panel px-4 py-2.5">
+                <div class="flex items-center gap-2.5">
+                  <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true" class="shrink-0 text-muted">
+                    <path d="M1.5 4.5c0-.8.7-1.5 1.5-1.5h3l1.2 1.5h5.3c.8 0 1.5.7 1.5 1.5v5c0 .8-.7 1.5-1.5 1.5h-9.5c-.8 0-1.5-.7-1.5-1.5v-5z" />
+                  </svg>
+                  <div class="min-w-0 flex-1">
+                    <p class="truncate text-[0.88rem] font-semibold text-ink">{{ openWorkspace.goal }}</p>
+                    <p class="text-[0.72rem] text-muted">{{ visibleMessages.length }} of {{ messages.length }} messages · unrelated chats hidden</p>
+                  </div>
+                  <button
+                    type="button"
+                    :class="[button, 'shrink-0 px-3 py-1.5 text-[0.82rem]']"
+                    @click="closeWorkspace"
+                  >← Back to room</button>
+                </div>
+              </div>
               <div
                 id="transcript"
                 ref="transcriptEl"
@@ -355,7 +422,7 @@ function onWorkspaceCreate() {
                 aria-live="polite"
                 @scroll="onTranscriptScroll"
               >
-                <template v-for="row in messages" :key="row.id">
+                <template v-for="row in visibleMessages" :key="row.id">
                   <!-- First row that arrived while the reader was scrolled up. -->
                   <div
                     v-if="row.id === firstUnreadId && unreadCount > 0"
@@ -384,6 +451,16 @@ function onWorkspaceCreate() {
                     >{{ row.text }}</div>
                   </div>
                 </template>
+                <!-- Honest empty state: the folder is open but its thread
+                     hasn't arrived in this session (e.g. joined after the
+                     ask/card scrolled out of replay). -->
+                <div v-if="openWorkspace && visibleMessages.length === 0" class="px-2 py-8 text-center">
+                  <p class="text-[0.9rem] font-semibold text-ink">Nothing in this folder yet</p>
+                  <p class="mx-auto mt-1 max-w-sm text-[0.82rem] leading-snug text-muted">
+                    This workspace's messages haven't arrived in this session — its thread starts
+                    with the <code class="font-mono">workspace:</code> ask line and the goal card.
+                  </p>
+                </div>
                 <!-- Unread affordance: sticky to the bottom of the scrollport,
                      jumps back to the tail on tap (same pattern as #/watch). -->
                 <button
