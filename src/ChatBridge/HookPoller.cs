@@ -31,13 +31,15 @@ internal enum HookStep
 /// between the 2xx and the save can send one piece twice; it does not drop a chat.</item>
 /// <item>A reconnect replay can append a large backlog in one poll. That backlog is POSTed in pieces, oldest
 /// first. Each piece is at most <c>max_batch</c> chats and at most <see cref="MaxPayloadBytes"/> UTF-8 bytes,
-/// so one oversized body cannot come back HTTP 400 and stall the queue. Pieces of one backlog go out in the
-/// same step, without waiting <c>cooldown_s</c> between them.</item>
+/// so one oversized body cannot come back HTTP 400 and stall the queue. A single chat that is still larger
+/// is sent alone, not dropped. Pieces of one backlog go out in the same step, without waiting
+/// <c>cooldown_s</c> between them. An empty piece is never sent.</item>
 /// <item>At most one burst per <c>cooldown_s</c>. Chats that arrive inside it go out together in the next burst.
 /// A piece that fails (non-2xx, timeout, network error) is written to the retry file and retried after
 /// <c>max(cooldown_s, 1)</c>, doubling up to <c>max_retry_s</c>. An HTTP 400 on a piece that still holds more
-/// than one chat is split and retried in the same step. The failed piece does not hold later pieces or chats
-/// that arrive afterward.</item>
+/// than one chat is split and retried in the same step. A one-chat HTTP 400 cannot be split; that chat is
+/// retried alone. A due retry is its own POST, so live chats in the same step are not part of that body and
+/// are not copied into the retry file when the retry fails.</item>
 /// <item>Wakes on file-system events, with a poll every <c>poll_s</c> as the fallback.</item>
 /// </list>
 /// </summary>
@@ -181,14 +183,21 @@ internal sealed class HookPoller : IDisposable
             return _retry.Count + fresh.Count > 0 ? HookStep.Held : HookStep.Idle;
         }
 
-        var batch = new List<WatchedChat>((retryDue ? _retry.Count : 0) + (freshDue ? fresh.Count : 0));
+        // Retry chats are older, so they go first. They are a separate POST from chats that arrived
+        // afterward: a 500 or a one-chat 400 on the retry must not pull those live chats into the retry file.
+        var outcome = new DeliverOutcome();
         if (retryDue)
-            batch.AddRange(_retry);
+            outcome.Absorb(await DeliverAsync(_retry, ct));
         if (freshDue)
-            batch.AddRange(fresh);
-
-        var outcome = await DeliverAsync(batch, ct);
+            outcome.Absorb(await DeliverAsync(fresh, ct));
         now = _clock();
+
+        if (outcome.LastOk is null && outcome.LastFail is null)
+        {
+            // Nothing was posted. Leave the offset and the retry file where they are.
+            _s = _s with { Pending = _retry.Count + fresh.Count };
+            return _retry.Count + fresh.Count > 0 ? HookStep.Held : HookStep.Idle;
+        }
 
         var kept = new List<WatchedChat>();
         if (!retryDue)
@@ -298,21 +307,46 @@ internal sealed class HookPoller : IDisposable
         public FireResult? LastFail;
         public List<WatchedChat> Failed { get; } = new();
         public List<(int Count, FireResult Result)> Leaves { get; } = new();
+
+        public void Absorb(DeliverOutcome part)
+        {
+            Delivered += part.Delivered;
+            OkPieces += part.OkPieces;
+            if (part.LastOk is not null)
+                LastOk = part.LastOk;
+            if (part.LastFail is not null)
+                LastFail = part.LastFail;
+            Failed.AddRange(part.Failed);
+            Leaves.AddRange(part.Leaves);
+        }
     }
 
     /// <summary>POST every piece. An HTTP 400 that still contains more than one chat is split in this step
-    /// so a body the receiver refuses for size does not pin the rest of the backlog.</summary>
+    /// so a body the receiver refuses for size does not pin the rest of the backlog. A one-chat 400 is
+    /// stored for a later retry; it is not split into an empty piece and it is not posted again in this step.</summary>
     private async Task<DeliverOutcome> DeliverAsync(IReadOnlyList<WatchedChat> chats, CancellationToken ct)
     {
         var outcome = new DeliverOutcome();
+        if (chats.Count == 0)
+            return outcome;
+
         var pending = new LinkedList<List<WatchedChat>>();
         foreach (var piece in SplitPieces(chats))
-            pending.AddLast(piece);
+        {
+            if (piece.Count > 0)
+                pending.AddLast(piece);
+        }
 
+        // Each split replaces one piece with two smaller ones. n chats need at most n - 1 splits to reach
+        // singles. Past that, a 400 is retried whole instead of looping.
+        var splitsLeft = chats.Count;
         while (pending.First is { } node)
         {
             pending.RemoveFirst();
             var piece = node.Value;
+            if (piece.Count == 0)
+                continue;
+
             var result = await FireWhileHeartbeatingAsync(piece, ct);
             if (result.Ok)
             {
@@ -323,14 +357,19 @@ internal sealed class HookPoller : IDisposable
                 continue;
             }
 
-            if (result.HttpStatus == 400 && piece.Count > 1)
+            if (result.HttpStatus == 400 && splitsLeft > 0 && TryHalve(piece, out var older, out var newer))
             {
+                splitsLeft--;
                 _log.WriteLine($"[chatbridge] hook: HTTP 400 for {piece.Count} chat(s); splitting");
-                var mid = piece.Count / 2;
-                pending.AddFirst(piece.GetRange(mid, piece.Count - mid));
-                pending.AddFirst(piece.GetRange(0, mid));
+                pending.AddFirst(newer);
+                pending.AddFirst(older);
                 continue;
             }
+
+            if (result.HttpStatus == 400)
+                _log.WriteLine(piece.Count == 1
+                    ? "[chatbridge] hook: HTTP 400 for 1 chat; cannot split, retrying alone"
+                    : $"[chatbridge] hook: HTTP 400 for {piece.Count} chat(s); cannot split, retrying this piece");
 
             outcome.LastFail = result;
             outcome.Failed.AddRange(piece);
@@ -338,6 +377,21 @@ internal sealed class HookPoller : IDisposable
         }
 
         return outcome;
+    }
+
+    /// <summary>Older half then newer half, both non-empty, together the whole piece. One chat cannot be halved.</summary>
+    private static bool TryHalve(List<WatchedChat> piece, out List<WatchedChat> older, out List<WatchedChat> newer)
+    {
+        older = new List<WatchedChat>();
+        newer = new List<WatchedChat>();
+        if (piece.Count < 2)
+            return false;
+        var mid = piece.Count / 2;
+        if (mid <= 0 || mid >= piece.Count)
+            return false;
+        older = piece.GetRange(0, mid);
+        newer = piece.GetRange(mid, piece.Count - mid);
+        return older.Count > 0 && newer.Count > 0 && older.Count + newer.Count == piece.Count;
     }
 
     private List<WatchedChat> LoadRetry()

@@ -100,9 +100,10 @@ local call `chat-bridge hook` makes (compatibility command `Chief.Bridge hook`) 
 - **Response:** any 2xx means that piece was delivered; the body is ignored. Anything else, a redirect,
   a timeout or a network error means "retry that piece later". An HTTP 400 on a piece that still has
   more than one chat is split and tried again immediately, so a body rejected for size does not stall
-  the rest of the backlog or chats that arrive after it. Delivery is at-least-once: a crash between the
-  2xx and saving the offset can repeat one piece, so the receiver should treat the payload as a wake-up,
-  and the agent should read the actual chats with `watch`.
+  the rest of the backlog or chats that arrive after it. A one-chat HTTP 400 is retried alone. A due
+  retry is a separate POST from live chats, and an empty `chats` array is never sent. Delivery is
+  at-least-once: a crash between the 2xx and saving the offset can repeat one piece, so the receiver
+  should treat the payload as a wake-up, and the agent should read the actual chats with `watch`.
 - **Timing:** the first chat after a quiet spell is sent at once (file-system events, or the
   `hook.poll_s` poll, default 5 s). Later chats wait for `hook.cooldown_s` (default 15 s) after the
   previous fire and are sent together.

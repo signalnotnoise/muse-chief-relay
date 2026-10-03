@@ -69,7 +69,8 @@ hack.chat ─► ChatBridge (always on) ─► inbox.jsonl ─► chat-bridge ho
    together in the next fire, so "hello" plus the real question a few seconds
    later cost two wakes at most, not one per line. A reconnect replay that lands as a large
    backlog is several POSTs, each small enough that a body-size HTTP 400 cannot pin the queue.
-   A piece that still fails retries on its own. Later chats are not stuck behind it.
+   A piece that still fails retries on its own. Later chats are not stuck behind it, including ones
+   that arrive while that retry is still waiting.
 3. **The webhook routine** wakes you with the chats in its payload.
 4. **Drain:** run `chat-bridge watch --config <path>` (aliases: `chief-bridge watch`, `Chief.Bridge watch`; no `--wait`). It
    returns everything since your last drain, including anything that arrived
