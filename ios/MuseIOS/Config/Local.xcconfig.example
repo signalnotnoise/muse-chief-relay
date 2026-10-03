@@ -1,0 +1,10 @@
+// Copy this file to Local.xcconfig. That copy is gitignored.
+// Leave a line commented to keep the shared value.
+// MUSE_ROOM is the room id. Do not commit a private room name.
+// MUSE_PUBLIC_TRIP is a public display code only, six characters, optional leading !.
+// Never put a password, owner secret, webhook, or token here.
+//
+// MUSE_RELAY_URL = wss:/$()/ws.voizel.com/relay
+// MUSE_ROOM =
+// MUSE_NICK =
+// MUSE_PUBLIC_TRIP =

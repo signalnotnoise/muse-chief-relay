@@ -58,6 +58,14 @@ knowledge/.index/
 *.swp
 *~
 
+# SwiftPM / Xcode. Local room config is never committed.
+.build/
+.swiftpm/
+DerivedData/
+ios/**/xcuserdata/
+ios/**/*.xcuserstate
+ios/**/Local.xcconfig
+
 # Design room client runtime (trip, room, and logs). Never commit.
 bots/design/identity.json
 bots/design/design-bot.log
