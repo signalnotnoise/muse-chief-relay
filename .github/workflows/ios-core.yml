@@ -1,0 +1,26 @@
+name: Muse Apple core
+
+on:
+  push:
+    paths:
+      - "ios/**"
+      - ".github/workflows/ios-core.yml"
+  pull_request:
+    paths:
+      - "ios/**"
+      - ".github/workflows/ios-core.yml"
+
+jobs:
+  swift-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Swift
+        uses: swift-actions/setup-swift@v2
+        with:
+          swift-version: "6.2"
+
+      - name: Test MuseCore
+        run: swift test --package-path ios/MuseCore
