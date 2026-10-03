@@ -19,6 +19,7 @@ durable-v2-inbound.jsonl
 # A bridge process must not inherit this descriptor. See README, "Reply lock".
 reply.lock
 bridge.pid
+bridge.instance.lock
 bridge.stdout
 bridge.stderr
 relay.log
