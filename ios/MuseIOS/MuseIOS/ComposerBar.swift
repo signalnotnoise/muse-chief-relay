@@ -42,7 +42,7 @@ struct ComposerBar: View {
             .frame(minHeight: 44, maxHeight: 140)
             .accessibilityLabel("Message")
         return Group {
-            if #available(iOS 18.0, *) {
+            if #available(iOS 18.0, macOS 15.0, visionOS 2.0, *) {
                 field.writingToolsBehavior(.complete)
             } else {
                 field

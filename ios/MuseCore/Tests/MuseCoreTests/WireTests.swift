@@ -131,6 +131,12 @@ final class WireTests: XCTestCase {
         XCTAssertEqual(ok.room, "")
     }
 
+    func testBackgroundClosesTheSocketOnIOSAndVisionOSOnly() {
+        XCTAssertTrue(SceneSuspension.closesSocketWhenSceneBackgrounds(.iOS))
+        XCTAssertTrue(SceneSuspension.closesSocketWhenSceneBackgrounds(.visionOS))
+        XCTAssertFalse(SceneSuspension.closesSocketWhenSceneBackgrounds(.macOS))
+    }
+
     func testRoomFocusIsRoomIDOnly() throws {
         let data = try JSONEncoder().encode(RoomFocus(roomID: "<room>"))
         let object = try JSONSerialization.jsonObject(with: data) as? [String: Any]

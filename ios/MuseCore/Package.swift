@@ -3,6 +3,11 @@ import PackageDescription
 
 let package = Package(
     name: "MuseCore",
+    platforms: [
+        .iOS(.v17),
+        .macOS(.v14),
+        .visionOS(.v1)
+    ],
     products: [
         .library(name: "MuseCore", targets: ["MuseCore"])
     ],

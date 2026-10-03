@@ -4,44 +4,56 @@ import SwiftUI
 /// Cupertino (HIG review) still needs to review polish.
 struct ChatScreen: View {
     @ObservedObject var model: AppModel
+    #if os(iOS)
     @Environment(\.horizontalSizeClass) private var sizeClass
     @State private var showPeople = false
+    #endif
     @State private var showSummary = false
 
     var body: some View {
-        Group {
-            if sizeClass == .regular {
-                NavigationSplitView {
-                    PresenceList(users: model.session.users)
-                        .navigationTitle("People")
-                } detail: {
-                    transcript
-                }
-            } else {
-                transcript
+        destination
+            .sheet(isPresented: $showSummary) {
+                SummarySheet(model: model)
             }
-        }
-        .sheet(isPresented: $showPeople) {
-            NavigationStack {
-                PresenceList(users: model.session.users)
-                    .navigationTitle("People")
-                    .toolbar {
-                        ToolbarItem(placement: .confirmationAction) {
-                            Button("Done") { showPeople = false }
-                        }
-                    }
-            }
-            .presentationDetents([.medium, .large])
-        }
-        .sheet(isPresented: $showSummary) {
-            SummarySheet(model: model)
-        }
-        .sheet(isPresented: splitPresented) {
+            .sheet(isPresented: splitPresented) {
             SplitReviewSheet(
                 chunks: model.splitReview ?? [],
                 onCancel: { model.splitReview = nil },
                 onConfirm: { model.confirmSplit() }
             )
+        }
+    }
+
+    @ViewBuilder
+    private var destination: some View {
+        #if os(iOS)
+        if sizeClass == .regular {
+            split
+        } else {
+            transcript.sheet(isPresented: $showPeople) {
+                NavigationStack {
+                    PresenceList(users: model.session.users)
+                        .navigationTitle("People")
+                        .toolbar {
+                            ToolbarItem(placement: .confirmationAction) {
+                                Button("Done") { showPeople = false }
+                            }
+                        }
+                }
+                .presentationDetents([.medium, .large])
+            }
+        }
+        #else
+        split
+        #endif
+    }
+
+    private var split: some View {
+        NavigationSplitView {
+            PresenceList(users: model.session.users)
+                .navigationTitle("People")
+        } detail: {
+            transcript
         }
     }
 
@@ -85,7 +97,7 @@ struct ChatScreen: View {
                 }
             }
             .navigationTitle(model.session.identity.room.isEmpty ? "Muse" : model.session.identity.room)
-            .navigationBarTitleDisplayMode(.inline)
+            .museInlineNavigationTitle()
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 ComposerBar(
                     text: $model.draft,
@@ -95,8 +107,9 @@ struct ChatScreen: View {
                 )
             }
             .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    if sizeClass == .compact {
+                #if os(iOS)
+                if sizeClass == .compact {
+                    ToolbarItem(placement: .topBarLeading) {
                         Button {
                             showPeople = true
                         } label: {
@@ -104,7 +117,8 @@ struct ChatScreen: View {
                         }
                     }
                 }
-                ToolbarItemGroup(placement: .topBarTrailing) {
+                #endif
+                ToolbarItemGroup(placement: .museTrailing) {
                     Button {
                         showSummary = true
                     } label: {
@@ -245,7 +259,7 @@ struct SplitReviewSheet: View {
                 }
             }
             .navigationTitle("Review split")
-            .navigationBarTitleDisplayMode(.inline)
+            .museInlineNavigationTitle()
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel", action: onCancel)

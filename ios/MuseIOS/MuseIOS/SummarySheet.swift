@@ -46,7 +46,7 @@ struct SummarySheet: View {
                 }
             }
             .navigationTitle("Summary")
-            .navigationBarTitleDisplayMode(.inline)
+            .museInlineNavigationTitle()
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") {

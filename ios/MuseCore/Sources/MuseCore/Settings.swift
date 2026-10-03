@@ -1,5 +1,24 @@
 import Foundation
 
+/// Where this client is running. The wire does not change between them.
+public enum ClientDestination: String, Equatable, Sendable {
+    case iOS
+    case macOS
+    case visionOS
+}
+
+public enum SceneSuspension {
+    /// iOS and visionOS suspend the scene. macOS keeps the app in the foreground.
+    public static func closesSocketWhenSceneBackgrounds(_ destination: ClientDestination) -> Bool {
+        switch destination {
+        case .iOS, .visionOS:
+            return true
+        case .macOS:
+            return false
+        }
+    }
+}
+
 public struct ClientSettings: Equatable, Sendable {
     public static let defaultRelayURL = URL(string: "wss://ws.voizel.com/relay")!
 

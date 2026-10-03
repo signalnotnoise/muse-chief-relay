@@ -3,7 +3,7 @@ import Foundation
 enum OnDeviceSummary {
     static func gate() -> IntelligenceGate {
         #if canImport(FoundationModels)
-        if #available(iOS 26.0, *) {
+        if #available(iOS 26.0, macOS 26.0, visionOS 26.0, *) {
             return FoundationBackend.gate()
         }
         #endif
@@ -16,7 +16,7 @@ enum OnDeviceSummary {
 
     static func summarize(_ context: SummaryContext) async throws -> String {
         #if canImport(FoundationModels)
-        if #available(iOS 26.0, *) {
+        if #available(iOS 26.0, macOS 26.0, visionOS 26.0, *) {
             return try await FoundationBackend.summarize(context)
         }
         #endif
@@ -31,7 +31,7 @@ struct SummaryUnavailable: Error {
 #if canImport(FoundationModels)
 import FoundationModels
 
-@available(iOS 26.0, *)
+@available(iOS 26.0, macOS 26.0, visionOS 26.0, *)
 enum FoundationBackend {
     static func gate() -> IntelligenceGate {
         switch SystemLanguageModel.default.availability {

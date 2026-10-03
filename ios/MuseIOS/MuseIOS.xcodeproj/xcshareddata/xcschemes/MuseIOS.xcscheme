@@ -15,7 +15,7 @@
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "AA000006"
-               BuildableName = "MuseIOS.app"
+               BuildableName = "Muse.app"
                BlueprintName = "MuseIOS"
                ReferencedContainer = "container:MuseIOS.xcodeproj">
             </BuildableReference>
@@ -43,7 +43,7 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "AA000006"
-            BuildableName = "MuseIOS.app"
+            BuildableName = "Muse.app"
             BlueprintName = "MuseIOS"
             ReferencedContainer = "container:MuseIOS.xcodeproj">
          </BuildableReference>
@@ -60,7 +60,7 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "AA000006"
-            BuildableName = "MuseIOS.app"
+            BuildableName = "Muse.app"
             BlueprintName = "MuseIOS"
             ReferencedContainer = "container:MuseIOS.xcodeproj">
          </BuildableReference>

@@ -1,3 +1,4 @@
+// Destinations: iOS, macOS, and visionOS. One target. The wire does not change.
 // Public relay endpoint. Room, nick, and trip are empty on purpose.
 // Copy Local.xcconfig.example to Local.xcconfig (gitignored) to override.
 // Never commit a private room name, trip password, owner secret, or token.
