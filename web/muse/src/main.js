@@ -18,4 +18,21 @@ window.addEventListener("hashchange", () => {
   current.value = pick();
 });
 
+// Mobile keyboards (notably iOS Safari) overlay the layout viewport instead of
+// resizing it, which would bury the pinned composer under the keyboard. Pin
+// #app to the *visual* viewport height so the transcript shrinks and the send
+// box stays reachable while typing. The viewport meta's
+// interactive-widget=resizes-content covers Chrome on Android; this covers the
+// rest. Guarded: no visualViewport (old browsers) means no behavior change.
+function syncViewportHeight() {
+  const vv = window.visualViewport;
+  if (!vv) return;
+  const app = document.getElementById("app");
+  if (app) app.style.height = Math.round(vv.height) + "px";
+}
+if (window.visualViewport) {
+  window.visualViewport.addEventListener("resize", syncViewportHeight);
+  syncViewportHeight();
+}
+
 createApp({ setup: () => () => h(current.value) }).mount("#app");

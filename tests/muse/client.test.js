@@ -245,3 +245,32 @@ test("workspace folder view: sidebar folders narrow the transcript to the thread
   const published = readPublished();
   assert.match(published, /Nothing in this folder yet/);
 });
+
+test("mobile pass: folders stay reachable, sidebar gives the transcript its space, composer survives the keyboard", () => {
+  const app = fs.readFileSync(appVue, "utf8");
+  // The Workspaces section is no longer hidden on narrow screens — folders
+  // become a horizontal chip row with a compact + New that opens the goal
+  // sheet (same sheet the composer's + Workspace button opened on desktop).
+  const wsAt = app.indexOf('aria-label="Workspaces"');
+  assert.ok(wsAt > 0);
+  assert.doesNotMatch(app.slice(wsAt, wsAt + 200), /max-\[820px\]:hidden/);
+  assert.ok(app.includes("+ New</button>"), "mobile + New folder button exists");
+  assert.match(app, /@click="openWorkspaceSheet"/);
+  // The sidebar row sizes to its content on phones instead of reserving a
+  // fixed 10rem strip above the transcript.
+  assert.match(app, /max-\[820px\]:grid-rows-\[auto_minmax\(0,1fr\)\]/);
+  // The composer's + Workspace button hides on narrow (creation moved to the
+  // folders row), and Send gets a 44px touch target.
+  const composerAt = app.indexOf('id="send-form"');
+  assert.ok(composerAt > 0);
+  const composer = app.slice(composerAt, composerAt + 1400);
+  assert.match(composer, /max-\[820px\]:hidden/);
+  assert.match(composer, /max-\[820px\]:min-h-\[44px\]/);
+  // Keyboard safety: the viewport meta opts into content resizing and main.js
+  // pins #app to the visual viewport so iOS Safari's overlay keyboard can't
+  // bury the composer.
+  const index = fs.readFileSync(path.join(srcDir, "../index.html"), "utf8");
+  assert.match(index, /interactive-widget=resizes-content/);
+  const main = fs.readFileSync(path.join(srcDir, "main.js"), "utf8");
+  assert.match(main, /visualViewport/);
+});
