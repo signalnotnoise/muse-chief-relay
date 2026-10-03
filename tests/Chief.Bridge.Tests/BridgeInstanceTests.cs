@@ -50,9 +50,9 @@ public class BridgeInstanceTests
         Assert.Null(InstanceFileLock.TryAcquire(path, InstanceLockKind.State));
 
         var probe = BridgeInstance.Probe(path);
-        Assert.True(probe.Held, File.ReadAllText("/proc/locks"));
+        Assert.True(probe.Held);
         Assert.Equal(Environment.ProcessId, probe.Pid);
-        Assert.Contains("cloexec", CloexecNote(path));
+        Assert.True(first!.CloseOnExec);
 
         var body = ReadNoLock(path);
         Assert.Equal($"pid={Environment.ProcessId}\n", body);
@@ -414,28 +414,9 @@ public class BridgeInstanceTests
         Assert.DoesNotContain("Ab12Cd", text);
     }
 
-    private static string CloexecNote(string path)
-    {
-        var full = Path.GetFullPath(path);
-        foreach (var entry in Directory.EnumerateFileSystemEntries("/proc/self/fd"))
-        {
-            var target = ReadLink(entry);
-            if (target != full)
-                continue;
-            var fd = Path.GetFileName(entry);
-            var info = File.ReadAllText("/proc/self/fdinfo/" + fd);
-            var flagsLine = info.Split('\n').First(l => l.StartsWith("flags:", StringComparison.Ordinal));
-            var octal = flagsLine.Split((char[])[' ', '\t'], StringSplitOptions.RemoveEmptyEntries)[^1];
-            var flags = Convert.ToInt32(octal, 8);
-            return (flags & 0x80000) != 0 ? "cloexec " + flagsLine : flagsLine;
-        }
-
-        return "fd not found";
-    }
-
     private static string ReadNoLock(string path)
     {
-        var fd = sys_open(path, 0 | 0x80000 | 0x20000, 0);
+        var fd = sys_open(path, OperatingSystem.IsMacOS() ? 0x01000000 | 0x100 : 0x80000 | 0x20000, 0);
         if (fd < 0)
             throw new IOException("open " + path);
         try

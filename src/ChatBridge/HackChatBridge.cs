@@ -16,6 +16,7 @@ internal sealed class HackChatBridge
     private readonly string _unread;
     private readonly string _state;
     private readonly OutboxReader _outbox;
+    private readonly DurableOutbox? _durableOutbox;
     private readonly object _fileLock = new();
     private readonly AutoAcker _acker;
     private readonly MentionRouter? _mentions;
@@ -45,6 +46,7 @@ internal sealed class HackChatBridge
         // Lines already in the outbox when the process starts are not replayed. The position then lives
         // for the whole process, across reconnects.
         _outbox = OutboxReader.AtEnd(Path.Combine(cfg.BaseDir, "outbox.jsonl"));
+        _durableOutbox = cfg.DurableOutbox ? new DurableOutbox(cfg.BaseDir) : null;
         _acker = new AutoAcker(cfg.AutoAck, cfg.Nick);
         _voizle = cfg.SpeaksVoizle;
         // Mention inboxes sit beside inbox.jsonl. Off unless mentions.enabled, so a current
@@ -539,6 +541,9 @@ internal sealed class HackChatBridge
         if (frame.Object is not { } obj)
             return; // logged as raw; nothing else to do
 
+        if (frame.Cmd == "chat" && s.Confirmed)
+            _durableOutbox?.ObserveEcho(Json.Str(obj, "nick"), Json.Str(obj, "text"), _cfg.Nick);
+
         if (s.Plan?.Dialect == V2Dialect.Deployed && _v2 is not null)
         {
             var inbound = _v2.OnFrame(obj);
@@ -755,6 +760,27 @@ internal sealed class HackChatBridge
                 var wire = _voizle ? VoizleWire.FromOutbox(ackFrame) : ackFrame;
                 await SendAsync(ws, sendLock, wire, ct);
                 LogEvent("out", _voizle ? InboundFrame.ForLog(wire) : ackFrame, auto: true);
+            }
+
+            if (_durableOutbox is not null)
+            {
+                foreach (var reply in _durableOutbox.Pending())
+                {
+                    var payload = new JsonObject { ["cmd"] = "chat", ["text"] = reply.Text };
+                    var wire = _voizle ? VoizleWire.FromOutbox(payload) : payload;
+                    _durableOutbox.BeginSend(reply.Id);
+                    try
+                    {
+                        await SendAsync(ws, sendLock, wire, ct);
+                        _durableOutbox.Sent(reply.Id);
+                        LogEvent("out", LogRedaction.Outbound(InboundFrame.ForLog(wire)));
+                    }
+                    catch
+                    {
+                        _durableOutbox.Uncertain(reply.Id);
+                        throw;
+                    }
+                }
             }
 
             IReadOnlyList<OutboxLine> pending;

@@ -13,6 +13,9 @@ internal sealed class RelayConfig
     public string Nick { get; set; } = "";
     public string Base { get; set; } = ".";
 
+    [JsonPropertyName("durable_outbox")]
+    public bool DurableOutbox { get; set; }
+
     // Optional hack.chat password; gives this nick a tripcode. Sent only in the join frame, never logged.
     public string? Pass { get; set; }
 
@@ -174,6 +177,9 @@ internal sealed class RelayConfig
             throw new ConfigException($"{path}: channel is required");
         if (string.IsNullOrWhiteSpace(cfg.Nick))
             throw new ConfigException($"{path}: nick is required");
+
+        if (cfg.DurableOutbox && cfg.ProtocolV2)
+            throw new ConfigException("durable_outbox is a v1 queue; protocol_v2 already has its own durable queue");
 
         cfg.AutoAck ??= new AutoAckConfig();
         cfg.AutoAck.Validate(path);

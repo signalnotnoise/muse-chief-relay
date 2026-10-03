@@ -25,6 +25,8 @@ def validate(config, bot_dir):
     trip = config.get('trip', '')
     if trip and not re.fullmatch(r'!?[A-Za-z0-9+/]{6}', trip):
         raise ValueError('Trip must be empty or a public six-character code')
+    if config.get('durable_outbox') and config.get('protocol_v2'):
+        raise ValueError('durable_outbox is for v1; v2 has a separate durable queue')
     mode = config.get('dot_mode', 'receive-only')
     if mode not in ('receive-only', 'participate'):
         raise ValueError('Unknown dot_mode')

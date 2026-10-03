@@ -8,6 +8,7 @@ from pathlib import Path
 import sqlite3
 import time
 from check_config import validate
+from durable_reply import publish
 
 
 def queue_reply(config_path, to, text, event_id, send=False):
@@ -27,6 +28,9 @@ def queue_reply(config_path, to, text, event_id, send=False):
         return {'status': 'preview_only', 'recipient': to, 'characters': len(text), 'event_id': event_id}
     with (runtime/'reply.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
+        if config.get('durable_outbox') is True:
+            ident = publish(runtime, event_id, to, text)
+            return {'status': 'durably_queued_not_yet_confirmed_sent', 'recipient': to, 'event_id': event_id, 'reply_id': ident}
         db = sqlite3.connect(runtime/'replies.sqlite')
         try:
             db.execute('CREATE TABLE IF NOT EXISTS replies (id TEXT PRIMARY KEY, status TEXT, at REAL)')

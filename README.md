@@ -50,7 +50,7 @@ Wire format: [docs/protocol.md](docs/protocol.md).
 
 ## Quick start — Chief (desktop)
 
-Requires [.NET 8 SDK](https://dotnet.microsoft.com/download). ChatBridge is the only bridge in this repo; the old Python bridge was removed (see CHANGELOG). `src/Chief.Bridge` is the compatibility build of the same program.
+Requires [.NET 8 SDK](https://dotnet.microsoft.com/download). The desktop bridge runs on Linux and macOS. On macOS, a user-local SDK installation can be enabled with `export PATH="$HOME/.dotnet:$PATH"`. ChatBridge is the only bridge in this repo; the old Python bridge was removed (see CHANGELOG). `src/Chief.Bridge` is the compatibility build of the same program.
 
 ```bash
 cp config.example.json config.json
@@ -117,18 +117,18 @@ Runtime files (`inbox.jsonl`, `outbox.jsonl`, `unread.jsonl`, `state.json`, the 
 
 The bridge process is the enforcement boundary. A shell wrapper, including a local `hc`, is convenience only. Launching `dotnet Chief.Bridge.dll`, the `Chief.Bridge` or `ChatBridge` apphost, `chief-bridge`, or `chat-bridge` all take the same locks before any socket opens and before the process opens `outbox.jsonl` or any other writer under `base` (the v2 JSONL ledgers, and a SQLite file if a deployment keeps one in that directory).
 
-Two flocks, both non-blocking, both held until the process exits:
+Two kernel locks, both non-blocking, both held until the process exits. Linux uses `flock`; macOS uses process-confined open-file-description locks:
 
 | Lock | File | What a second process collides with |
 |---|---|---|
 | State directory | `{base}/bridge.instance.lock` | Another owner of this inbox, outbox, and any database in that directory |
 | Host identity | `/tmp/chatbridge-identity/id-<sha256>.lock` | Another state directory on this host that would join the same endpoint, room, and nick |
 
-The identity file name is the hash of the canonical endpoint (scheme, host, port, path), the room, and the nick. Userinfo, query, and fragment are stripped before hashing, so a token in the URL is not part of the name. The room, nick, trip, password, and hook secret are not written into the lock file or into the `already running` / `stop` / `instance:` lines. The file may contain `pid=<number>` as a hint. `stop` does not signal that hint. It signals the pid that `/proc/locks` reports as the `FLOCK WRITE` holder for that inode.
+The identity file name is the hash of the canonical endpoint (scheme, host, port, path), the room, and the nick. Userinfo, query, and fragment are stripped before hashing, so a token in the URL is not part of the name. The room, nick, trip, password, and hook secret are not written into the lock file or into the `already running` / `stop` / `instance:` lines. The file may contain `pid=<number>` as a hint. `stop` does not signal that hint. It signals the kernel-verified owner: Linux reads `/proc/locks`, and macOS queries the confined lock with `F_OFD_GETLK`. It never signals a PID merely because it appears in the lock file.
 
 `start` (the bridge run) exits **4** and prints `already running` when either lock is held. `stop` sends SIGTERM to the verified state-lock owner, including when `state.json` says `connected: true`, and waits until the lock is released. `restart` does that stop, then becomes the new owner. If the holder cannot be verified, or the host identity lock is held by a different state directory, `stop` and `restart` refuse to signal and `restart` does not start a second socket. `say`, `watch`, `hook`, `inbox`, and `reconcile` do not take these locks. `say` can still append one outbox line next to the owner. `hook` keeps its own poller lock.
 
-**Same host, same mount namespace.** `flock` is released when the process dies, including `SIGKILL`, so a crash does not leave a stale owner. It does not coordinate a second machine, a second VM, or a container whose `/tmp` is private (`PrivateTmp`) or whose state directory is a different mount. On those, a second process can still open a socket, and the relay can close the first with code 4000 `replaced`. One service owner per endpoint, room, and nick remains the rule across hosts. `flock` on NFS is not this lock's guarantee; the state directory and `/tmp/chatbridge-identity` need a local filesystem. Owner verification reads Linux `/proc/locks`.
+**Same host, same mount namespace.** The kernel lock is released when the process dies, including `SIGKILL`, so a crash does not leave a stale owner. It does not coordinate a second machine, a second VM, or a container whose `/tmp` is private (`PrivateTmp`) or whose state directory is a different mount. On those, a second process can still open a socket, and the relay can close the first with code 4000 `replaced`. One service owner per endpoint, room, and nick remains the rule across hosts. `flock` on NFS is not this lock's guarantee; the state directory and `/tmp/chatbridge-identity` need a local filesystem. Owner verification uses Linux `/proc/locks` or macOS `F_OFD_GETLK`.
 
 Restart the process from a shell that does not hold `hook/reply.lock`. `chat-bridge restart` is the bridge's own restart. It is still the same process image, so an inherited `reply.lock` descriptor would stay open for its whole life. See "Reply lock" below.
 
