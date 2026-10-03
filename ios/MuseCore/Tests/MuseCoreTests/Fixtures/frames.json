@@ -1,0 +1,109 @@
+{
+  "captured": "2026-10-03",
+  "source": "Live voizle-text-relay hello on the public relay, plus presence, welcome.replay, chat, bye, and invalid_text shapes from the same v1 socket. Room names, session ids, nicks, and message ids are placeholders. No password, owner secret, token, or private room is in this file.",
+  "hello": {
+    "v": 1,
+    "type": "hello",
+    "protocol": "voizle-text-relay",
+    "durable": true,
+    "replayLimit": 50,
+    "limits": {"nick": 24, "room": 64, "trip": 16, "text": 2048},
+    "durableVersion": 2
+  },
+  "welcome": {
+    "v": 1,
+    "type": "welcome",
+    "sessionId": "<session>",
+    "room": "<room>",
+    "nick": "<nick>",
+    "trip": null,
+    "users": [
+      {"sessionId": "<session>", "nick": "<nick>", "trip": null}
+    ],
+    "replay": []
+  },
+  "welcomeReplay": {
+    "v": 1,
+    "type": "welcome",
+    "sessionId": "<session>",
+    "room": "<room>",
+    "nick": "<nick>",
+    "trip": "!<code>",
+    "users": [
+      {"sessionId": "<session-a>", "nick": "<nick-a>", "trip": null},
+      {"sessionId": "<session>", "nick": "<nick>", "trip": "!<code>"}
+    ],
+    "replay": [
+      {
+        "v": 1,
+        "type": "chat",
+        "id": "<message-id>",
+        "room": "<room>",
+        "nick": "<nick-a>",
+        "trip": null,
+        "text": "<text>",
+        "ts": 1790994302090,
+        "source": "peer"
+      }
+    ]
+  },
+  "chat": {
+    "v": 1,
+    "type": "chat",
+    "id": "<message-id>",
+    "room": "<room>",
+    "nick": "<nick>",
+    "trip": "!<code>",
+    "text": "<text>",
+    "ts": 1790994302090,
+    "source": "peer"
+  },
+  "presence": {
+    "join": {
+      "v": 1,
+      "type": "presence",
+      "event": "join",
+      "room": "<room>",
+      "sessionId": "<session-b>",
+      "nick": "<nick-b>",
+      "trip": null,
+      "users": [
+        {"sessionId": "<session-a>", "nick": "<nick-a>", "trip": null},
+        {"sessionId": "<session-b>", "nick": "<nick-b>", "trip": null}
+      ]
+    },
+    "leave": {
+      "v": 1,
+      "type": "presence",
+      "event": "leave",
+      "room": "<room>",
+      "sessionId": "<session-b>",
+      "nick": "<nick-b>",
+      "trip": null,
+      "users": [
+        {"sessionId": "<session-a>", "nick": "<nick-a>", "trip": null}
+      ]
+    },
+    "nick": {
+      "v": 1,
+      "type": "presence",
+      "event": "nick",
+      "room": "<room>",
+      "sessionId": "<session-b>",
+      "nick": "<nick-c>",
+      "previousNick": "<nick-b>",
+      "trip": null,
+      "users": [
+        {"sessionId": "<session-a>", "nick": "<nick-a>", "trip": null},
+        {"sessionId": "<session-b>", "nick": "<nick-c>", "trip": null}
+      ]
+    }
+  },
+  "bye": {"v": 1, "type": "bye", "reason": "leave"},
+  "errorInvalidText": {
+    "v": 1,
+    "type": "error",
+    "code": "invalid_text",
+    "text": "text must be 1-2048 characters"
+  }
+}
