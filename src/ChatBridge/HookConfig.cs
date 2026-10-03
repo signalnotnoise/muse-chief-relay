@@ -44,7 +44,8 @@ internal sealed class HookConfig
     /// <summary>Longer chat texts are cut to this many characters in the payload.</summary>
     [JsonPropertyName("max_text")] public int MaxText { get; set; } = 2000;
 
-    /// <summary>At most this many chats per fire (the newest); the rest are counted in <c>omitted</c>.</summary>
+    /// <summary>At most this many chats in one POST. A larger backlog is sent in following POSTs, oldest first,
+    /// in the same step. Nothing is left out.</summary>
     [JsonPropertyName("max_batch")] public int MaxBatch { get; set; } = 50;
 
     public void Validate(string configPath)
