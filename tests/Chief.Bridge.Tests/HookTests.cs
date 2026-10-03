@@ -363,9 +363,11 @@ public class HookPollerTests
         r.Now = r.Now.AddSeconds(20);
         r.Add(Chat("Alex", "hello?", Alex));
         Assert.Equal(HookStep.Fired, await p.StepAsync(default));
-        Assert.Equal(new[] { "please answer", "hello?" }, r.Server.Last()["chats"]!.AsArray().Select(c => (string)c!["text"]!));
+        // The retry is its own POST, then the chat that arrived with it. Both are delivered, oldest first.
+        Assert.Equal(4, r.Server.Requests.Count);
+        Assert.Equal(new[] { "please answer" }, Texts(r.Server.Requests.ElementAt(2)));
+        Assert.Equal(new[] { "hello?" }, Texts(r.Server.Requests.ElementAt(3)));
         Assert.Equal((0, 1L, 2L, "HTTP 200"), (p.Status.Failures, p.Status.FiredOk, p.Status.FiredFailed, p.Status.LastResult!));
-        Assert.Equal(3, r.Server.Requests.Count);
         r.AssertNoSecrets();
     }
 
@@ -537,8 +539,159 @@ public class HookPollerTests
         r.AssertNoSecrets();
     }
 
+    [Fact]
+    public async Task Pieces_keep_every_chat_oldest_first_under_both_caps()
+    {
+        using var r = new Rig(h => { h.CooldownSeconds = 0; h.MaxBatch = 3; });
+        var p = r.New();
+        p.PayloadByteLimit = 450;
+        await p.StepAsync(default);
+
+        var texts = new[]
+        {
+            "a-one", "b-two", "c-three", "d-four",
+            new string('z', 800),
+            "e-five"
+        };
+        r.Add(string.Concat(texts.Select((t, i) => Chat("Alex", t, Alex, ts: 1_790_500_100L + i))));
+        Assert.Equal(HookStep.Fired, await p.StepAsync(default));
+
+        var bodies = r.Server.Requests.Select(q => q.Body).ToList();
+        Assert.NotEmpty(bodies);
+        var delivered = new List<string>();
+        foreach (var body in bodies)
+        {
+            var root = (JsonObject)JsonNode.Parse(body)!;
+            Assert.Null(root["omitted"]);
+            var chats = root["chats"]!.AsArray();
+            Assert.NotEmpty(chats);
+            Assert.True(chats.Count <= 3);
+            var bytes = Encoding.UTF8.GetByteCount(body);
+            if (chats.Count > 1)
+                Assert.True(bytes <= p.PayloadByteLimit, $"multi-chat POST was {bytes} bytes");
+            delivered.AddRange(chats.Select(c => (string)c!["text"]!));
+        }
+
+        Assert.Equal(texts, delivered);
+        Assert.Contains(texts[4], delivered);
+        Assert.Equal(0, p.Status.Pending);
+    }
+
+    [Fact]
+    public async Task Single_chat_400_is_not_split_and_does_not_block_the_rest()
+    {
+        using var r = new Rig(h => { h.CooldownSeconds = 0; h.MaxRetrySeconds = 30; });
+        var p = r.New();
+        await p.StepAsync(default);
+
+        r.Server.StatusFor = body =>
+        {
+            var chats = ((JsonObject)JsonNode.Parse(body)!)["chats"]!.AsArray();
+            if (chats.Count == 0)
+                return 400;
+            if (chats.Any(c => (string?)c!["text"] == "POISON"))
+                return 400;
+            return null;
+        };
+
+        r.Add(Chat("Alex", "POISON", Alex, ts: 1_790_500_100)
+              + Chat("Alex", "good-a", Alex, ts: 1_790_500_101)
+              + Chat("Alex", "good-b", Alex, ts: 1_790_500_102));
+        Assert.Equal(HookStep.Failed, await p.StepAsync(default));
+
+        Assert.All(r.Server.Requests, q =>
+        {
+            var root = (JsonObject)JsonNode.Parse(q.Body)!;
+            Assert.NotEmpty(root["chats"]!.AsArray());
+            Assert.Null(root["omitted"]);
+        });
+        Assert.InRange(r.Server.Requests.Count, 2, 4);
+        Assert.Equal(new[] { "good-a", "good-b" }, TextsOf(r.Server.Requests.Where(q => q.Status == 200)).ToList());
+        Assert.Equal(new[] { "POISON" }, RetryTexts(r));
+        Assert.Contains("cannot split", r.Log.ToString());
+        Assert.Equal(1, p.Status.Pending);
+
+        // Alone, the same chat is still one POST. The next chat is not held behind it.
+        var before = r.Server.Requests.Count;
+        r.Add(Chat("Alex", "after", Alex, ts: 1_790_500_200));
+        Assert.Equal(HookStep.Fired, await p.StepAsync(default));
+        var fresh = r.Server.Requests.Skip(before).ToList();
+        var one = Assert.Single(fresh);
+        Assert.Equal(200, one.Status);
+        Assert.Equal(new[] { "after" }, Texts(one));
+        Assert.DoesNotContain("POISON", one.Body);
+        Assert.Equal(new[] { "POISON" }, RetryTexts(r));
+        Assert.Equal(1, p.Status.Pending);
+        r.AssertNoSecrets();
+    }
+
+    [Fact]
+    public async Task Live_chats_while_a_retry_is_pending_are_not_captured_by_it()
+    {
+        using var r = new Rig(h => { h.CooldownSeconds = 10; h.MaxBatch = 1; h.MaxRetrySeconds = 60; });
+        var p = r.New();
+        await p.StepAsync(default);
+
+        r.Server.StatusFor = body => body.Contains("\"text\":\"fail-piece\"", StringComparison.Ordinal) ? 500 : null;
+        r.Add(Chat("Alex", "ok-piece", Alex, ts: 1_790_500_100) + Chat("Alex", "fail-piece", Alex, ts: 1_790_500_101));
+        Assert.Equal(HookStep.Failed, await p.StepAsync(default));
+        Assert.Equal(new[] { "ok-piece" }, TextsOf(r.Server.Requests.Where(q => q.Status == 200)).ToList());
+        Assert.Equal(new[] { "fail-piece" }, RetryTexts(r));
+
+        r.Now = r.Now.AddSeconds(4);
+        r.Add(Chat("Alex", "while-waiting", Alex, ts: 1_790_500_110) + Chat("Fuse", "also-waiting", "Xy34Zw", ts: 1_790_500_111));
+        Assert.Equal(HookStep.Held, await p.StepAsync(default));
+        Assert.Equal(3, p.Status.Pending);
+        Assert.Equal(2, r.Server.Requests.Count);
+
+        var appended = 0;
+        r.Server.StatusFor = body =>
+        {
+            if (body.Contains("\"text\":\"while-waiting\"", StringComparison.Ordinal) && Interlocked.Exchange(ref appended, 1) == 0)
+                r.Add(Chat("Alex", "during-post", Alex, ts: 1_790_500_120));
+            return body.Contains("\"text\":\"fail-piece\"", StringComparison.Ordinal) ? 500 : null;
+        };
+
+        r.Now = r.Now.AddSeconds(6);
+        var before = r.Server.Requests.Count;
+        Assert.Equal(HookStep.Failed, await p.StepAsync(default));
+        var sent = r.Server.Requests.Skip(before).ToList();
+        Assert.Equal(3, sent.Count);
+        Assert.Equal(500, sent[0].Status);
+        Assert.Equal(new[] { "fail-piece" }, Texts(sent[0]));
+        Assert.Equal(200, sent[1].Status);
+        Assert.Equal(new[] { "while-waiting" }, Texts(sent[1]));
+        Assert.Equal(200, sent[2].Status);
+        Assert.Equal(new[] { "also-waiting" }, Texts(sent[2]));
+        Assert.All(sent.Skip(1), q => Assert.DoesNotContain("fail-piece", q.Body));
+        Assert.Equal(new[] { "fail-piece" }, RetryTexts(r));
+        Assert.Equal(1, p.Status.Pending);
+
+        // The line appended during the live POST stays past the offset. The cooldown, not the retry, holds it.
+        r.Now = r.Now.AddSeconds(10);
+        Assert.Equal(HookStep.Fired, await p.StepAsync(default));
+        Assert.Equal(new[] { "during-post" }, Texts(r.Server.Requests.Last()));
+        Assert.DoesNotContain("fail-piece", r.Server.Requests.Last().Body);
+        Assert.Equal(new[] { "fail-piece" }, RetryTexts(r));
+        r.AssertNoSecrets();
+    }
+
     private static IEnumerable<string> TextsOf(IEnumerable<(DateTime At, string? Auth, string? ContentType, string Body, int Status)> requests) =>
-        requests.SelectMany(q => ((JsonObject)JsonNode.Parse(q.Body)!)["chats"]!.AsArray().Select(c => (string)c!["text"]!));
+        requests.SelectMany(q => Texts(q));
+
+    private static IEnumerable<string> Texts((DateTime At, string? Auth, string? ContentType, string Body, int Status) request) =>
+        ((JsonObject)JsonNode.Parse(request.Body)!)["chats"]!.AsArray().Select(c => (string)c!["text"]!);
+
+    private static List<string> RetryTexts(Rig r)
+    {
+        var path = r.Dir.File(".hook.offset.retry");
+        if (!File.Exists(path))
+            return new List<string>();
+        return File.ReadAllLines(path)
+            .Where(line => !string.IsNullOrWhiteSpace(line))
+            .Select(line => (string)((JsonObject)JsonNode.Parse(line)!)["text"]!)
+            .ToList();
+    }
 
     [Fact]
     public async Task Status_file_records_the_last_fire_and_classifies_as_running()
