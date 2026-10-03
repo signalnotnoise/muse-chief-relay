@@ -171,9 +171,11 @@ function onWorkspaceCreate() {
         <!-- Welcome + join, before connecting. -->
         <div v-if="!inChat" class="mx-auto flex w-full max-w-[1100px] flex-1 flex-col justify-center px-[1.1rem] py-10">
           <div class="grid items-center gap-10 lg:grid-cols-[minmax(0,1.05fr)_minmax(0,0.95fr)]">
-            <div>
+            <!-- Narrow: the connect form comes first — on a phone the pitch
+                 copy would otherwise push Connect below the fold. -->
+            <div class="max-lg:order-2">
               <p class="mb-4 font-mono text-[0.72rem] tracking-[0.28em] text-accent">OPEN-SOURCE EXPERIMENT · REAL-TIME</p>
-              <h1 class="font-display text-4xl leading-[1.06] font-bold tracking-tight text-ink md:text-[3.4rem]">
+              <h1 class="font-display text-[1.9rem] leading-[1.06] font-bold tracking-tight text-ink md:text-[3.4rem]">
                 A multi-vendor room, building software live.
               </h1>
               <p class="mt-5 max-w-xl text-[1.02rem] leading-relaxed text-muted">
@@ -222,7 +224,7 @@ function onWorkspaceCreate() {
 
             <section
               id="join-panel"
-              class="rounded-2xl border border-line bg-panel-soft px-6 py-6 shadow-[0_20px_60px_rgba(0,0,0,0.35)]"
+              class="rounded-2xl border border-line bg-panel-soft px-6 py-6 shadow-[0_20px_60px_rgba(0,0,0,0.35)] max-lg:order-1"
               aria-label="Join channel"
             >
               <h2 class="mb-1 text-[1.15rem] font-semibold text-ink">Join the channel</h2>
@@ -315,18 +317,19 @@ function onWorkspaceCreate() {
         <div v-else class="mx-auto flex min-h-0 w-full max-w-[1100px] flex-1 flex-col px-[1.1rem] pt-4 pb-6">
           <section
             id="chat-panel"
-            class="grid min-h-0 flex-1 grid-cols-1 grid-rows-[minmax(0,10rem)_minmax(0,1fr)] overflow-hidden rounded-2xl border border-line bg-panel-soft shadow-[0_20px_60px_rgba(0,0,0,0.35)] min-[821px]:grid-cols-[220px_minmax(0,1fr)] min-[821px]:grid-rows-[minmax(0,1fr)]"
+            class="grid min-h-0 flex-1 grid-cols-1 grid-rows-[minmax(0,10rem)_minmax(0,1fr)] overflow-hidden rounded-2xl border border-line bg-panel-soft shadow-[0_20px_60px_rgba(0,0,0,0.35)] min-[821px]:grid-cols-[220px_minmax(0,1fr)] min-[821px]:grid-rows-[minmax(0,1fr)] max-[820px]:grid-rows-[auto_minmax(0,1fr)]"
           >
             <aside class="flex min-h-0 min-w-0 flex-col gap-2.5 overflow-hidden border-b border-line bg-sidebar px-3.5 py-3.5 min-[821px]:border-r min-[821px]:border-b-0 max-[820px]:gap-2 max-[820px]:py-2.5">
               <h2 class="m-0 shrink-0 text-xs font-semibold tracking-[0.06em] text-muted uppercase">Online</h2>
               <!-- Narrow: users collapse to a single horizontal chip row so the
                    list stays usable without growing the sidebar; Disconnect
-                   stays in normal flow below it and is never clipped. -->
+                   stays in normal flow below it and is never clipped. Chips
+                   get taller tap targets on touch-size screens. -->
               <ul id="users" class="m-0 min-h-0 flex-1 list-none overflow-auto p-0 text-[0.9rem] max-[820px]:flex max-[820px]:flex-none max-[820px]:flex-row max-[820px]:gap-1.5 max-[820px]:overflow-x-auto max-[820px]:overflow-y-hidden max-[820px]:py-0.5">
                 <li
                   v-for="name in users"
                   :key="name"
-                  class="rounded-md px-1.5 py-1 text-chat max-[820px]:shrink-0 max-[820px]:rounded-full max-[820px]:border max-[820px]:border-line max-[820px]:bg-panel max-[820px]:whitespace-nowrap"
+                  class="rounded-md px-1.5 py-1 text-chat max-[820px]:shrink-0 max-[820px]:rounded-full max-[820px]:border max-[820px]:border-line max-[820px]:bg-panel max-[820px]:whitespace-nowrap max-[820px]:px-3.5 max-[820px]:py-2.5"
                   :class="{ 'bg-me text-accent': name === nick }"
                 >
                   <!-- Clicking a roster name addresses them, same as transcript
@@ -349,15 +352,24 @@ function onWorkspaceCreate() {
               <!-- Workspaces: folder-style list derived from the transcript's
                    `workspace:` ask lines and the room-side watcher's goal
                    cards. Opening one narrows the transcript to that
-                   workspace's thread. Hidden on narrow screens like the
-                   board link — the folder view is a desktop-first surface. -->
-              <section aria-label="Workspaces" class="grid shrink-0 gap-1.5 max-[820px]:hidden">
-                <h2 class="m-0 text-xs font-semibold tracking-[0.06em] text-muted uppercase">Workspaces</h2>
-                <ul v-if="workspaces.length" class="m-0 grid list-none gap-1 p-0">
-                  <li v-for="ws in workspaces" :key="ws.key">
+                   workspace's thread. On narrow screens the list becomes a
+                   horizontal chip row (same pattern as the users list) with
+                   a compact + New, so folders stay reachable on phones. -->
+              <section aria-label="Workspaces" class="grid shrink-0 gap-1.5">
+                <div class="flex shrink-0 items-center justify-between gap-2">
+                  <h2 class="m-0 text-xs font-semibold tracking-[0.06em] text-muted uppercase">Workspaces</h2>
+                  <button
+                    type="button"
+                    class="shrink-0 cursor-pointer rounded-full border border-line bg-panel px-2.5 py-1 text-[0.78rem] font-semibold text-accent transition hover:brightness-125 focus-visible:outline-solid focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-focus min-[821px]:hidden"
+                    title="Start a new workspace with the room's agents"
+                    @click="openWorkspaceSheet"
+                  >+ New</button>
+                </div>
+                <ul v-if="workspaces.length" class="m-0 min-h-0 list-none gap-1 p-0 min-[821px]:grid max-[820px]:flex max-[820px]:flex-none max-[820px]:flex-row max-[820px]:gap-1.5 max-[820px]:overflow-x-auto max-[820px]:overflow-y-hidden max-[820px]:py-0.5">
+                  <li v-for="ws in workspaces" :key="ws.key" class="max-[820px]:shrink-0">
                     <button
                       type="button"
-                      class="grid w-full cursor-pointer grid-cols-[auto_minmax(0,1fr)] items-center gap-2 rounded-md px-1.5 py-1 text-left text-chat transition-colors hover:bg-row-hover focus-visible:outline-solid focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-focus"
+                      class="flex shrink-0 cursor-pointer items-center gap-1.5 rounded-full border border-line bg-panel px-3 py-2 text-left text-[0.85rem] text-chat whitespace-nowrap transition-colors hover:bg-row-hover focus-visible:outline-solid focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-focus min-[821px]:grid min-[821px]:w-full min-[821px]:grid-cols-[auto_minmax(0,1fr)] min-[821px]:rounded-md min-[821px]:border-0 min-[821px]:bg-transparent min-[821px]:px-1.5 min-[821px]:py-1 min-[821px]:whitespace-normal"
                       :class="{ 'bg-row-hover': openWorkspaceKey === ws.key }"
                       :aria-pressed="openWorkspaceKey === ws.key"
                       :title="'Open workspace: ' + ws.goal"
@@ -367,14 +379,14 @@ function onWorkspaceCreate() {
                         <path d="M1.5 4.5c0-.8.7-1.5 1.5-1.5h3l1.2 1.5h5.3c.8 0 1.5.7 1.5 1.5v5c0 .8-.7 1.5-1.5 1.5h-9.5c-.8 0-1.5-.7-1.5-1.5v-5z" />
                       </svg>
                       <span class="min-w-0">
-                        <span class="block truncate text-[0.85rem] font-medium">{{ ws.goal }}</span>
-                        <span class="block truncate text-[0.7rem] text-dim">{{ ws.requester ? '@' + ws.requester : '' }}{{ ws.cardId ? '' : ' · waiting on room setup' }}</span>
+                        <span class="block truncate font-medium max-[820px]:max-w-[11rem]">{{ ws.goal }}</span>
+                        <span class="block truncate text-[0.7rem] text-dim max-[820px]:hidden">{{ ws.requester ? '@' + ws.requester : '' }}{{ ws.cardId ? '' : ' · waiting on room setup' }}</span>
                       </span>
                     </button>
                   </li>
                 </ul>
                 <p v-else class="m-0 px-1.5 text-[0.75rem] leading-snug text-dim">
-                  No workspaces yet — ask with <code class="font-mono">workspace: &lt;goal&gt;</code> or the + Workspace button.
+                  No workspaces yet — start one with + New or a <code class="font-mono">workspace: &lt;goal&gt;</code> line.
                 </p>
               </section>
               <!-- Narrow: hidden here (the header Board tab is one tap away),
@@ -507,7 +519,7 @@ function onWorkspaceCreate() {
                 </div>
               </details>
 
-              <form id="send-form" class="flex shrink-0 gap-2 border-t border-line bg-panel px-4 py-3" @submit.prevent="onSend">
+              <form id="send-form" class="flex shrink-0 gap-2 border-t border-line bg-panel px-4 py-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]" @submit.prevent="onSend">
                 <input
                   id="message"
                   ref="messageEl"
@@ -520,12 +532,12 @@ function onWorkspaceCreate() {
                   @keydown="onComposerKeydown"
                 />
                 <button
-                  :class="[button, 'shrink-0 px-2.5']"
+                  :class="[button, 'shrink-0 px-2.5 max-[820px]:hidden']"
                   type="button"
                   title="Start a new workspace with the room's agents"
                   @click="openWorkspaceSheet"
                 >+ Workspace</button>
-                <button :class="[button, 'shrink-0']" type="submit">Send</button>
+                <button :class="[button, 'shrink-0 max-[820px]:min-h-[44px] max-[820px]:px-4']" type="submit">Send</button>
               </form>
 
               <!-- New-workspace goal sheet: one field (the goal), posts the
