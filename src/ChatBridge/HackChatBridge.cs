@@ -734,8 +734,9 @@ internal sealed class HackChatBridge
             announcedRate = false;
             if (step.Frame is { } frame)
             {
-                // NextChat fsynced `sent` before returning the frame. A throw here leaves
-                // the row uncertain; the next session holds instead of sending it again.
+                // NextChat fsynced `sent` before returning the frame. That record is the
+                // intent to write, not a proven socket write. A throw here leaves the row
+                // `sent`; the next session holds instead of sending it again.
                 await SendAsync(ws, sendLock, frame, ct);
                 LogEvent("out", LogRedaction.Outbound(InboundFrame.ForLog(frame)));
             }

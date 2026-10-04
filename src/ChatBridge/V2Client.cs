@@ -201,18 +201,22 @@ internal sealed class V2SessionEndException(string message) : Exception(message)
 /// <see cref="RelayConfig.ProtocolV2"/> is true. v1 sessions never touch these files.
 /// </summary>
 /// <remarks>
-/// Outbound states stay separate. <c>sent</c> means the bytes were committed to the socket
-/// (fsynced before the write). It is not server acceptance. <c>accepted</c> is only a
-/// correlated accept receipt. <c>echo_observed</c> is own-nick exact text and is never
-/// written as <c>accepted</c>. <c>rate_limited</c> keeps the row and retries after the
-/// server delay, up to a bound, reusing <c>client_msg_id</c>. <c>uncertain</c> is a lost
-/// or exhausted outcome: it is not dropped and not requeued. A <c>sent</c> or
-/// <c>uncertain</c> head holds the pump. A missed <c>accepted</c> is not resent, because
-/// §11 says that retry can store a second message. This is not exactly-once delivery.
-/// The local id is <c>client_msg_id</c>. It is omitted from the chat frame unless
-/// <see cref="V2OutboundOptions.SendDedup"/> is on. A live <c>drop</c>, and an opt-in
-/// echo release, fence this connection so a late unnamed <c>accepted</c> cannot complete
-/// the next row. The next chat waits for a new socket. <c>requeue</c> does not fence.
+/// Outbound states stay separate. <c>sent</c> is fsynced before SendAsync. It records
+/// the intent to write, not a proven socket write. A crash between that record and the
+/// send leaves the row <c>sent</c> without proof the bytes left. It is not server
+/// acceptance. <c>accepted</c> is only a correlated accept receipt. <c>echo_observed</c>
+/// is own-nick exact text and is never written as <c>accepted</c>. <c>rate_limited</c>
+/// keeps the row and retries after the server delay, up to a bound, reusing
+/// <c>client_msg_id</c>, and only when this connection actually submitted that chat.
+/// <c>uncertain</c> is a lost or exhausted outcome: it is not dropped and not requeued.
+/// A <c>sent</c> or <c>uncertain</c> head holds the pump. A missed <c>accepted</c> is
+/// not resent, because §11 says that retry can store a second message. This is not
+/// exactly-once delivery. The local id is <c>client_msg_id</c>. It is omitted from the
+/// chat frame unless <see cref="V2OutboundOptions.SendDedup"/> is on. A live <c>drop</c>
+/// fences every later <c>accepted</c> on this connection. An opt-in echo release fences
+/// unnamed receipts and receipts for any other id; a receipt that names the
+/// <c>echo_observed</c> row can still complete that row. The next chat waits for a new
+/// socket either way. <c>requeue</c> does not fence.
 /// Inbound: a delivery is fsynced as <c>seen</c> with its payload, then handed to
 /// <see cref="Consumers"/>, then fsynced as <c>handed_off</c> and <c>ack_pending</c>
 /// before the ack frame is returned. A failed handoff stays <c>seen</c> and is not acked.
@@ -227,6 +231,13 @@ internal sealed class V2Client
 
     private readonly object _gate = new();
     private readonly V2OutboundOptions _options;
+    private enum OutboundFence
+    {
+        None = 0,
+        Drop,
+        Echo
+    }
+
     private readonly Func<DateTimeOffset> _clock;
     private readonly string _outboundPath;
     private readonly string _inboundPath;
@@ -245,10 +256,11 @@ internal sealed class V2Client
     private bool _pullAgain;
     private int _pulls;
     private string? _ackInFlight;
-    // True after a sent row is dropped or an opt-in echo release, until the next connection.
-    // A late accepted on this socket must not complete a different chat: the deployed frame
-    // has no client_msg_id.
-    private bool _acceptFence;
+    // Set after a sent row is dropped or an opt-in echo release, until the next connection.
+    // Drop rejects every accepted. Echo rejects unnamed receipts and any other id, and
+    // still allows a receipt that names the echo_observed row. The deployed frame has no
+    // client_msg_id, so an ambiguous accepted must not complete a different chat.
+    private OutboundFence _fence;
     private string? _fenceNote;
     // The row this connection handed to the socket. Echo compat will not release any other row.
     private string? _sessionOutstanding;
@@ -295,7 +307,7 @@ internal sealed class V2Client
             CatchUpOutbound();
             // New socket. An accepted for a chat dropped or echo-released on the previous
             // connection cannot arrive here.
-            if (_acceptFence)
+            if (_fence != OutboundFence.None)
             {
                 AppendOutbound(new[]
                 {
@@ -354,7 +366,8 @@ internal sealed class V2Client
     /// <summary>
     /// Returns the next chat, a rate-limit wait, or a hold when the head was handed to the
     /// socket and no correlated <c>accepted</c> has been observed. The <c>sent</c> row is
-    /// fsynced before the frame is returned. <c>sent</c> means bytes committed, not accepted.
+    /// fsynced before the frame is returned. That record is the intent to write, not a
+    /// proven socket write, and it is not server acceptance.
     /// </summary>
     public V2ChatStep NextChat()
     {
@@ -362,7 +375,7 @@ internal sealed class V2Client
         {
             CatchUpOutbound();
             ImportLocked();
-            if (_acceptFence)
+            if (_fence != OutboundFence.None)
             {
                 _notes.Enqueue(_fenceNote ?? "dropped send fenced this session; reconnect before the next chat");
                 return V2ChatStep.Fenced;
@@ -678,15 +691,15 @@ internal sealed class V2Client
         // A reconcile drop may be on disk already. See it before choosing a row, or the late
         // accepted completes whichever row the pump sent next.
         CatchUpOutbound();
-        if (_acceptFence)
+        var named = Json.Str(frame, "client_msg_id");
+        if (AcceptedBlockedByFence(named))
         {
-            _notes.Enqueue(_fenceNote?.StartsWith("echo_observed", StringComparison.Ordinal) == true
+            _notes.Enqueue(_fence == OutboundFence.Echo
                 ? "accepted ignored; echo_observed fenced this session"
                 : "accepted ignored; dropped send fenced this session");
             return V2InboundResult.None;
         }
 
-        var named = Json.Str(frame, "client_msg_id");
         OutItem? target;
         if (named is not null)
         {
@@ -722,36 +735,48 @@ internal sealed class V2Client
     }
 
     /// <summary>
-    /// The server rejected the in-flight send. Keep the row and schedule a bounded retry.
-    /// Do not leave it <c>sent</c> — that used to hold the pump until a receipt that will
-    /// not come, or look like a completed handoff. A named id settles only that row.
-    /// An unnamed frame settles only the single in-flight <c>sent</c> row.
+    /// The server rejected a chat this connection actually submitted. Keep that row and
+    /// schedule a bounded retry. A <c>rate_limited</c> JOIN, or any other control error,
+    /// is not that rejection: it does not move a persisted <c>sent</c> row, including a
+    /// lost receipt that survived reconnect. A named id applies only when it is the
+    /// current-session row and that row is still <c>sent</c>. An unnamed frame applies
+    /// only when that same row is the single in-flight <c>sent</c> row.
     /// </summary>
     private V2InboundResult OnRateLimited(JsonObject frame)
     {
         CatchUpOutbound();
+        if (_sessionOutstanding is null
+            || !_out.TryGetValue(_sessionOutstanding, out var submitted)
+            || submitted.State != "sent")
+        {
+            _notes.Enqueue("rate_limited did not match a chat submitted this session; not applied");
+            return V2InboundResult.None;
+        }
+
         var named = Json.Str(frame, "client_msg_id");
-        OutItem? target;
+        OutItem target;
         if (named is not null)
         {
-            if (!_out.TryGetValue(named, out target) || target.State != "sent")
+            if (!string.Equals(named, submitted.Id, StringComparison.Ordinal))
             {
                 _notes.Enqueue("rate_limited names a different client_msg_id; not applied");
                 return V2InboundResult.None;
             }
+
+            target = submitted;
         }
         else
         {
             var inflight = RowsIn("sent");
-            if (inflight.Count != 1)
+            if (inflight.Count != 1 || !string.Equals(inflight[0].Id, submitted.Id, StringComparison.Ordinal))
             {
                 _notes.Enqueue(inflight.Count > 1
                     ? "rate_limited has no client_msg_id and more than one send is in flight; not applied"
-                    : "rate_limited with no in-flight send; not applied");
+                    : "rate_limited did not match a chat submitted this session; not applied");
                 return V2InboundResult.None;
             }
 
-            target = inflight[0];
+            target = submitted;
         }
 
         if (target.Attempt >= Math.Max(1, _options.MaxRateLimitAttempts))
@@ -1164,16 +1189,21 @@ internal sealed class V2Client
 
     private OutItem? FirstOpen()
     {
+        // An in-flight or held row wins over an earlier row that was requeued. Otherwise
+        // echo-release A, send B, then requeue A would select A while B is still sent.
+        OutItem? queued = null;
         foreach (var id in _outOrder)
         {
             var item = _out[id];
-            // echo_observed is evidence, not acceptance, and it does not block the rows behind it.
-            // accepted and dropped are finished. sent, uncertain, rate_limited, and queued are the head.
-            if (item.State is "queued" or "sent" or "rate_limited" or "uncertain")
+            if (item.State is "sent" or "rate_limited" or "uncertain")
                 return item;
+            // echo_observed is evidence, not acceptance, and it does not block the rows behind it.
+            // accepted and dropped are finished.
+            if (queued is null && item.State == "queued")
+                queued = item;
         }
 
-        return null;
+        return queued;
     }
 
     private List<OutItem> RowsIn(string state)
@@ -1244,14 +1274,44 @@ internal sealed class V2Client
 
     private TimeSpan RateLimitDelay(JsonObject frame)
     {
-        long? ms = JsonNum.Long(frame, "retryAfterMs") ?? JsonNum.Long(frame, "retry_after_ms");
-        if (ms is null && JsonNum.Long(frame, "retryAfter") is { } seconds)
-            ms = seconds * 1000;
-        if (ms is null)
+        // Clamp before TimeSpan.FromMilliseconds. A huge retryAfterMs throws, and
+        // retryAfter seconds * 1000 overflows long before that conversion.
+        var capMs = RateLimitCapMs();
+        var rawMs = JsonNum.Long(frame, "retryAfterMs") ?? JsonNum.Long(frame, "retry_after_ms");
+        long ms;
+        if (rawMs is { } given)
+        {
+            ms = given;
+        }
+        else if (JsonNum.Long(frame, "retryAfter") is { } seconds)
+        {
+            if (seconds <= 0 || capMs / 1000 < seconds)
+                ms = seconds <= 0 ? 0 : capMs;
+            else
+                ms = seconds * 1000;
+        }
+        else
+        {
             return CapDelay(_options.DefaultRateLimitDelay);
-        if (ms.Value < 0)
+        }
+
+        if (ms < 0)
             ms = 0;
-        return CapDelay(TimeSpan.FromMilliseconds(ms.Value));
+        else if (ms > capMs)
+            ms = capMs;
+        return TimeSpan.FromMilliseconds(ms);
+    }
+
+    private long RateLimitCapMs()
+    {
+        var cap = _options.MaxRateLimitDelay;
+        if (cap <= TimeSpan.Zero)
+            return 0;
+        // TimeSpan.MaxValue.TotalMilliseconds is 922337203685477. Stay inside that.
+        var ms = cap.TotalMilliseconds;
+        if (ms >= 922337203685477d)
+            return 922337203685477;
+        return (long)ms;
     }
 
     private TimeSpan CapDelay(TimeSpan delay)
@@ -1290,11 +1350,14 @@ internal sealed class V2Client
 
                 break;
             case "accepted":
-                // Shared by OnAccepted, Load, and AppendOutbound/CatchUp. A drop or echo release
-                // fences this connection, so a late accepted must not complete another row.
-                if (_acceptFence)
-                    return;
+                // Shared by OnAccepted, Load, and AppendOutbound/CatchUp. A drop fences every
+                // accepted. An echo fence still allows a receipt that names the echo_observed
+                // row, and rejects an unnamed receipt or any other id.
                 if (Json.Str(op, "client_msg_id") is not { } done || !_out.TryGetValue(done, out var acceptedRow))
+                    return;
+                if (_fence == OutboundFence.Drop)
+                    return;
+                if (_fence == OutboundFence.Echo && acceptedRow.State != "echo_observed")
                     return;
                 if (acceptedRow.State is not ("sent" or "uncertain" or "rate_limited" or "echo_observed"))
                     return;
@@ -1329,8 +1392,12 @@ internal sealed class V2Client
                 if (JsonNum.Bool(op, "release") == true && echoedRow.State == "sent")
                 {
                     echoedRow.State = "echo_observed";
-                    _acceptFence = true;
-                    _fenceNote = "echo_observed fenced this session; not accepted; reconnect before the next chat";
+                    // A drop fence stays a drop fence. Echo must not reopen unnamed accepts.
+                    if (_fence != OutboundFence.Drop)
+                    {
+                        _fence = OutboundFence.Echo;
+                        _fenceNote = "echo_observed fenced this session; not accepted; reconnect before the next chat";
+                    }
                 }
 
                 break;
@@ -1353,11 +1420,11 @@ internal sealed class V2Client
                 item.State = "dropped";
                 item.NotBeforeMs = null;
                 // Tombstone. Later accepted frames on this connection do not complete another row.
-                _acceptFence = true;
+                _fence = OutboundFence.Drop;
                 _fenceNote = "dropped send fenced this session; reconnect before the next chat";
                 break;
             case "accept_open":
-                _acceptFence = false;
+                _fence = OutboundFence.None;
                 _fenceNote = null;
                 break;
         }
@@ -1569,16 +1636,34 @@ internal sealed class V2Client
         }
     }
 
+    private bool AcceptedBlockedByFence(string? clientMsgId)
+    {
+        if (_fence == OutboundFence.None)
+            return false;
+        if (_fence == OutboundFence.Drop)
+            return true;
+        return !IsEchoObserved(clientMsgId);
+    }
+
+    private bool IsEchoObserved(string? clientMsgId)
+        => clientMsgId is not null
+            && _out.TryGetValue(clientMsgId, out var row)
+            && row.State == "echo_observed";
+
+    private bool SafeNamedEchoReceipt(JsonObject op)
+        => _fence == OutboundFence.Echo && IsEchoObserved(Json.Str(op, "client_msg_id"));
+
     private void AppendOutbound(IReadOnlyList<JsonObject> ops)
     {
         CatchUpOutbound();
-        if (_acceptFence)
+        if (_fence != OutboundFence.None)
         {
-            // Do not persist an accepted line chosen by FirstOpen after a live drop.
+            // Drop: persist no accepted line. Echo: persist only a receipt that names the
+            // echo_observed row. Anything else would complete a different chat.
             var kept = new List<JsonObject>(ops.Count);
             foreach (var op in ops)
             {
-                if (Json.Str(op, "op") == "accepted")
+                if (Json.Str(op, "op") == "accepted" && !SafeNamedEchoReceipt(op))
                     continue;
                 kept.Add(op);
             }

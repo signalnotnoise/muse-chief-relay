@@ -1669,6 +1669,208 @@ public class ChatBridgeV2Tests
         });
     }
 
+    [Fact]
+    public void Rate_limited_join_after_reconnect_does_not_rearm_a_lost_receipt()
+    {
+        using var dir = new TempDir();
+        var outbox = Path.Combine(dir.Path, "outbox.jsonl");
+        File.WriteAllText(outbox, "");
+        var options = NickOptions();
+        var client = V2Client.Open(dir.Path, options);
+        client.BeginDeployed(outbox);
+        var alpha = client.EnqueueLocal("alpha");
+        Assert.True(client.NextChat().Send);
+        Assert.Equal("sent", client.DeliveryState(alpha));
+
+        var resumed = V2Client.Open(dir.Path, options);
+        resumed.BeginDeployed(outbox);
+        var joinLimited = resumed.OnFrame(new JsonObject
+        {
+            ["v"] = 2,
+            ["type"] = "error",
+            ["code"] = "rate_limited",
+            ["retryAfterMs"] = 0
+        });
+        Assert.False(joinLimited.WakeOutbox);
+        Assert.Equal("sent", resumed.DeliveryState(alpha));
+        Assert.Contains(
+            "did not match a chat submitted this session",
+            string.Join('\n', resumed.TakeNotes()),
+            StringComparison.Ordinal);
+
+        var named = resumed.OnFrame(new JsonObject
+        {
+            ["type"] = "error",
+            ["code"] = "rate_limited",
+            ["client_msg_id"] = alpha,
+            ["retryAfterMs"] = 0
+        });
+        Assert.False(named.WakeOutbox);
+        Assert.Equal("sent", resumed.DeliveryState(alpha));
+        Assert.Contains(
+            "did not match a chat submitted this session",
+            string.Join('\n', resumed.TakeNotes()),
+            StringComparison.Ordinal);
+
+        var hold = resumed.NextChat();
+        Assert.True(hold.Hold);
+        Assert.False(hold.Send);
+        Assert.Equal(alpha, hold.ClientMsgId);
+        Assert.Equal("sent", resumed.DeliveryState(alpha));
+        Assert.DoesNotContain("\"op\":\"rate_limited\"", File.ReadAllText(resumed.OutboundPath), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Echo_fence_keeps_a_named_receipt_for_the_released_row_only()
+    {
+        using var dir = new TempDir();
+        var outbox = Path.Combine(dir.Path, "outbox.jsonl");
+        File.WriteAllText(outbox, "");
+        var options = new V2OutboundOptions { OwnNick = "chief", EchoCompat = true };
+        var client = V2Client.Open(dir.Path, options);
+        client.BeginDeployed(outbox);
+        var alpha = client.EnqueueLocal("alpha");
+        var beta = client.EnqueueLocal("beta");
+        Assert.Equal(alpha, client.NextChat().ClientMsgId);
+        Assert.True(client.ObserveEcho("chief", "alpha", replay: false));
+        Assert.Equal("echo_observed", client.DeliveryState(alpha));
+
+        client.OnFrame(Fixture("deployed", "accepted"));
+        Assert.Equal("echo_observed", client.DeliveryState(alpha));
+        Assert.DoesNotContain("\"op\":\"accepted\"", File.ReadAllText(client.OutboundPath), StringComparison.Ordinal);
+
+        client.OnFrame(new JsonObject
+        {
+            ["type"] = "accepted",
+            ["client_msg_id"] = beta,
+            ["messageId"] = "m-beta"
+        });
+        Assert.Equal("queued", client.DeliveryState(beta));
+        Assert.Equal("echo_observed", client.DeliveryState(alpha));
+        Assert.DoesNotContain("m-beta", File.ReadAllText(client.OutboundPath), StringComparison.Ordinal);
+
+        client.OnFrame(new JsonObject
+        {
+            ["type"] = "accepted",
+            ["client_msg_id"] = alpha,
+            ["messageId"] = "m-alpha"
+        });
+        Assert.Equal("accepted", client.DeliveryState(alpha));
+        Assert.Equal("queued", client.DeliveryState(beta));
+        var ledger = File.ReadAllText(client.OutboundPath);
+        Assert.Contains("\"messageId\":\"m-alpha\"", ledger, StringComparison.Ordinal);
+        Assert.DoesNotContain("m-beta", ledger, StringComparison.Ordinal);
+
+        var fenced = client.NextChat();
+        Assert.True(fenced.ResetSession);
+        Assert.False(fenced.Send);
+
+        File.AppendAllText(client.OutboundPath, new JsonObject
+        {
+            ["op"] = "accepted",
+            ["client_msg_id"] = beta,
+            ["messageId"] = "m-beta-ledger"
+        }.ToJsonString(JsonUtil.Opts) + "\n");
+        var reloaded = V2Client.Open(dir.Path, options);
+        Assert.Equal("accepted", reloaded.DeliveryState(alpha));
+        Assert.Equal("queued", reloaded.DeliveryState(beta));
+        Assert.True(reloaded.NextChat().ResetSession);
+        Assert.Equal("queued", reloaded.DeliveryState(beta));
+
+        reloaded.BeginDeployed(outbox);
+        var second = reloaded.NextChat();
+        Assert.True(second.Send);
+        Assert.False(second.ResetSession);
+        Assert.Equal(beta, second.ClientMsgId);
+        Assert.Equal("beta", second.Frame!["text"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void Huge_retry_after_is_clamped_before_timespan_conversion()
+    {
+        using var dir = new TempDir();
+        var clock = new MutableClock();
+        var client = OpenDelivery(dir.Path, NickOptions(), clock.Utc);
+        var alpha = client.EnqueueLocal("alpha");
+        Assert.True(client.NextChat().Send);
+
+        var hugeMs = client.OnFrame(new JsonObject
+        {
+            ["type"] = "error",
+            ["code"] = "rate_limited",
+            ["retryAfterMs"] = long.MaxValue
+        });
+        Assert.True(hugeMs.WakeOutbox);
+        Assert.Equal("rate_limited", client.DeliveryState(alpha));
+        var waiting = client.NextChat();
+        Assert.True(waiting.RateLimitWait);
+        Assert.False(waiting.Send);
+        Assert.NotNull(waiting.Wait);
+        Assert.InRange(waiting.Wait!.Value, TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(30));
+
+        using var other = new TempDir();
+        var second = OpenDelivery(other.Path, NickOptions(), new MutableClock().Utc);
+        var beta = second.EnqueueLocal("beta");
+        Assert.True(second.NextChat().Send);
+        var hugeSeconds = second.OnFrame(new JsonObject
+        {
+            ["type"] = "error",
+            ["code"] = "rate_limited",
+            ["retryAfter"] = long.MaxValue
+        });
+        Assert.True(hugeSeconds.WakeOutbox);
+        Assert.Equal("rate_limited", second.DeliveryState(beta));
+        var waitSeconds = second.NextChat();
+        Assert.True(waitSeconds.RateLimitWait);
+        Assert.False(waitSeconds.Send);
+        Assert.InRange(waitSeconds.Wait!.Value, TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(30));
+    }
+
+    [Fact]
+    public void Requeue_of_an_echo_released_row_does_not_pass_an_in_flight_send()
+    {
+        using var dir = new TempDir();
+        var outbox = Path.Combine(dir.Path, "outbox.jsonl");
+        File.WriteAllText(outbox, "");
+        var options = new V2OutboundOptions { OwnNick = "chief", EchoCompat = true };
+        var client = V2Client.Open(dir.Path, options);
+        client.BeginDeployed(outbox);
+        var alpha = client.EnqueueLocal("alpha");
+        var beta = client.EnqueueLocal("beta");
+        Assert.Equal(alpha, client.NextChat().ClientMsgId);
+        Assert.True(client.ObserveEcho("chief", "alpha", replay: false));
+        Assert.True(client.NextChat().ResetSession);
+
+        client.BeginDeployed(outbox);
+        var sentBeta = client.NextChat();
+        Assert.True(sentBeta.Send);
+        Assert.Equal(beta, sentBeta.ClientMsgId);
+        Assert.Equal("sent", client.DeliveryState(beta));
+        Assert.Equal("echo_observed", client.DeliveryState(alpha));
+
+        Assert.True(client.ResolveUncertain(alpha, "requeue"));
+        Assert.Equal("queued", client.DeliveryState(alpha));
+
+        var head = client.NextChat();
+        Assert.True(head.Hold);
+        Assert.False(head.Send);
+        Assert.Equal(beta, head.ClientMsgId);
+        Assert.Equal("queued", client.DeliveryState(alpha));
+        Assert.Equal("sent", client.DeliveryState(beta));
+
+        client.OnFrame(new JsonObject
+        {
+            ["type"] = "accepted",
+            ["client_msg_id"] = beta,
+            ["messageId"] = "m-beta"
+        });
+        Assert.Equal("accepted", client.DeliveryState(beta));
+        var again = client.NextChat();
+        Assert.True(again.Send);
+        Assert.Equal(alpha, again.ClientMsgId);
+        Assert.Equal("alpha", again.Frame!["text"]!.GetValue<string>());
+    }
+
     private static V2OutboundOptions NickOptions() => new() { OwnNick = "chief" };
 
     private static V2Client OpenDelivery(string dir, V2OutboundOptions options, Func<DateTimeOffset>? clock = null)
