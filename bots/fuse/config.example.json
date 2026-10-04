@@ -1,0 +1,1 @@
+{"agents":[{"id":"fuse","nicks":["Fuse"]}],"auto_ack":{"cooldown_s":60,"enabled":false,"mention_trips":[],"task_trips":[]},"base":"runtime","channel":"your-channel-name","mentions":{"enabled":false,"max_fanout_hop":1},"nick":"Fuse","origin":"https://ws.voizel.com","pass":"","publish_trips":[],"receive_idle_s":0,"trip":"","url":"wss://ws.voizel.com/relay"}
