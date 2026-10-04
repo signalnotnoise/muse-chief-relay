@@ -281,6 +281,23 @@ internal static class Posix
         set => _procLocksOverride = value;
     }
 
+    /// <summary>
+    /// When set, the statx device id is replaced for the /proc/locks needle only.
+    /// Mountinfo keeps the device id the kernel actually prints. Tests use this to
+    /// reproduce an overlay host where stx_dev_minor and the locks minor differ.
+    /// </summary>
+    [ThreadStatic]
+    private static uint? _statMajorOverride;
+
+    [ThreadStatic]
+    private static uint? _statMinorOverride;
+
+    internal static void SetStatDeviceOverride(uint? major, uint? minor)
+    {
+        _statMajorOverride = major;
+        _statMinorOverride = minor;
+    }
+
     internal static int ELoop => OperatingSystem.IsMacOS() ? 62 : 40;
     internal const int ENoEnt = 2;
     private static int EAgain => OperatingSystem.IsMacOS() ? 35 : 11;
@@ -304,6 +321,7 @@ internal static class Posix
     private const int AtFdcwd = -100;
     private const int AtSymlinkNoFollow = 0x100;
     private const int StatxBasic = 0x7ff;
+    private const int StatxMntId = 0x1000;
     private const int SigTerm = 15;
 
     private const ushort SIfmt = 0xF000;
@@ -395,7 +413,7 @@ internal static class Posix
     {
         if (OperatingSystem.IsMacOS())
             return new FileInfo(path).LinkTarget is not null;
-        if (!TryStat(path, out var mode, out _, out _, out _))
+        if (!TryStat(path, out var mode, out _, out _, out _, out _))
             return false;
         return (mode & SIfmt) == SIflnk;
     }
@@ -414,10 +432,10 @@ internal static class Posix
                 ? new HolderQuery(HolderState.NotHeld, null)
                 : new HolderQuery(HolderState.Held, record.Pid > 0 ? record.Pid : null);
         }
-        // /proc/locks is the fast path. A sandbox can hide that file, or statx's device id
-        // can disagree with the id printed there. Either one used to report a held lock
-        // with a null pid. The fd table is the same kernel fact: the process that holds
-        // the flock, not the pid hint written into the file.
+        // /proc/locks prints the superblock device (the id findmnt shows). statx stx_dev
+        // on overlay can be a different minor, so a needle built only from stx_dev misses
+        // a lock that is actually held. That miss must not become NotHeld: TryAcquire
+        // never runs, and Probe reports the file free. A pid hint in the file is not consulted.
         string? text = null;
         var locksReadable = false;
         try
@@ -430,19 +448,113 @@ internal static class Posix
             text = null;
         }
 
-        if (locksReadable && text is not null && TryStat(path, out _, out var major, out var minor, out var ino))
+        var statOk = TryStat(path, out _, out var major, out var minor, out var ino, out var mntId);
+        if (_statMajorOverride is uint forcedMajor && _statMinorOverride is uint forcedMinor)
         {
-            var needle = $"{major:x2}:{minor:x2}:{ino}";
-            if (MatchProcLocks(text, needle) is int listed)
+            major = forcedMajor;
+            minor = forcedMinor;
+        }
+
+        var comparedMount = false;
+        if (locksReadable && text is not null && statOk)
+        {
+            if (MatchProcLocks(text, FormatDevIno(major, minor, ino)) is int listed)
                 return new HolderQuery(HolderState.Held, listed);
+
+            foreach (var mount in MountDevices(mntId, path))
+            {
+                comparedMount = true;
+                if (MatchProcLocks(text, FormatDevIno(mount.Major, mount.Minor, ino)) is int mounted)
+                    return new HolderQuery(HolderState.Held, mounted);
+            }
         }
 
         if (MatchFdTable(path) is int owner)
             return new HolderQuery(HolderState.Held, owner);
 
-        return locksReadable
-            ? new HolderQuery(HolderState.NotHeld, null)
-            : new HolderQuery(HolderState.Unknown, null);
+        // A statx needle miss is not NotHeld until the mount device has been checked.
+        // Without that device, Probe's non-blocking take is the only way to tell a
+        // free file from a held one. Once the mount id was searched and nothing
+        // matched, the file is not held.
+        if (!locksReadable || !statOk || !comparedMount)
+            return new HolderQuery(HolderState.Unknown, null);
+        return new HolderQuery(HolderState.NotHeld, null);
+    }
+
+    private readonly record struct DevId(uint Major, uint Minor);
+
+    private static string FormatDevIno(uint major, uint minor, ulong ino) =>
+        $"{major:x2}:{minor:x2}:{ino}";
+
+    /// <summary>
+    /// Device ids for this path from <c>/proc/self/mountinfo</c>. The mount id's device
+    /// comes first, then the longest mount point that covers the path (what findmnt -T prints).
+    /// </summary>
+    private static List<DevId> MountDevices(ulong mntId, string path)
+    {
+        var found = new List<DevId>();
+        string text;
+        try
+        {
+            text = File.ReadAllText("/proc/self/mountinfo");
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return found;
+        }
+
+        var full = Path.GetFullPath(path);
+        DevId? byId = null;
+        DevId? byPath = null;
+        var bestLen = -1;
+        foreach (var line in text.Split('\n'))
+        {
+            var parts = line.Split(' ');
+            if (parts.Length < 5 || !TryParseDev(parts[2], out var dev))
+                continue;
+            if (mntId != 0 && parts[0] == mntId.ToString(System.Globalization.CultureInfo.InvariantCulture))
+                byId = dev;
+            var mountPoint = UnescapeMount(parts[4]);
+            if (Covers(mountPoint, full) && mountPoint.Length > bestLen)
+            {
+                bestLen = mountPoint.Length;
+                byPath = dev;
+            }
+        }
+
+        if (byId is { } idDev)
+            found.Add(idDev);
+        if (byPath is { } pathDev && !found.Contains(pathDev))
+            found.Add(pathDev);
+        return found;
+    }
+
+    private static bool TryParseDev(string text, out DevId dev)
+    {
+        dev = default;
+        var parts = text.Split(':');
+        if (parts.Length != 2)
+            return false;
+        if (!uint.TryParse(parts[0], out var major) || !uint.TryParse(parts[1], out var minor))
+            return false;
+        dev = new DevId(major, minor);
+        return true;
+    }
+
+    private static string UnescapeMount(string mountPoint) =>
+        mountPoint.Replace("\\040", " ", StringComparison.Ordinal)
+            .Replace("\\011", "\t", StringComparison.Ordinal)
+            .Replace("\\012", "\n", StringComparison.Ordinal)
+            .Replace("\\134", "\\", StringComparison.Ordinal);
+
+    private static bool Covers(string mountPoint, string fullPath)
+    {
+        if (mountPoint.Length == 0)
+            return false;
+        if (string.Equals(mountPoint, fullPath, StringComparison.Ordinal))
+            return true;
+        var root = mountPoint.EndsWith('/') ? mountPoint : mountPoint + "/";
+        return fullPath.StartsWith(root, StringComparison.Ordinal);
     }
 
     private static int? MatchProcLocks(string text, string needle)
@@ -609,17 +721,18 @@ internal static class Posix
         RuntimeInformation.ProcessArchitecture == Architecture.Arm64
             ? darwin_fcntl_lock(fd, cmd, 0, 0, 0, 0, 0, 0, ref record) : intel_fcntl_lock(fd, cmd, ref record);
 
-    private static bool TryStat(string path, out ushort mode, out uint major, out uint minor, out ulong ino)
+    private static bool TryStat(string path, out ushort mode, out uint major, out uint minor, out ulong ino, out ulong mntId)
     {
         mode = 0;
         major = 0;
         minor = 0;
         ino = 0;
+        mntId = 0;
         var buf = new byte[256];
         var pinned = GCHandle.Alloc(buf, GCHandleType.Pinned);
         try
         {
-            if (sys_statx(AtFdcwd, path, AtSymlinkNoFollow, StatxBasic, pinned.AddrOfPinnedObject()) != 0)
+            if (sys_statx(AtFdcwd, path, AtSymlinkNoFollow, StatxBasic | StatxMntId, pinned.AddrOfPinnedObject()) != 0)
                 return false;
         }
         finally
@@ -631,6 +744,9 @@ internal static class Posix
         ino = BitConverter.ToUInt64(buf, 0x20);
         major = BitConverter.ToUInt32(buf, 0x88);
         minor = BitConverter.ToUInt32(buf, 0x8C);
+        var mask = BitConverter.ToUInt32(buf, 0);
+        if ((mask & StatxMntId) != 0)
+            mntId = BitConverter.ToUInt64(buf, 0x90);
         return true;
     }
 
