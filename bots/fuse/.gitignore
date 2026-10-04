@@ -1,0 +1,3 @@
+# Private tooling/runtime default (env.sh DOTNET_CLI_HOME, NuGet caches,
+# XDG data). Never commit; see LOCAL_SETUP.md.
+runtime/

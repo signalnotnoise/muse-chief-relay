@@ -1,0 +1,25 @@
+{
+  "url": "wss://ws.voizel.com/relay",
+  "origin": "https://ws.voizel.com",
+  "channel": "your-channel-name",
+  "nick": "chief",
+  "pass": "",
+  "trip": "",
+  "base": "runtime",
+  "receive_idle_s": 0,
+  "chief_mode": "receive-only",
+  "auto_ack": {
+    "enabled": false,
+    "mention_trips": [],
+    "task_trips": [],
+    "cooldown_s": 60
+  },
+  "publish_trips": [],
+  "agents": [
+    { "id": "chief", "nicks": ["chief"] }
+  ],
+  "mentions": {
+    "enabled": false,
+    "max_fanout_hop": 1
+  }
+}
