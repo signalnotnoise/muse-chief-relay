@@ -152,8 +152,8 @@ internal static class BridgeInstance
         }
 
         // Linux: a /proc/locks pid still needs a descriptor for this file.
-        // macOS: F_OFD_GETLK already named the owner. /proc/<pid>/fd is not there,
-        // so that check must not veto stop or restart.
+        // macOS: the preceding F_OFD_GETLK probe already named the owner.
+        // Stop trusts that pid. It does not read /proc and does not query OFD again.
         if (state.Pid is not int owner || owner <= 1 || owner == Environment.ProcessId
             || !Posix.OwnerConfirmed(statePath, owner))
             return InstanceStop.Block("[chatbridge] stop: the state lock is held, but the owner could not be verified");
@@ -355,13 +355,21 @@ internal static class Posix
     internal static void SetHideFdInfo(bool hide) => _hideFdInfo = hide;
 
     /// <summary>
-    /// Tests take the macOS stop path: <c>F_OFD_GETLK</c> already named the pid, so a missing
-    /// <c>/proc</c> fd table must not reject it. Linux production leaves this false.
+    /// Which owner check <see cref="OwnerConfirmed"/> uses. Production stays on
+    /// <see cref="OwnerPlatform.Host"/>. Tests select Linux or macOS so a Darwin host,
+    /// which already trusts the preceding OFD probe, can still exercise the rejection.
     /// </summary>
-    [ThreadStatic]
-    private static bool _testTrustOfdOwner;
+    internal enum OwnerPlatform
+    {
+        Host = 0,
+        Linux = 1,
+        MacOs = 2,
+    }
 
-    internal static void SetTrustOfdOwner(bool trust) => _testTrustOfdOwner = trust;
+    [ThreadStatic]
+    private static OwnerPlatform _testOwnerPlatform;
+
+    internal static void SetOwnerPlatform(OwnerPlatform platform) => _testOwnerPlatform = platform;
 
     internal static int ELoop => OperatingSystem.IsMacOS() ? 62 : 40;
     internal const int ENoEnt = 2;
@@ -583,16 +591,25 @@ internal static class Posix
 
     /// <summary>
     /// Whether stop may signal <paramref name="pid"/>. Linux re-checks the descriptor.
-    /// macOS trusts the <c>F_OFD_GETLK</c> pid and does not read <c>/proc</c>.
+    /// macOS trusts the pid from the preceding <c>F_OFD_GETLK</c> probe. It does not read
+    /// <c>/proc</c> and it does not issue a second OFD query.
     /// </summary>
     internal static bool OwnerConfirmed(string path, int pid)
     {
         if (pid <= 1)
             return false;
-        if (OperatingSystem.IsMacOS() || _testTrustOfdOwner)
+        if (TrustsPrecedingOfdOwner())
             return true;
         return OwnerDescriptorRefersTo(path, pid);
     }
+
+    private static bool TrustsPrecedingOfdOwner() =>
+        _testOwnerPlatform switch
+        {
+            OwnerPlatform.MacOs => true,
+            OwnerPlatform.Linux => false,
+            _ => OperatingSystem.IsMacOS(),
+        };
 
     private static bool MatchVerifiedLock(string text, string path, List<string> needles, out int pid, out bool incomplete, out bool deviceMismatch, out bool unverifiedPid)
     {

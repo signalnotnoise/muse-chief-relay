@@ -426,6 +426,9 @@ public class BridgeInstanceTests
     [Fact]
     public void Mac_os_ofd_owner_is_not_rejected_because_proc_is_absent()
     {
+        // Simulation. Platform is selected here so Darwin does not take the host path,
+        // where OwnerConfirmed is already true before any override. SIGTERM stays
+        // suppressed, so this does not prove a real macOS stop or restart.
         using var dir = new TempDir();
         using var sleep = Process.Start(new ProcessStartInfo("sleep", "120") { UseShellExecute = false })!;
         var cfg = RelayConfig.Load(WriteConfig(dir, "ws://127.0.0.1:9/relay", "room-" + Guid.NewGuid().ToString("N"), "n", null), false, dir.Path, _ => null);
@@ -434,6 +437,7 @@ public class BridgeInstanceTests
         BridgeInstance.TestStateProbe = new InstanceProbe(true, sleep.Id);
         try
         {
+            Posix.SetOwnerPlatform(Posix.OwnerPlatform.Linux);
             Assert.False(Posix.OwnerDescriptorRefersTo(path, sleep.Id));
             Assert.False(Posix.OwnerConfirmed(path, sleep.Id));
 
@@ -442,7 +446,7 @@ public class BridgeInstanceTests
             Assert.Contains("could not be verified", blocked.Detail);
             Assert.False(sleep.HasExited);
 
-            Posix.SetTrustOfdOwner(true);
+            Posix.SetOwnerPlatform(Posix.OwnerPlatform.MacOs);
             BridgeInstance.TestSuppressSignal = true;
             Assert.True(Posix.OwnerConfirmed(path, sleep.Id));
             var allowed = BridgeInstance.Stop(cfg);
@@ -455,7 +459,7 @@ public class BridgeInstanceTests
         {
             BridgeInstance.TestStateProbe = null;
             BridgeInstance.TestSuppressSignal = false;
-            Posix.SetTrustOfdOwner(false);
+            Posix.SetOwnerPlatform(Posix.OwnerPlatform.Host);
             try { sleep.Kill(); } catch (InvalidOperationException) { }
         }
     }
