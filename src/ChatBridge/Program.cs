@@ -289,12 +289,14 @@ internal static class Program
                                                 the replacement. A holder that cannot be verified
                                                 is left running and this process does not start.
               reconcile --id <client_msg_id> requeue|drop
-                                                Operator path for one uncertain v2 send. Does not connect
-                                                and does not turn protocol_v2 on. drop does not send, and a late
+                                                Operator path for one uncertain v2 send (sent, uncertain,
+                                                rate_limited, or echo_observed). Does not connect and does
+                                                not turn protocol_v2 on. drop does not send, and a late
                                                 accepted on that connection cannot complete a different chat.
-                                                requeue may duplicate on the server. A sent row is never
-                                                resent until this command (or a later accepted). Exit 1
-                                                when that id is not an uncertain send.
+                                                requeue may duplicate on the server. A sent row is not
+                                                resent on its own. rate_limited retries are bounded and
+                                                are not acceptance. echo_observed is not acceptance.
+                                                Exit 1 when that id is not a held send.
               help                              This text
 
             The inbox commands are the adapter contract (docs/chatbridge.md). They do not call a model.
@@ -456,17 +458,39 @@ internal static class Program
             return;
         }
 
-        var ids = V2Client.Open(cfg.BaseDir).UncertainIds();
-        if (ids.Count == 0)
+        var client = V2Client.Open(cfg.BaseDir);
+        var ids = client.UncertainIds();
+        var limited = client.RateLimitedIds();
+        var echoed = client.EchoObservedIds();
+        if (ids.Count == 0 && limited.Count == 0 && echoed.Count == 0)
         {
             Console.WriteLine(cfg.ProtocolV2 ? "v2: on, no uncertain send" : "v2: ledger present, no uncertain send");
             return;
         }
 
-        Console.WriteLine(
-            $"v2: {ids.Count} uncertain send(s); not resent automatically. reconcile --id <client_msg_id> drop|requeue (requeue may duplicate)");
-        foreach (var id in ids)
-            Console.WriteLine("v2 uncertain: " + id);
+        if (ids.Count > 0)
+        {
+            Console.WriteLine(
+                $"v2: {ids.Count} uncertain send(s); not resent automatically. reconcile --id <client_msg_id> drop|requeue (requeue may duplicate)");
+            foreach (var id in ids)
+                Console.WriteLine("v2 uncertain: " + id);
+        }
+
+        if (limited.Count > 0)
+        {
+            Console.WriteLine(
+                $"v2: {limited.Count} rate_limited send(s); kept for a bounded retry. not accepted");
+            foreach (var id in limited)
+                Console.WriteLine("v2 rate_limited: " + id);
+        }
+
+        if (echoed.Count > 0)
+        {
+            Console.WriteLine(
+                $"v2: {echoed.Count} echo_observed send(s); not accepted. nick plus text is not a receipt");
+            foreach (var id in echoed)
+                Console.WriteLine("v2 echo_observed: " + id);
+        }
     }
 
     private static int CmdReconcile(CliArgs cli)

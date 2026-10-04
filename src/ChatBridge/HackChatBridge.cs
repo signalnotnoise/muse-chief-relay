@@ -52,7 +52,9 @@ internal sealed class HackChatBridge
         // Mention inboxes sit beside inbox.jsonl. Off unless mentions.enabled, so a current
         // deployment keeps the jsonl bridge and does not grow an agents/ tree.
         _mentions = cfg.MentionRouting.Enabled ? MentionRouter.Open(cfg) : null;
-        _v2 = cfg.ProtocolV2 && _voizle ? V2Client.Open(cfg.BaseDir) : null;
+        _v2 = cfg.ProtocolV2 && _voizle
+            ? V2Client.Open(cfg.BaseDir, V2OutboundOptions.From(cfg), () => _runtime.UtcNow())
+            : null;
         if (_v2 is not null)
             _v2.Consumers = new V2WakeQueue(cfg, _fileLock);
         // Room-chat mirror into HIVEMIND. Off unless HIVEMIND_MESSAGE_MIRROR=1.
@@ -546,6 +548,12 @@ internal sealed class HackChatBridge
 
         if (s.Plan?.Dialect == V2Dialect.Deployed && _v2 is not null)
         {
+            // Replay is dispatched before welcome marks the session confirmed. That echo is not
+            // evidence for a send this socket just made.
+            if (frame.Cmd == "chat"
+                && _v2.ObserveEcho(Json.Str(obj, "nick"), Json.Str(obj, "text"), replay: !s.Confirmed))
+                WakeSender();
+
             var inbound = _v2.OnFrame(obj);
             foreach (var wire in inbound.Send)
                 EnqueueWire(wire);
@@ -672,6 +680,7 @@ internal sealed class HackChatBridge
     private async Task V2OutboxLoopAsync(IRelaySocket ws, SemaphoreSlim sendLock, CancellationToken ct)
     {
         var announcedHold = false;
+        var announcedRate = false;
         while (true)
         {
             ct.ThrowIfCancellationRequested();
@@ -683,15 +692,29 @@ internal sealed class HackChatBridge
             {
                 // The deployed accepted frame has no client id. Leave this socket before
                 // sending the next chat, so a late accepted cannot complete that chat.
-                throw new V2SessionEndException("dropped send fenced this session; reconnect before the next chat");
+                throw new V2SessionEndException("fenced this session; reconnect before the next chat");
             }
 
             if (step.Hold)
             {
-                // §11: resending after a missed `accepted` creates a second message.
-                // Stop the outbound pump until an explicit reconcile (requeue or drop) or a later accepted.
-                if (!announcedHold)
+                if (step.RateLimitWait)
                 {
+                    // The server rejected this row. It stays in the queue and is retried after
+                    // the delay. This is not the uncertain hold and it is not acceptance.
+                    if (!announcedRate)
+                    {
+                        announcedRate = true;
+                        LogEvent("note", new JsonObject
+                        {
+                            ["v2"] = "rate_limited; row kept for a bounded retry",
+                            ["client_msg_id"] = step.ClientMsgId
+                        });
+                    }
+                }
+                else if (!announcedHold)
+                {
+                    // A missed accepted is not resent: §11 says that can store a second message.
+                    // The head stays sent or uncertain until a correlated receipt or reconcile.
                     announcedHold = true;
                     LogEvent("note", new JsonObject
                     {
@@ -700,11 +723,15 @@ internal sealed class HackChatBridge
                     });
                 }
 
-                await _sendWake.WaitAsync(_runtime.OutboxPoll, ct);
+                var wait = _runtime.OutboxPoll;
+                if (step.Wait is { } sooner && sooner > TimeSpan.Zero && sooner < wait)
+                    wait = sooner;
+                await _sendWake.WaitAsync(wait, ct);
                 continue;
             }
 
             announcedHold = false;
+            announcedRate = false;
             if (step.Frame is { } frame)
             {
                 // NextChat fsynced `sent` before returning the frame. A throw here leaves
