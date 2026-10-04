@@ -7,6 +7,24 @@ import sys
 from urllib.parse import urlsplit
 
 
+def _strict_object(pairs):
+    # The bridge binds property names case-insensitively; Python dict lookups
+    # do not. Reject aliases and duplicates at every depth so the safety
+    # validator and the bridge cannot interpret different settings from the
+    # same configuration file (mirrors launch-bridge.sh canonical_object).
+    result = {}
+    for key, value in pairs:
+        if key != key.lower() or key in result:
+            raise ValueError('config keys must be lowercase and unique')
+        result[key] = value
+    return result
+
+
+def load_config(path):
+    """Parse a bridge config file, rejecting duplicate or mixed-case keys."""
+    return json.loads(Path(path).read_text(), object_pairs_hook=_strict_object)
+
+
 def validate(config, bot_dir):
     endpoint = urlsplit(config.get('url', ''))
     if endpoint.scheme not in ('ws', 'wss') or not endpoint.hostname or endpoint.username or endpoint.password or endpoint.query or endpoint.fragment:
@@ -25,6 +43,8 @@ def validate(config, bot_dir):
     trip = config.get('trip', '')
     if trip and not re.fullmatch(r'!?[A-Za-z0-9+/]{6}', trip):
         raise ValueError('Trip must be empty or a public six-character code')
+    if config.get('durable_outbox') and config.get('protocol_v2'):
+        raise ValueError('durable_outbox is for v1; v2 has a separate durable queue')
     mode = config.get('dot_mode', 'receive-only')
     if mode not in ('receive-only', 'participate'):
         raise ValueError('Unknown dot_mode')
@@ -46,7 +66,7 @@ def validate(config, bot_dir):
 def main():
     path = Path(sys.argv[1]).resolve()
     try:
-        validate(json.loads(path.read_text()), path.parent)
+        validate(load_config(path), path.parent)
     except (OSError, ValueError, TypeError, KeyError) as exc:
         print(f'Refusing start: {exc}', file=sys.stderr)
         return 2

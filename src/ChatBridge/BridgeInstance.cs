@@ -186,6 +186,8 @@ internal sealed class InstanceFileLock : IDisposable
 
     private InstanceFileLock(SafeFileHandle handle) => _handle = handle;
 
+    internal bool CloseOnExec => Posix.CloseOnExec(_handle);
+
     /// <summary>Null when another owner already holds the lock. Setup failures throw <see cref="ConfigException"/>.</summary>
     public static InstanceFileLock? TryAcquire(string path, InstanceLockKind kind)
     {
@@ -220,15 +222,20 @@ internal sealed class InstanceFileLock : IDisposable
         }
 
         var handle = new SafeFileHandle((IntPtr)fd, ownsHandle: true);
-        Posix.EnsureCloexec(handle);
+        try { Posix.EnsureCloexec(handle); }
+        catch { handle.Dispose(); throw; }
         if (kind == InstanceLockKind.Identity)
             Posix.MakeWorldLockable(handle);
 
-        if (!Posix.TryLockExclusive(handle))
+        try
         {
-            handle.Dispose();
-            return null;
+            if (!Posix.TryLockExclusive(handle))
+            {
+                handle.Dispose();
+                return null;
+            }
         }
+        catch { handle.Dispose(); throw; }
 
         if (kind != InstanceLockKind.Probe)
             Posix.WritePidHint(handle);
@@ -257,12 +264,12 @@ internal enum HolderState
 
 internal readonly record struct HolderQuery(HolderState State, int? Pid);
 
-/// <summary>Linux flock plus <c>/proc/locks</c>. Owner checks do not trust a pid file.</summary>
+/// <summary>Linux flock/proc locks or macOS confined OFD locks. Owner checks do not trust a pid file.</summary>
 internal static class Posix
 {
-    internal const int ELoop = 40;
+    internal static int ELoop => OperatingSystem.IsMacOS() ? 62 : 40;
     internal const int ENoEnt = 2;
-    private const int EAgain = 11;
+    private static int EAgain => OperatingSystem.IsMacOS() ? 35 : 11;
     private const int EIntr = 4;
     private const int ESrch = 3;
     private const int EAcces = 13;
@@ -288,11 +295,20 @@ internal static class Posix
     private const ushort SIfmt = 0xF000;
     private const ushort SIflnk = 0xA000;
 
+    internal static void SyncDirectory(string path)
+    {
+        // fsync the rename's containing directory so power loss cannot lose a committed queue state.
+        var fd = sys_open(path, OperatingSystem.IsMacOS() ? 0x01000000 : 0x80000, 0);
+        if (fd < 0) throw new IOException("queue directory cannot be opened for sync");
+        using var handle = new SafeFileHandle((IntPtr)fd, ownsHandle: true);
+        if (sys_fsync(handle) != 0) throw new IOException("queue directory cannot be synced");
+    }
+
     public static int Open(string path, bool create)
     {
-        var flags = ORdwr | ONoFollow | OCloexec;
+        var flags = OperatingSystem.IsMacOS() ? ORdwr | 0x100 | 0x01000000 : ORdwr | ONoFollow | OCloexec;
         if (create)
-            flags |= OCreat;
+            flags |= OperatingSystem.IsMacOS() ? 0x200 : OCreat;
         return sys_open(path, flags, create ? 0x1A4 : 0); // 0644; identity locks are chmod'd after
     }
 
@@ -300,7 +316,10 @@ internal static class Posix
     {
         while (true)
         {
-            if (sys_flock(handle, LockEx | LockNb) == 0)
+            var record = new DarwinLock { Type = 3 }; // F_WRLCK, entire file
+            if ((OperatingSystem.IsMacOS()
+                ? sys_fcntl_lock(handle, 90, ref record) // F_OFD_SETLK
+                : sys_flock(handle, LockEx | LockNb)) == 0)
                 return true;
             var err = Errno();
             if (err == EIntr)
@@ -314,14 +333,29 @@ internal static class Posix
     public static void Unlock(SafeFileHandle handle)
     {
         if (!handle.IsInvalid && !handle.IsClosed)
-            sys_flock(handle, LockUn);
+        {
+            if (OperatingSystem.IsMacOS())
+            {
+                var record = new DarwinLock { Type = 2 }; // F_UNLCK
+                sys_fcntl_lock(handle, 90, ref record);
+            }
+            else sys_flock(handle, LockUn);
+        }
     }
+
+    internal static bool CloseOnExec(SafeFileHandle handle) =>
+        sys_fcntl_get(handle, FGetFd) is var flags && flags >= 0 && (flags & FdCloexec) != 0;
 
     public static void EnsureCloexec(SafeFileHandle handle)
     {
         var flags = sys_fcntl_get(handle, FGetFd);
-        if (flags >= 0 && (flags & FdCloexec) == 0)
-            sys_fcntl_set(handle, FSetFd, flags | FdCloexec);
+        var required = OperatingSystem.IsMacOS() ? 3 : FdCloexec; // CLOEXEC + CLOFORK on Darwin
+        if (flags < 0 || sys_fcntl_set(handle, FSetFd, flags | required) != 0)
+            throw new ConfigException("instance lock cannot be marked close-on-exec");
+        // A confined OFD cannot be transferred to another process. Darwin can therefore
+        // report its kernel owner PID through F_OFD_GETLK, without trusting the pid hint.
+        if (OperatingSystem.IsMacOS() && sys_fcntl_set(handle, 95, 1) != 0) // F_SETCONFINED
+            throw new ConfigException("instance lock cannot be confined to this macOS process");
     }
 
     public static void MakeWorldLockable(SafeFileHandle handle) => sys_fchmod(handle, 0x1B6); // 0666
@@ -345,6 +379,8 @@ internal static class Posix
 
     public static bool IsSymlink(string path)
     {
+        if (OperatingSystem.IsMacOS())
+            return new FileInfo(path).LinkTarget is not null;
         if (!TryStat(path, out var mode, out _, out _, out _))
             return false;
         return (mode & SIfmt) == SIflnk;
@@ -352,6 +388,18 @@ internal static class Posix
 
     public static HolderQuery QueryFlockHolder(string path)
     {
+        if (OperatingSystem.IsMacOS())
+        {
+            var fd = Open(path, create: false);
+            if (fd < 0) return new HolderQuery(HolderState.Unknown, null);
+            using var handle = new SafeFileHandle((IntPtr)fd, ownsHandle: true);
+            var record = new DarwinLock { Type = 3 };
+            if (sys_fcntl_lock(handle, 92, ref record) != 0) // F_OFD_GETLK
+                return new HolderQuery(HolderState.Unknown, null);
+            return record.Type == 2
+                ? new HolderQuery(HolderState.NotHeld, null)
+                : new HolderQuery(HolderState.Held, record.Pid > 0 ? record.Pid : null);
+        }
         if (!TryStat(path, out _, out var major, out var minor, out var ino))
             return new HolderQuery(HolderState.Unknown, null);
 
@@ -393,14 +441,27 @@ internal static class Posix
         return Errno() == ESrch;
     }
 
-    public static string ErrnoName(int err) => err switch
+    public static string ErrnoName(int err) =>
+        err == EAgain ? "busy" : err == ENoEnt ? "not found" :
+        err == EAcces ? "access denied" : err == ELoop ? "symlink" : "errno " + err;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct DarwinLock
     {
-        EAgain => "busy",
-        ENoEnt => "not found",
-        EAcces => "access denied",
-        ELoop => "symlink",
-        _ => "errno " + err
-    };
+        public long Start;
+        public long Length;
+        public int Pid;
+        public short Type;
+        public short Whence;
+    }
+
+    [DllImport("libc", EntryPoint = "fcntl", SetLastError = true)]
+    private static extern int intel_fcntl_lock(SafeFileHandle fd, int cmd, ref DarwinLock record);
+    [DllImport("libc", EntryPoint = "fcntl", SetLastError = true)]
+    private static extern int darwin_fcntl_lock(SafeFileHandle fd, int cmd, long a, long b, long c, long d, long e, long f, ref DarwinLock record);
+    private static int sys_fcntl_lock(SafeFileHandle fd, int cmd, ref DarwinLock record) =>
+        RuntimeInformation.ProcessArchitecture == Architecture.Arm64
+            ? darwin_fcntl_lock(fd, cmd, 0, 0, 0, 0, 0, 0, ref record) : intel_fcntl_lock(fd, cmd, ref record);
 
     private static bool TryStat(string path, out ushort mode, out uint major, out uint minor, out ulong ino)
     {
@@ -430,7 +491,15 @@ internal static class Posix
     private static int Errno() => Marshal.GetLastWin32Error();
 
     [DllImport("libc", EntryPoint = "open", SetLastError = true)]
-    private static extern int sys_open(string path, int flags, int mode);
+    private static extern int linux_open(string path, int flags, int mode);
+
+    // Darwin arm64 places variadic arguments on the stack after the eight argument registers.
+    // Explicit padding gives open/fcntl the ABI they expect without a native helper library.
+    [DllImport("libc", EntryPoint = "open", SetLastError = true)]
+    private static extern int darwin_open(string path, int flags, long a, long b, long c, long d, long e, long f, int mode);
+    private static int sys_open(string path, int flags, int mode) =>
+        OperatingSystem.IsMacOS() && RuntimeInformation.ProcessArchitecture == Architecture.Arm64
+            ? darwin_open(path, flags, 0, 0, 0, 0, 0, 0, mode) : linux_open(path, flags, mode);
 
     [DllImport("libc", EntryPoint = "flock", SetLastError = true)]
     private static extern int sys_flock(SafeFileHandle fd, int operation);
@@ -439,7 +508,12 @@ internal static class Posix
     private static extern int sys_fcntl_get(SafeFileHandle fd, int cmd);
 
     [DllImport("libc", EntryPoint = "fcntl", SetLastError = true)]
-    private static extern int sys_fcntl_set(SafeFileHandle fd, int cmd, int arg);
+    private static extern int linux_fcntl_set(SafeFileHandle fd, int cmd, int arg);
+    [DllImport("libc", EntryPoint = "fcntl", SetLastError = true)]
+    private static extern int darwin_fcntl_set(SafeFileHandle fd, int cmd, long a, long b, long c, long d, long e, long f, int arg);
+    private static int sys_fcntl_set(SafeFileHandle fd, int cmd, int arg) =>
+        OperatingSystem.IsMacOS() && RuntimeInformation.ProcessArchitecture == Architecture.Arm64
+            ? darwin_fcntl_set(fd, cmd, 0, 0, 0, 0, 0, 0, arg) : linux_fcntl_set(fd, cmd, arg);
 
     [DllImport("libc", EntryPoint = "fchmod", SetLastError = true)]
     private static extern int sys_fchmod(SafeFileHandle fd, uint mode);

@@ -26,6 +26,7 @@ internal static class Program
             var cli = CliArgs.Parse(args);
             return cli.Command switch
             {
+                "outbox" => CmdOutbox(cli),
                 "say" => await CmdSayAsync(cli),
                 "status" => CmdStatus(cli),
                 "watch" => await CmdWatchAsync(cli),
@@ -91,6 +92,24 @@ internal static class Program
                 return 0;
             }
         }
+    }
+
+    private static int CmdOutbox(CliArgs cli)
+    {
+        var cfg = RelayConfig.Load(cli.ConfigPath, allowExampleFallback: false);
+        if (!cfg.DurableOutbox) throw new ArgumentException("enable durable_outbox in this config first");
+        if (cli.Rest.SequenceEqual(new[] { "status" }))
+        {
+            Console.WriteLine(JsonSerializer.Serialize(new DurableOutbox(cfg.BaseDir, recover: false).Status()));
+            return 0;
+        }
+        if (cli.Rest.Count != 3 || cli.Rest[0] != "resolve")
+            throw new ArgumentException("outbox: use status or resolve <id> requeue|drop (stop the bridge first)");
+        using var owner = InstanceFileLock.TryAcquire(BridgeInstance.StateLockPath(cfg.BaseDir), InstanceLockKind.Probe);
+        if (owner is null) throw new ArgumentException("stop the bridge before resolving outbox sends");
+        new DurableOutbox(cfg.BaseDir, recover: false).Resolve(cli.Rest[1], cli.Rest[2]);
+        Console.WriteLine("outbox resolution saved");
+        return 0;
     }
 
     private static int CmdStop(CliArgs cli)
@@ -257,6 +276,10 @@ internal static class Program
               inbox pending --agent <id>       Print every unacked room event, including those in backoff.
               inbox ack --agent <id> <event>   Acknowledge one event. Idempotent. Exit 1 if the id is unknown.
               inbox fail --agent <id> <event>  Record a soft adapter failure and its backoff. Exit 1 if unknown.
+              outbox status [--config <path>]  Show durable reply IDs/states without message bodies.
+              outbox resolve <id> requeue|drop [--config <path>]
+                                              Resolve an uncertain send while the bridge is stopped.
+
               stop [--config <path>]           SIGTERM the process that holds this state directory's
                                                 instance lock, including while it is connected.
                                                 Exit 0 after that owner releases the lock. Exit 1

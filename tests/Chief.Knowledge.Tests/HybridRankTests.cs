@@ -96,7 +96,10 @@ public class HybridRankTests
             Vec0Path = so,
             Today = new DateOnly(2026, 9, 27)
         });
-        Assert.Equal("vec0", backend);
+        var expectedBackend = OperatingSystem.IsLinux() &&
+            System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture == System.Runtime.InteropServices.Architecture.X64
+            ? "vec0" : "pure";
+        Assert.Equal(expectedBackend, backend);
         var vec = KnowledgeIndex.Search(index, "alpha", new SearchRequest(), embedder, new IndexOptions
         {
             Backend = VectorBackendPreference.Auto,
@@ -104,7 +107,7 @@ public class HybridRankTests
             Today = new DateOnly(2026, 9, 27)
         });
         var pure = KnowledgeIndex.Search(index, "alpha", new SearchRequest(), embedder, Fixtures.Pure());
-        Assert.Equal("vec0", vec.Backend);
+        Assert.Equal(expectedBackend, vec.Backend);
         Assert.Equal("pure", pure.Backend);
         Assert.Equal(pure.Hits.Select(h => h.Id), vec.Hits.Select(h => h.Id));
         Assert.Equal("c-both", vec.Hits[0].Id);
