@@ -61,8 +61,14 @@ test("muse source does not log or touch browser storage", () => {
     if (!/\.(js|vue|css)$/.test(name)) continue;
     const text = fs.readFileSync(path.join(srcDir, name), "utf8");
     assert.doesNotMatch(text, /console\./, name);
+    if (name === "demoSession.js") continue;
     assert.doesNotMatch(text, /localStorage|sessionStorage|document\.cookie|history\.pushState|location\.(href|search|hash)\s*=/, name);
   }
+  const demo = fs.readFileSync(path.join(srcDir, "demoSession.js"), "utf8");
+  assert.match(demo, /muse\.demo\.relayUrl/);
+  assert.match(demo, /muse\.demo\.room/);
+  assert.doesNotMatch(demo, /setItem\([^)]*(?:trip|password|token|pass)/);
+  assert.doesNotMatch(demo, /document\.cookie|history\.pushState/);
 });
 
 function readPublished() {
@@ -88,8 +94,11 @@ test("the Pages build is the Vite output, not a second copy of the old client", 
   assert.match(text, /with a public trip/);
   assert.match(text, /voizle-text-relay/);
   assert.match(text, /ws:\/\/127\.0\.0\.1:8787\/relay/);
+  assert.match(text, /Public demo relay/);
+  assert.match(text, /relay-url/);
   assert.doesNotMatch(text, /hack\.chat/);
-  assert.doesNotMatch(text, /wss:\/\/ws\.voizel\.com/);
+  assert.doesNotMatch(text, /VITE_RELAY_URL\s*[:=]\s*[`'"][^`'"]+/);
+  assert.doesNotMatch(text, /VITE_WATCH_CHANNEL\s*[:=]\s*[`'"][^`'"]+/);
   assert.match(text, /\.overflow-y-auto/);
   assert.match(text, /\.min-h-0/);
   assert.match(text, /Join a channel to see its room board/);
@@ -103,7 +112,9 @@ test("the Pages build is the Vite output, not a second copy of the old client", 
   assert.equal(fs.existsSync(path.join(published, "app.js")), false);
   assert.equal(fs.existsSync(path.join(published, "board.js")), false);
   assert.equal(fs.existsSync(path.join(published, "reconnect.js")), false);
-  assert.doesNotMatch(text, /localStorage|sessionStorage/);
+  assert.match(text, /muse\.demo\.relayUrl/);
+  assert.match(text, /muse\.demo\.room/);
+  assert.doesNotMatch(text, /sessionStorage/);
 });
 
 test("narrow sidebar never clips Disconnect and keeps the user list usable", () => {

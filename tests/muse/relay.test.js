@@ -53,9 +53,14 @@ test("join sends a public trip and never a nick#password", async () => {
   assert.equal(isHello({ type: "welcome" }), false);
 });
 
-test("public relay answers hello and does not require a join", async () => {
-  const url = "wss://ws.voizel.com/relay";
-  const health = await fetch("https://ws.voizel.com/health");
+test("public relay answers hello when a demo URL is provided", async (t) => {
+  const url = String(process.env.MUSE_PUBLIC_RELAY_URL || "").trim();
+  if (!url) {
+    t.skip("MUSE_PUBLIC_RELAY_URL is unset; the public demo does not bake a relay");
+    return;
+  }
+  const healthUrl = url.replace(/^wss:\/\//, "https://").replace(/^ws:\/\//, "http://").replace(/\/relay\/?$/, "/health");
+  const health = await fetch(healthUrl);
   assert.equal(health.status, 200);
   const body = await health.json();
   assert.equal(body.ok, true);

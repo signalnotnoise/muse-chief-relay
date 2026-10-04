@@ -54,7 +54,7 @@ test("watch route wiring", async () => {
   assert.ok(fs.existsSync(path.join(srcDir, "watchFormat.js")));
 });
 
-test("watch view joins the relay channel from build config as a read-only spectator", async () => {
+test("watch view joins a visitor-supplied room as a read-only spectator", async () => {
   const { resolveWatchChannel } = await import("../../web/muse/src/watchChannel.js");
   assert.equal(resolveWatchChannel(undefined), "");
   assert.equal(resolveWatchChannel(null), "");
@@ -63,19 +63,21 @@ test("watch view joins the relay channel from build config as a read-only specta
   assert.equal(resolveWatchChannel("  room-name  "), "room-name");
 
   const w = fs.readFileSync(path.join(srcDir, "useWatch.js"), "utf8");
-  assert.match(w, /resolveWatchChannel/);
-  assert.match(w, /VITE_WATCH_CHANNEL/);
-  assert.match(w, /VITE_RELAY_URL/);
+  assert.match(w, /applyBrowserDemoConfig/);
+  assert.match(w, /connectDemo/);
   assert.match(w, /watch channel not configured/);
+  assert.match(w, /relay URL not configured/);
+  assert.doesNotMatch(w, /VITE_WATCH_CHANNEL/);
+  assert.doesNotMatch(w, /VITE_RELAY_URL/);
   const joinAt = w.indexOf("sock.send(JSON.stringify(joinFrame(");
   const joinCall = w.slice(joinAt, w.indexOf(");", joinAt));
-  assert.match(joinCall, /joinFrame\(\{ room: CHANNEL, nick \}\)/);
+  assert.match(joinCall, /joinFrame\(\{ room: channel\.value, nick \}\)/);
   assert.doesNotMatch(joinCall, /trip|password/);
   assert.match(w, /isHello/);
   assert.doesNotMatch(w, /VITE_RELAY_CHANNEL/);
   assert.doesNotMatch(w, /hack\.chat/);
   assert.doesNotMatch(w, /cmd:\s*"join"/);
-  assert.doesNotMatch(w, /location\.search/);
+  assert.doesNotMatch(w, /localStorage|sessionStorage/);
   assert.match(w, /spectatorNick/);
   assert.doesNotMatch(w, /console\./);
   const openBody = w.slice(w.indexOf("sock.onopen"), w.indexOf("sock.onmessage"));
@@ -149,10 +151,11 @@ test("the Pages build includes the watch-live view", async () => {
   assert.match(text, /multi-agent relay/);
   assert.match(text, /#\/watch/);
   assert.match(text, /watch channel not configured/);
-  assert.match(text, /VITE_WATCH_CHANNEL/);
+  assert.match(text, /Public demo relay/);
+  assert.doesNotMatch(text, /VITE_WATCH_CHANNEL\s*[:=]\s*[`'"][^`'"]+/);
+  assert.doesNotMatch(text, /VITE_RELAY_URL\s*[:=]\s*[`'"][^`'"]+/);
   assert.match(text, /voizle-text-relay/);
-  assert.match(text, /ws:\/\/127\.0\.0\.1:8787\/relay/);
+  assert.match(text, /wss:\/\/relay\.example\.com\/relay/);
   assert.doesNotMatch(text, /hack\.chat/);
-  assert.doesNotMatch(text, /wss:\/\/ws\.voizel\.com/);
   assert.doesNotMatch(text, /startsWith\("#\/watch"\)|startsWith\('#\/watch'\)/);
 });

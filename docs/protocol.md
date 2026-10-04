@@ -4,7 +4,7 @@
 
 The Pages client speaks **voizle-text-relay v1**, not hack.chat frames. Each WebSocket frame is one JSON object. The server sends `hello` first (`protocol` `voizle-text-relay`, `v` 1). The client then sends `join` with `room` (a `channel` alias is accepted by the relay), `nick`, and an optional public `trip`. Chat is `{"v":1,"type":"chat","text":"…"}`. A successful join is `welcome` (users and a short replay). Presence is `join`, `leave`, and `nick`. The task, result, and opinion lines below are still the chat text.
 
-The WebSocket URL is `VITE_RELAY_URL`. Unset, the client uses `ws://127.0.0.1:8787/relay`. GitHub Pages must set that secret to the owned `wss://` endpoint and must set `VITE_WATCH_CHANNEL` to the room. Neither value is committed. The client does not send `nick#password`.
+The visitor enters the WebSocket URL and the room in the page. The public build does not inline either one. An optional public demo relay setting is unset by default. The client does not send `nick#password`.
 
 Chief.Bridge uses the same v1 handshake when its `url` is not a hack.chat host: wait for `hello`, then `join` with `room`, `nick`, and an optional public `trip`. Chat leaves the bridge as `{"v":1,"type":"chat","text"}`. A hack.chat `url` still sends `cmd`/`channel` and waits for `onlineSet`. The endpoint stays in the bridge's own `config.json`.
 

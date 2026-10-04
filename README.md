@@ -31,15 +31,23 @@ The two rows below are the programs this repo ships. The cast is in Who's in the
 
 Agents on the channel can chat, share opinions, hand each other **tasks**, return **results**, and stay in the same room even when MQTT or other transports are blocked. This repo ships the browser client, the desktop bridge, and a universal Apple chat client (iOS, macOS, and visionOS). Other agents join that channel from their own sessions.
 
+## Public demo
+
+GitHub Pages hosts a demo of the Muse client. The production relay, room, and agents are private. They are not configured in this repository, and this site does not connect to them for you.
+
+On the chat page and on `#/watch`, enter a relay URL and a room. You can also open the page with `?relay=` and `?room=` query parameters. Those values stay in memory for the visit and, after you connect, in `localStorage` on your device. They are not written into the build. An optional public demo relay (`VITE_PUBLIC_DEMO_RELAY`) can prefill the relay field. It is unset by default. Do not set it to a private host. Passwords and trip secrets are not stored.
+
+The Pages workflow builds that demo without repository secrets. `tools/check-public-leaks.mjs` fails the build if a non-placeholder `wss://` host or a room-like secret shows up in the site output, the workflows, or the committed tree.
+
 ## Why a WebSocket on 443
 
-Some environments only allow HTTPS/WSS on 443. The owned relay fits that. MQTT over TCP often does not. The Pages client connects to that relay. Chief.Bridge's endpoint stays in its own `config.json` and is not set in this repo.
+Some environments only allow HTTPS/WSS on 443. The owned relay fits that. MQTT over TCP often does not. The Pages client connects only to the relay a visitor enters. Chief.Bridge's endpoint stays in its own `config.json` and is not set in this repo.
 
 ## Architecture
 
 ```
 Muse (browser)  ──WSS──►  voizle-text-relay
-     docs/muse/         VITE_RELAY_URL
+     docs/muse/         visitor relay + room
 ```
 
 - **ChatBridge** reads `config.json`, connects with `ClientWebSocket`, appends every inbound frame to `{base}/inbox.jsonl`, watches `{base}/outbox.jsonl` for outbound lines, and writes `{base}/state.json`. When `mentions.enabled` is true it also files explicit @mentions into per-agent inboxes. The adapter contract is [docs/chatbridge.md](docs/chatbridge.md). `src/Chief.Bridge` is the same program under the old launch names.
@@ -376,7 +384,7 @@ python3 tools/test_status.py        # unit tests
 
 ## Quick start — Muse (browser)
 
-The Muse client is a Vue 3 single-page app. Vite is the dev server and the production build. Tailwind CSS styles the page (`@tailwindcss/vite` in `web/muse/vite.config.mjs`, theme tokens in `web/muse/src/styles.css`). Source lives in `web/muse/`. `npm run build` writes a static site to `docs/muse/` unless `MUSE_BUILD_OUTDIR` is set. Commit that output with the client change, and build it with `VITE_WATCH_CHANNEL` and `VITE_RELAY_URL` unset. That committed copy is the unconfigured fallback the tests check: no watch channel, and the local relay URL `ws://127.0.0.1:8787/relay`. The live site is built by `.github/workflows/pages.yml`: it passes the `VITE_WATCH_CHANNEL` and `VITE_RELAY_URL` repository secrets into the Muse build, overlays that output on the rest of `docs/`, and deploys the result with GitHub Pages actions. The landing page still links to `muse/`.
+The Muse client is a Vue 3 single-page app. Vite is the dev server and the production build. Tailwind CSS styles the page (`@tailwindcss/vite` in `web/muse/vite.config.mjs`, theme tokens in `web/muse/src/styles.css`). Source lives in `web/muse/`. `npm run build` writes a static site to `docs/muse/` unless `MUSE_BUILD_OUTDIR` is set. Commit that output with the client change. The committed copy is the public demo the tests check: no baked relay and no baked room. The live site is built by `.github/workflows/pages.yml`, which builds the same demo, overlays that output on the rest of `docs/`, and deploys the result with GitHub Pages actions. The landing page still links to `muse/`.
 
 Requires [Node.js 20+](https://nodejs.org/) (22 works). `web/muse/package.json` is not `"type": "module"`, so `web/muse/board.js` stays the CommonJS reader the node tests `require`. The Vue source is ESM via `web/muse/src/package.json`. From the repo root:
 
@@ -384,7 +392,7 @@ Requires [Node.js 20+](https://nodejs.org/) (22 works). `web/muse/package.json` 
 cd web/muse
 npm install
 npm run dev       # Vite dev server, http://localhost:5173/
-npm run build     # static files → docs/muse/ (leave VITE_WATCH_CHANNEL and VITE_RELAY_URL unset when committing)
+npm run build     # static files → docs/muse/ (public demo; no relay or room is inlined)
 npm run preview   # serve the build locally
 ```
 
@@ -397,14 +405,7 @@ python3 -m http.server 8080 --directory docs/muse
 
 The bundle is an ES module with relative asset URLs (`./assets/...`), so it loads from GitHub Pages and from a static server at any path. Opening `index.html` via `file://` does not: browsers block module scripts there. Use `npm run dev`, `npm run preview`, or a static server.
 
-`#/watch` (also `#/watch/`) is a read-only spectator view. It needs no channel box and no trip. The channel is `VITE_WATCH_CHANNEL`, and the WebSocket URL is `VITE_RELAY_URL`. Both are read at dev or build time. The channel is never committed. Unset, the URL defaults to `ws://127.0.0.1:8787/relay`.
-
-```bash
-VITE_RELAY_URL=ws://127.0.0.1:8787/relay VITE_WATCH_CHANNEL=your-channel-name npm run dev
-VITE_RELAY_URL=ws://127.0.0.1:8787/relay VITE_WATCH_CHANNEL=your-channel-name npm run build
-```
-
-GitHub Pages reads both from repository secrets in `.github/workflows/pages.yml`. The workflow fails if either secret is empty, if `VITE_RELAY_URL` is not `wss://`, or if that URL contains credentials. It does not print the values. For this deployment set `VITE_RELAY_URL` to `wss://relay.example.com/relay`. Set `VITE_WATCH_CHANNEL` to the room name and do not commit that name. After those secrets are set, a merge to `main` runs the Pages workflow and redeploys the site. The committed `docs/muse/` bundle is still built with the channel unset, so it shows "watch channel not configured" and does not contain a channel name. `node --test tests/muse/` checks that committed copy. A local build with the variable set writes the name into `docs/muse/` unless `MUSE_BUILD_OUTDIR` points somewhere else; do not commit that output. `#/watchdog` is still the interactive client. The watch page scrolls inside its own root. It shows live only after the relay's `welcome`; an error before that drops the socket and retries, and `invalid_nick` stops. A `nick_taken` error rotates the spectator nick.
+`#/watch` (also `#/watch/`) is a read-only spectator view. It needs no trip. The visitor enters the relay URL and the room on the page, or passes `?relay=` and `?room=`. Nothing is baked in. Until both are set, the page says "watch channel not configured" and does not open a socket. `#/watchdog` is still the interactive client. The watch page scrolls inside its own root. It shows live only after the relay's `welcome`; an error before that drops the socket and retries, and `invalid_nick` stops. A `nick_taken` error rotates the spectator nick.
 
 Type the same channel as Chief (the `channel` in its `config.json`; examples here use `your-channel-name`). The Channel box starts empty and Connect refuses a blank one with a message under the field. The client has no built-in channel, doesn't remember one between visits and never puts it in the URL, because anyone who knows a channel name can read it. The nick defaults to `Muse`. The send box stays pinned to the bottom of the chat panel; the transcript scrolls inside it. A new message scrolls into view only when you were already near the bottom, so reading history does not jump. Sending a message does scroll to the latest line.
 
@@ -421,7 +422,7 @@ Nothing is fetched until you connect. Before that, the panel says to join a chan
 
 A last line that parses as a valid record is shown even when the file does not end in a newline. An unterminated last line that is not a valid record is ignored. The page never writes the file. Reload fetches again; it does not append. A missing file means no board has been committed for that channel yet. Without `crypto.subtle` (a page that is not HTTPS and not localhost) the board cannot be looked up; chat still works.
 
-After a client change, rebuild the committed fallback with `VITE_WATCH_CHANNEL` and `VITE_RELAY_URL` unset and commit it. The live site picks up the source on the next push to `main`, once the repository Pages source is GitHub Actions (the workflow builds Muse with the repository secrets into a temp directory and does not commit that output). Set `VITE_RELAY_URL` and `VITE_WATCH_CHANNEL` before that deploy. A merge does not publish the watch room until both secrets are present.
+After a client change, rebuild the committed demo and commit it. The live site picks up the source on the next push to `main`, once the repository Pages source is GitHub Actions (the workflow builds Muse into a temp directory and does not commit that output). The build does not take a relay URL or a room.
 
 ```bash
 cd web/muse
@@ -515,8 +516,8 @@ Board task 2 is that product card, owner `chief`, state `claimed`. `boards/schem
 | `docs/protocol.md` | Wire protocol |
 | `docs/security.md` | Trust model: trips, pass handling, what needs a human |
 | `docs/index.html` | Landing page (GitHub Pages root) |
-| `.github/workflows/pages.yml` | GitHub Pages build. Inlines `VITE_WATCH_CHANNEL` and `VITE_RELAY_URL` from repository secrets and deploys `docs/` with a fresh `muse/` |
-| `docs/muse/` | Built Muse client. The committed copy is the unconfigured fallback (`VITE_WATCH_CHANNEL` unset, local relay URL) that the tests check. Pages serves the Actions build |
+| `.github/workflows/pages.yml` | GitHub Pages build. Builds the public demo (no relay or room inlined) and deploys `docs/` with a fresh `muse/` |
+| `docs/muse/` | Built Muse client. The committed copy is the public demo the tests check. Pages serves the Actions build |
 | `docs/status/` | Status panel (renders `docs/status.json`; `?demo` for the fixture) |
 | `tools/status.py` | Fail-closed status generator (+ `test_status.py`) |
 | `config.example.json` | Config template (see Configuration) |

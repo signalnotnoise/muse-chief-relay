@@ -1,5 +1,6 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { describePublicDemoRelay } from "./demoSession.js";
 import SiteHeader from "./SiteHeader.vue";
 import { useWatch } from "./useWatch.js";
 import { formatTrip, nickStyle } from "./watchFormat.js";
@@ -11,6 +12,8 @@ const {
   statusText,
   live,
   channel,
+  relayUrl,
+  connectDemo,
   messages,
   users,
   unseen,
@@ -18,6 +21,26 @@ const {
   onTranscriptScroll,
   jumpToEnd,
 } = useWatch();
+
+const publicDemoRelayText = describePublicDemoRelay(import.meta.env.VITE_PUBLIC_DEMO_RELAY);
+const showSetup = ref(!channel.value || !relayUrl.value);
+const relayDraft = ref(relayUrl.value);
+const roomDraft = ref(channel.value);
+const relayError = ref("");
+const roomError = ref("");
+const field =
+  "rounded-lg border border-line bg-panel-2 px-2.5 py-[0.55rem] text-ink outline-none focus:border-focus focus:shadow-[0_0_0_3px_var(--color-focus-ring)]";
+
+function onDemoSubmit() {
+  const result = connectDemo(relayDraft.value, roomDraft.value);
+  relayError.value = result.relayError;
+  roomError.value = result.roomError;
+  if (result.ok) {
+    relayDraft.value = relayUrl.value;
+    roomDraft.value = channel.value;
+    showSetup.value = false;
+  }
+}
 
 const roomCount = computed(() => users.value.length);
 const msgCount = computed(() => messages.value.filter((m) => m.kind !== "sys").length);
@@ -69,12 +92,52 @@ function protoBody(p) {
     <!-- header: shared site nav, with the watch page's LIVE identity -->
     <SiteHeader section="watch" :status-text="statusText" :status-kind="live ? 'on' : ''" live-dot />
 
-    <div v-if="!channel" class="border-b border-line/70 bg-panel-soft">
-      <p class="mx-auto max-w-6xl px-5 py-2.5 text-[0.82rem] text-muted">
-        Watch channel not configured. Set
-        <code class="font-mono text-[0.78rem] text-ink">VITE_WATCH_CHANNEL</code>
-        when building (a GitHub Actions secret or variable for Pages).
-      </p>
+    <div v-if="showSetup || !channel" class="border-b border-line/70 bg-panel-soft">
+      <form class="mx-auto grid max-w-6xl gap-3 px-5 py-4 md:grid-cols-2" @submit.prevent="onDemoSubmit">
+        <p id="public-demo-relay" class="md:col-span-2 text-[0.82rem] leading-snug text-muted">
+          Public demo relay: <span class="font-mono text-ink">{{ publicDemoRelayText }}</span>.
+          Enter a relay URL and a room to watch. This page does not ship either one.
+          They stay in this browser.
+        </p>
+        <label class="grid gap-1.5 text-[0.85rem] text-muted">
+          Relay URL
+          <input
+            id="demo-relay"
+            :class="field"
+            type="text"
+            :value="relayDraft"
+            placeholder="wss://relay.example.com/relay"
+            autocomplete="off"
+            autocapitalize="off"
+            autocorrect="off"
+            spellcheck="false"
+            aria-describedby="demo-relay-error public-demo-relay"
+            @input="relayDraft = $event.target.value"
+          />
+        </label>
+        <label class="grid gap-1.5 text-[0.85rem] text-muted">
+          Room
+          <input
+            id="demo-room"
+            :class="field"
+            type="text"
+            :value="roomDraft"
+            placeholder="your-channel-name"
+            autocomplete="off"
+            spellcheck="false"
+            aria-describedby="demo-room-error"
+            @input="roomDraft = $event.target.value"
+          />
+        </label>
+        <p id="demo-relay-error" class="text-[0.8rem] text-danger" :class="{ hidden: !relayError }" role="alert">{{ relayError }}</p>
+        <p id="demo-room-error" class="text-[0.8rem] text-danger" :class="{ hidden: !roomError }" role="alert">{{ roomError }}</p>
+        <div class="md:col-span-2">
+          <button
+            type="submit"
+            class="cursor-pointer rounded-lg border border-btn-border bg-gradient-to-b from-btn-top to-btn-bottom px-4 py-2 text-[0.9rem] font-semibold text-ink hover:brightness-110"
+          >Watch this room</button>
+        </div>
+      </form>
     </div>
 
     <!-- hero -->
@@ -117,7 +180,13 @@ function protoBody(p) {
         <div class="flex shrink-0 items-center justify-between border-b border-line px-5 py-3">
           <h2 class="text-[0.82rem] font-semibold tracking-[0.14em] text-muted uppercase">Live feed</h2>
           <span v-if="channel" class="font-mono text-[0.72rem] text-dim">#{{ channel }}</span>
-          <span v-else class="font-mono text-[0.72rem] text-dim">watch channel not configured</span>
+          <button
+            v-if="channel && !showSetup"
+            type="button"
+            class="font-mono text-[0.72rem] text-accent hover:underline"
+            @click="showSetup = true"
+          >Change relay</button>
+          <span v-if="!channel" class="font-mono text-[0.72rem] text-dim">watch channel not configured</span>
         </div>
         <div
           ref="transcriptEl"
@@ -229,7 +298,7 @@ function protoBody(p) {
 
     <footer class="relative border-t border-line/70">
       <div class="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-2 px-5 py-5 text-[0.78rem] text-dim">
-        <span>Streaming live from the owned relay — no account needed to watch.</span>
+        <span>Public demo. You choose the relay and the room — no account needed to watch.</span>
         <span class="font-mono">muse-chief-relay</span>
       </div>
     </footer>

@@ -1,18 +1,12 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
+import { deriveAttentionItems } from "./attentionQueue.js";
+import { createComposerHistory } from "./composerHistory.js";
+import { applyBrowserDemoConfig, describePublicDemoRelay, resolveVisitorRelay, saveBrowserDemoConfig } from "./demoSession.js";
 import { onSocketClose, recordJoinWarn } from "./reconnect.js";
 import { chatFrame, isHello, joinFrame, publicTrip } from "./relayProtocol.js";
-import { resolveRelayUrl } from "./relayUrl.js";
 import { createRoomBoard } from "./roomBoard.js";
-import { deriveAttentionItems } from "./attentionQueue.js";
 import { isNearBottom } from "./scroll.js";
-import { createComposerHistory } from "./composerHistory.js";
 import { formatTrip } from "./watchFormat.js";
-
-function resolveRelay() {
-  const env = import.meta.env && import.meta.env.VITE_RELAY_URL;
-  return resolveRelayUrl(env);
-}
-const RELAY_URL = resolveRelay();
 const DEFAULT_NICK = "Muse";
 const BACKOFF_BASE_MS = 1000;
 const BACKOFF_MAX_MS = 30000;
@@ -64,11 +58,15 @@ function metricsOf(el) {
 }
 
 export function useChat() {
+  const demo = applyBrowserDemoConfig();
   const statusText = ref("disconnected");
   const statusKind = ref("off");
   const inChat = ref(false);
-  const channel = ref("");
+  const channel = ref(demo.room);
   const channelError = ref(false);
+  const relayUrl = ref(demo.relay);
+  const relayError = ref(demo.relayInvalid ? "Enter a ws:// or wss:// relay URL with no user, password, query, or fragment." : "");
+  const publicDemoRelayText = ref(describePublicDemoRelay(import.meta.env.VITE_PUBLIC_DEMO_RELAY));
   const nick = ref(DEFAULT_NICK);
   const message = ref("");
   const messages = ref([]);
@@ -87,6 +85,7 @@ export function useChat() {
   const resultSummary = ref("");
 
   const channelEl = ref(null);
+  const relayEl = ref(null);
   const nickEl = ref(null);
   const tripEl = ref(null);
   const passwordEl = ref(null);
@@ -364,7 +363,7 @@ export function useChat() {
   function openSocket() {
     clearRetry();
     dropSocket();
-    if (!RELAY_URL) {
+    if (!relayUrl.value) {
       wantConnected = false;
       setStatus("relay URL not configured", "err");
       appendRow({ text: "relay URL not configured", kind: "sys" });
@@ -372,7 +371,7 @@ export function useChat() {
     }
     setStatus(hasJoinedOnce ? "reconnecting…" : "connecting…", "off");
 
-    const sock = new WebSocket(RELAY_URL);
+    const sock = new WebSocket(relayUrl.value);
     ws = sock;
     let helloSeen = false;
 
@@ -534,6 +533,11 @@ export function useChat() {
     if (channel.value.trim()) channelError.value = false;
   }
 
+  function onRelayInput(ev) {
+    relayUrl.value = ev.target.value;
+    if (resolveVisitorRelay(relayUrl.value)) relayError.value = "";
+  }
+
   function onMessageInput(ev) {
     message.value = ev.target.value;
     // Typing abandons history browsing: ArrowDown no longer has a draft to
@@ -594,14 +598,24 @@ export function useChat() {
     // Read the DOM, not just the refs. Autofill can set an input without an
     // input event, and a legacy "name#password" nick has to be split from
     // whatever is actually in the box.
+    if (relayEl.value) relayUrl.value = relayEl.value.value;
     if (channelEl.value) channel.value = channelEl.value.value;
+    const nextRelay = resolveVisitorRelay(relayUrl.value);
     const nextChannel = channel.value.trim();
+    if (!nextRelay) {
+      relayError.value = "Enter a ws:// or wss:// relay URL with no user, password, query, or fragment.";
+      if (relayEl.value) relayEl.value.focus();
+      return;
+    }
+    relayError.value = "";
+    relayUrl.value = nextRelay;
     if (!nextChannel) {
       channelError.value = true;
       if (channelEl.value) channelEl.value.focus();
       return;
     }
     channelError.value = false;
+    saveBrowserDemoConfig({ relay: nextRelay, room: nextChannel });
     const typed = tripEl.value ? tripEl.value.value : "";
     if (tripEl.value) tripEl.value.value = "";
     const pwRaw = passwordEl.value ? passwordEl.value.value : "";
@@ -701,6 +715,9 @@ export function useChat() {
     inChat,
     channel,
     channelError,
+    relayUrl,
+    relayError,
+    publicDemoRelayText,
     nick,
     message,
     messages,
@@ -717,13 +734,13 @@ export function useChat() {
     resultStatus,
     resultSummary,
     channelEl,
+    relayEl,
     nickEl,
     tripEl,
     passwordEl,
     nickPasswordHint,
     transcriptEl,
     messageEl,
-    relayUrl: RELAY_URL,
     boardView,
     reloadBoard,
     attentionItems,
@@ -736,6 +753,7 @@ export function useChat() {
     onTranscriptScroll,
     onNickInput,
     onChannelInput,
+    onRelayInput,
     onMessageInput,
     onJoin,
     disconnect,

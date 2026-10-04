@@ -308,8 +308,7 @@ test("no tracked text token hashes to a board filename", () => {
     const text = buf.toString("utf8");
     while ((match = re.exec(text))) tokens.add(match[0]);
   }
-  // No exceptions. The watch view's channel is VITE_WATCH_CHANNEL at build
-  // time and is not committed.
+  // No exceptions. The public demo does not commit a room name.
   for (const token of tokens) {
     const dig = crypto.createHash("sha256").update(token).digest("hex");
     assert.ok(!hashes.includes(dig), "a tracked token hashes to a board filename");
@@ -344,7 +343,8 @@ test("docs/muse is the Vite build of the Vue client, and board.js is the shared 
   assert.match(published, /No board for this channel yet\./);
   assert.match(published, /Room board needs HTTPS or localhost\./);
   assert.doesNotMatch(published, /v-html/);
-  assert.doesNotMatch(published, /localStorage|sessionStorage/);
+  assert.match(published, /muse\.demo\.room/);
+  assert.doesNotMatch(published, /sessionStorage/);
   assert.equal(typeof board.parseBoard, "function");
   assert.equal(typeof board.loadBoardText, "function");
 });

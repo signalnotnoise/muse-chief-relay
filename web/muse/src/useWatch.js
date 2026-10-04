@@ -1,24 +1,12 @@
 import { nextTick, onBeforeUnmount, onMounted, ref } from "vue";
+import { applyBrowserDemoConfig, resolveVisitorRelay, saveBrowserDemoConfig } from "./demoSession.js";
 import { onSocketClose } from "./reconnect.js";
 import { isHello, joinFrame } from "./relayProtocol.js";
-import { resolveRelayUrl } from "./relayUrl.js";
 import { isNearBottom } from "./scroll.js";
-import { resolveWatchChannel } from "./watchChannel.js";
 import { onWatchFrame } from "./watchSession.js";
 import { parseEnvelope, nickStyle, roleOf, spectatorNick } from "./watchFormat.js";
 
-// Channel comes from VITE_WATCH_CHANNEL at dev/build time. The Pages
-// workflow passes the repository secret. Unset -> do not join.
-function resolveChannel() {
-  const env = import.meta.env && import.meta.env.VITE_WATCH_CHANNEL;
-  return resolveWatchChannel(env);
-}
-function resolveRelay() {
-  const env = import.meta.env && import.meta.env.VITE_RELAY_URL;
-  return resolveRelayUrl(env);
-}
-const CHANNEL = resolveChannel();
-const RELAY_URL = resolveRelay();
+// Relay URL and room come from the visitor (form or query), not from the build.
 const BACKOFF_BASE_MS = 1000;
 const BACKOFF_MAX_MS = 30000;
 const MAX_MESSAGES = 300;
@@ -33,11 +21,14 @@ function metricsOf(el) {
   return { scrollHeight: el.scrollHeight, scrollTop: el.scrollTop, clientHeight: el.clientHeight };
 }
 
-// Read-only live view of the relay room. Joins as a random spectator,
-// never sends chat, reconnects with backoff. No trip, no storage.
+// Read-only live view of a relay room the visitor names. Joins as a random
+// spectator, never sends chat, reconnects with backoff. No trip is stored.
 export function useWatch() {
-  const statusText = ref("connecting…");
+  const demo = applyBrowserDemoConfig();
+  const statusText = ref(demo.room ? "connecting…" : "watch channel not configured");
   const live = ref(false);
+  const channel = ref(demo.room);
+  const relayUrl = ref(demo.relay);
   const messages = ref([]);
   const users = ref([]);
   const unseen = ref(0);
@@ -201,7 +192,7 @@ export function useWatch() {
 
   function sendJoin(sock) {
     // Spectator join is room and nick only. No trip is attached.
-    sock.send(JSON.stringify(joinFrame({ room: CHANNEL, nick })));
+    sock.send(JSON.stringify(joinFrame({ room: channel.value, nick })));
   }
 
   function openSocket() {
@@ -209,18 +200,20 @@ export function useWatch() {
     dropSocket();
     joined = false;
     helloSeen = false;
-    if (!CHANNEL) {
+    const room = String(channel.value || "").trim();
+    const url = relayUrl.value;
+    if (!room) {
       setStatus("watch channel not configured", false);
       pushSys("watch channel not configured");
       return;
     }
-    if (!RELAY_URL) {
+    if (!url) {
       setStatus("relay URL not configured", false);
       pushSys("relay URL not configured");
       return;
     }
     setStatus("connecting…", false);
-    const sock = new WebSocket(RELAY_URL);
+    const sock = new WebSocket(url);
     ws = sock;
     sock.onopen = () => {
       if (sock !== ws) return;
@@ -292,11 +285,34 @@ export function useWatch() {
     if (document.visibilityState === "visible") reconnectNowIfNeeded();
   }
 
-  onMounted(() => {
+  function connectDemo(relayRaw, roomRaw) {
+    const relay = resolveVisitorRelay(relayRaw);
+    const room = String(roomRaw == null ? "" : roomRaw).trim();
+    const relayError = relay ? "" : "Enter a ws:// or wss:// relay URL with no user, password, query, or fragment.";
+    const roomError = room ? "" : "Enter a room name.";
+    if (relayError || roomError) return { ok: false, relayError, roomError };
+    channel.value = room;
+    relayUrl.value = relay;
+    saveBrowserDemoConfig({ relay, room });
     wantConnected = true;
+    retryAttempt = 0;
+    nick = spectatorNick();
+    messages.value = [];
+    users.value = [];
+    trips.clear();
+    openSocket();
+    return { ok: true, relayError: "", roomError: "" };
+  }
+
+  onMounted(() => {
     document.addEventListener("visibilitychange", onVisibility);
     window.addEventListener("online", reconnectNowIfNeeded);
-    openSocket();
+    if (channel.value && relayUrl.value) {
+      wantConnected = true;
+      openSocket();
+    } else {
+      wantConnected = false;
+    }
   });
 
   onBeforeUnmount(() => {
@@ -310,8 +326,9 @@ export function useWatch() {
   return {
     statusText,
     live,
-    channel: CHANNEL,
-    relayUrl: RELAY_URL,
+    channel,
+    relayUrl,
+    connectDemo,
     messages,
     users,
     unseen,

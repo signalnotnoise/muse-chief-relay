@@ -420,8 +420,8 @@ test("tracked client source does not update, delete, or embed a key", () => {
   assert.doesNotMatch(pure, /updateDocument|deleteDocument/);
   assert.doesNotMatch(src + pure, /standard_|BEGIN [A-Z ]+KEY/);
   const example = fs.readFileSync(path.join(ROOT, ".env.example"), "utf8");
-  assert.match(example, /APPWRITE_ENDPOINT=https:\/\/appwrite\.voizel\.com\/v1/);
-  assert.match(example, /APPWRITE_PROJECT_ID=6a6da0ae001f1d0582d2/);
+  assert.match(example, /APPWRITE_ENDPOINT=https:\/\/appwrite\.example\.com\/v1/);
+  assert.match(example, /APPWRITE_PROJECT_ID=your-project-id/);
   assert.match(example, /APPWRITE_DATABASE_ID=hivemind/);
   assert.match(example, /^APPWRITE_API_KEY=\s*$/m);
   assert.doesNotMatch(example, /APPWRITE_API_KEY=.+/);

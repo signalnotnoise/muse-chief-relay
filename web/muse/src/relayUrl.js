@@ -1,8 +1,9 @@
-// WebSocket URL for the Muse client.
-// VITE_RELAY_URL is inlined by Vite. An empty value uses the local relay
-// default so a dev build does not dial a public chat network. GitHub Pages
-// sets the repository secret (wss). An invalid value means "not configured":
-// the page must not open a socket. Never put credentials in the URL.
+// WebSocket URL helper for the Muse client.
+// An empty value uses the local relay default for callers that still want a
+// dev socket. The public demo does not use that default: a blank visitor
+// value stays unset. An invalid value means "not configured": the page must
+// not open a socket. Never put credentials in the URL. The public build does
+// not inline a private host.
 
 export const LOCAL_RELAY_URL = "ws://127.0.0.1:8787/relay";
 

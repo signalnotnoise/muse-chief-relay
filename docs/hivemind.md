@@ -10,8 +10,8 @@ Copy `.env.example`. Leave the key out of git.
 
 | Variable | Value |
 |---|---|
-| `APPWRITE_ENDPOINT` | `https://appwrite.voizel.com/v1` |
-| `APPWRITE_PROJECT_ID` | `6a6da0ae001f1d0582d2` |
+| `APPWRITE_ENDPOINT` | `https://appwrite.example.com/v1` |
+| `APPWRITE_PROJECT_ID` | `your-project-id` |
 | `APPWRITE_DATABASE_ID` | `hivemind` (default when unset) |
 | `APPWRITE_API_KEY` | server-side only; never commit or log it |
 | `HIVEMIND_MESSAGE_MIRROR` | `1` writes accepted room chats. Unset or `0` writes nothing, even when `APPWRITE_*` is set. Default is off. |

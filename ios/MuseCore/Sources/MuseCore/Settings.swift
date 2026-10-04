@@ -20,7 +20,7 @@ public enum SceneSuspension {
 }
 
 public struct ClientSettings: Equatable, Sendable {
-    public static let defaultRelayURL = URL(string: "wss://ws.voizel.com/relay")!
+    public static let defaultRelayURL = URL(string: "wss://relay.example.com/relay")!
 
     public var relayURL: URL?
     public var room: String

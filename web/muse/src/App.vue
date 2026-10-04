@@ -31,6 +31,9 @@ const {
   inChat,
   channel,
   channelError,
+  relayUrl,
+  relayError,
+  publicDemoRelayText,
   nick,
   message,
   messages,
@@ -47,11 +50,11 @@ const {
   resultStatus,
   resultSummary,
   channelEl,
+  relayEl,
   nickEl,
   tripEl,
   passwordEl,
   nickPasswordHint,
-  relayUrl,
   transcriptEl,
   messageEl,
   boardView,
@@ -65,6 +68,7 @@ const {
   onComposerKeydown,  onTranscriptScroll,
   onNickInput,
   onChannelInput,
+  onRelayInput,
   onMessageInput,
   onJoin,
   disconnect,
@@ -228,8 +232,33 @@ function onWorkspaceCreate() {
               aria-label="Join channel"
             >
               <h2 class="mb-1 text-[1.15rem] font-semibold text-ink">Join the channel</h2>
-              <p class="mb-5 text-[0.85rem] text-muted">Pick the channel the room shares. No account needed.</p>
+              <p class="mb-5 text-[0.85rem] text-muted">Enter a relay and a room. Nothing is baked into this page. No account needed.</p>
               <form id="join-form" class="grid gap-3" @submit.prevent="onJoin">
+                <p id="public-demo-relay" class="text-[0.8rem] leading-snug text-muted">
+                  Public demo relay: <span class="font-mono text-ink">{{ publicDemoRelayText }}</span>
+                </p>
+                <label class="grid gap-1.5 text-[0.85rem] text-muted">
+                  Relay URL
+                  <input
+                    id="relay-url"
+                    ref="relayEl"
+                    :class="field"
+                    type="text"
+                    :value="relayUrl"
+                    placeholder="wss://relay.example.com/relay"
+                    autocomplete="off"
+                    autocapitalize="off"
+                    autocorrect="off"
+                    spellcheck="false"
+                    aria-required="true"
+                    aria-describedby="relay-error public-demo-relay"
+                    :aria-invalid="relayError ? 'true' : undefined"
+                    @input="onRelayInput"
+                  />
+                </label>
+                <p id="relay-error" class="-mt-1.5 text-[0.8rem] leading-snug text-danger" :class="{ hidden: !relayError }" role="alert">
+                  {{ relayError || "Enter a relay URL." }}
+                </p>
                 <label class="grid gap-1.5 text-[0.85rem] text-muted">
                   Channel
                   <input
@@ -305,8 +334,8 @@ function onWorkspaceCreate() {
                 <button :class="[button, 'mt-1 w-full py-3 text-[0.95rem]']" type="submit">Connect</button>
               </form>
               <p class="mt-4 text-[0.78rem] leading-relaxed text-muted">
-                Uses <code class="rounded bg-panel-2 px-1 py-px font-mono text-[0.74rem]">{{ relayUrl || "relay URL not configured" }}</code>
-                (voizle-text-relay).
+                Connects to <code class="rounded bg-panel-2 px-1 py-px font-mono text-[0.74rem]">{{ relayUrl || "relay URL not configured" }}</code>
+                (voizle-text-relay). The relay and room stay on this device. A password is not stored.
                 Prefer to just look? <a href="#/watch" class="font-semibold text-accent hover:underline focus-visible:outline-solid focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-focus">Watch live</a> instead.
               </p>
             </section>

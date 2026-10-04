@@ -1,0 +1,29 @@
+# Fails the build when a non-placeholder wss host, an obfuscated wss URL,
+# a room-like secret, a build-time relay or room injection, a private
+# Appwrite endpoint or project id, or a webhook URL is committed.
+# The same script scans the Pages artifact inside Deploy GitHub Pages.
+
+name: Public leak guard
+
+on:
+  pull_request:
+  push:
+    branches: ["main"]
+
+permissions:
+  contents: read
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Scan the committed tree
+        run: node tools/check-public-leaks.mjs

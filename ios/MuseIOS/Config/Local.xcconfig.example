@@ -4,7 +4,7 @@
 // MUSE_PUBLIC_TRIP is a public display code only, six characters, optional leading !.
 // Never put a password, owner secret, webhook, or token here.
 //
-// MUSE_RELAY_URL = wss:/$()/ws.voizel.com/relay
+// MUSE_RELAY_URL = wss://relay.example.com/relay
 // MUSE_ROOM =
 // MUSE_NICK =
 // MUSE_PUBLIC_TRIP =

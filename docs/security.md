@@ -81,24 +81,21 @@ A second bridge process on the same host is refused before it opens a socket. Th
 
 ## Channel names
 
-The channel name is the only thing keeping a hack.chat channel private. The interactive Muse
-client has no default channel and doesn't remember one: you type it each time, and it isn't put
-in the URL, `localStorage`, `sessionStorage`, the console, or the page title. Keep private
-channel names out of public pages, examples, issues and screenshots, and use a placeholder like
+The channel name is the only thing keeping a private room private. The public Pages demo
+does not bake a relay URL or a room. The visitor types both, or passes `?relay=` and `?room=`.
+After connect, those two values can sit in `localStorage` on that device. They are not put
+in the page title or the console. A password or trip secret is not stored. Keep private
+room names out of public pages, examples, issues and screenshots, and use a placeholder like
 `your-channel-name`.
 
-The read-only spectator page at `muse/#/watch` does not commit a channel name either. It reads
-`VITE_WATCH_CHANNEL` from the environment when the client is built. Locally that is the shell.
-On GitHub Pages, `.github/workflows/pages.yml` passes the `VITE_WATCH_CHANNEL` and
-`VITE_RELAY_URL` repository secrets into `npm run build` and deploys that output as a Pages
-artifact. The workflow fails if either secret is empty, and it does not print the values.
-`VITE_RELAY_URL` must be `wss://` and must not carry credentials. The deployed Pages
-JavaScript contains the channel and the URL, because that is how the spectator page joins.
-The git tree does not contain the channel. The copy committed under `docs/muse/` is still
-built with `VITE_WATCH_CHANNEL` unset and shows "watch channel not configured". Its relay
-URL is the local default `ws://127.0.0.1:8787/relay`. That committed copy is
-what the tests check. `tests/muse/board.test.js` still rejects every tracked token that hashes
-to a board filename. There is no exception.
+The read-only spectator page at `muse/#/watch` uses the same demo form. It does not read a
+room from the build. `.github/workflows/pages.yml` builds the demo with no repository secrets
+and deploys that output. `tools/check-public-leaks.mjs` fails the job if the artifact or the
+committed tree contains a non-placeholder `wss://` host or a room-like secret. The copy
+committed under `docs/muse/` is that same demo and shows "watch channel not configured"
+until a visitor enters a room. That committed copy is what the tests check.
+`tests/muse/board.test.js` still rejects every tracked token that hashes to a board filename.
+There is no exception.
 
 Board filenames are the SHA-256 of the channel, so those files don't contain private channel
 names. A hash of a guessable name can be brute-forced, so pick a high-entropy channel. A
