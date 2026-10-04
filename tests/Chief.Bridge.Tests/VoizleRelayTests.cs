@@ -42,7 +42,7 @@ public class VoizleRelayTests
         Assert.False(RelayUrl.SpeaksVoizle("wss://hack.chat/chat-ws"));
         Assert.False(RelayUrl.SpeaksVoizle("wss://www.hack.chat/chat-ws"));
         Assert.True(RelayUrl.SpeaksVoizle("ws://127.0.0.1:8787/relay"));
-        Assert.True(RelayUrl.SpeaksVoizle("wss://ws.voizel.com/relay"));
+        Assert.True(RelayUrl.SpeaksVoizle("wss://relay.example.com/relay"));
     }
 
     [Fact]

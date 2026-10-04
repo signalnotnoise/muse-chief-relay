@@ -39,7 +39,7 @@ MENTIONS_PATH = os.path.join(BASE, "mentions.jsonl")
 OUTBOX_PATH = os.path.join(BASE, "design-outbox.jsonl")
 OUTBOX_OFF = os.path.join(BASE, "design-outbox.offset")
 
-URL = "wss://ws.voizel.com/relay"
+URL = os.environ.get("RELAY_URL", "wss://relay.example.com/relay")
 SUBPROTOCOL = "voizle-text-relay"
 # Public trip, self-asserted on the owned relay (no password hashing).
 # The real trip lives in config.json; this is only a placeholder default.

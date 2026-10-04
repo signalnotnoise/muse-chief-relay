@@ -1,6 +1,6 @@
 {
-  "url": "wss://ws.voizel.com/relay",
-  "origin": "https://ws.voizel.com",
+  "url": "wss://relay.example.com/relay",
+  "origin": "https://relay.example.com",
   "channel": "your-channel-name",
   "nick": "dot",
   "trip": "",

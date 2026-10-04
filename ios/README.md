@@ -16,7 +16,7 @@ Dot's arch sign-off at fa91786 covers the iOS chat-only wire. It does not cover 
 
 ## Configure
 
-The default socket is the public relay `wss://ws.voizel.com/relay`. Room, nick, and trip are blank in git.
+The default socket is the public relay `wss://relay.example.com/relay`. Room, nick, and trip are blank in git.
 
 ```bash
 cp ios/MuseIOS/Config/Local.xcconfig.example ios/MuseIOS/Config/Local.xcconfig
