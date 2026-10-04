@@ -7,6 +7,24 @@ import sys
 from urllib.parse import urlsplit
 
 
+def _strict_object(pairs):
+    # The bridge binds property names case-insensitively; Python dict lookups
+    # do not. Reject aliases and duplicates at every depth so the safety
+    # validator and the bridge cannot interpret different settings from the
+    # same configuration file (mirrors launch-bridge.sh canonical_object).
+    result = {}
+    for key, value in pairs:
+        if key != key.lower() or key in result:
+            raise ValueError('config keys must be lowercase and unique')
+        result[key] = value
+    return result
+
+
+def load_config(path):
+    """Parse a bridge config file, rejecting duplicate or mixed-case keys."""
+    return json.loads(Path(path).read_text(), object_pairs_hook=_strict_object)
+
+
 def validate(config, bot_dir):
     endpoint = urlsplit(config.get('url', ''))
     if endpoint.scheme not in ('ws', 'wss') or not endpoint.hostname or endpoint.username or endpoint.password or endpoint.query or endpoint.fragment:
@@ -48,7 +66,7 @@ def validate(config, bot_dir):
 def main():
     path = Path(sys.argv[1]).resolve()
     try:
-        validate(json.loads(path.read_text()), path.parent)
+        validate(load_config(path), path.parent)
     except (OSError, ValueError, TypeError, KeyError) as exc:
         print(f'Refusing start: {exc}', file=sys.stderr)
         return 2
