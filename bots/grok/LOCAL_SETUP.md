@@ -21,33 +21,91 @@ tooling/cache paths. `bots/shared/check_config.py` validates the config. See
 export Grok Bot's parameters, then delegate to the shared implementation.
 There is no `bots/grok/check_config.py`.
 
-## Substitutions vs the dot guide
+## What to reuse from the dot guide
 
-The full beginner operator procedure is
-[bots/dot/LOCAL_SETUP.md](../dot/LOCAL_SETUP.md). Follow it with these
-Grok Bot substitutions:
+Tooling, the Release build, a fresh receive-only config, and bridge lifecycle
+commands are written up in
+[bots/dot/LOCAL_SETUP.md](../dot/LOCAL_SETUP.md). Follow only the sections
+named below, and apply the substitution table only inside those sections.
 
-| dot guide                  | Grok Bot equivalent          |
-|----------------------------|------------------------------|
-| `bots/dot/`                | `bots/grok/`                 |
-| `DOT_TOOLING_DIR`          | `GROK_TOOLING_DIR`           |
-| `DOT_BRIDGE_CONFIG`        | `GROK_BRIDGE_CONFIG`         |
-| `DOT_BRIDGE_SHA256`        | `GROK_BRIDGE_SHA256`         |
-| `DOT_BRIDGE_DLL`           | `GROK_BRIDGE_DLL`            |
-| `DOTNET_BIN`               | `DOTNET_BIN` (shared name)   |
-| nick `dot`                 | nick `chief`                 |
-| `dot_mode`                 | `chief_mode`                 |
-| `bots/dot/config.json`     | your private `config.json`   |
+This directory has `env.sh`, `launch-bridge.sh`, and `config.example.json`.
+It has no `reply.py`, `mention_hook.py`, `go.py`, `run.sh`, or `test_*.py`.
+Dot's `reply.py` accepts nick `dot` only, so it cannot send as `chief`.
+
+### Checkout branch
+
+`grok-vm-install` is stacked on `codex/dot-vm-install`. Use a separate checkout
+of `grok-vm-install`. The Dot guide's clone and update commands name
+`codex/dot-vm-install`, which does not contain `bots/grok/`. Leave an
+already-running chief/Grok bridge checkout, with its private config and `./hc`
+helper, on its own branch.
+
+In [§3 Get the intended branch](../dot/LOCAL_SETUP.md#3-get-the-intended-branch),
+use `grok-vm-install` for `git clone --branch`, `git switch`, and
+`git pull --ff-only`. Expected `git branch --show-current`: `grok-vm-install`.
+If that branch is absent, stop.
+
+### Sections to follow
+
+| Dot section | Use it for |
+|-------------|------------|
+| [§2 Before you begin](../dot/LOCAL_SETUP.md#2-before-you-begin) | Tooling prerequisites. No path rewrite. |
+| [§4 Select writable tooling and .NET](../dot/LOCAL_SETUP.md#4-select-writable-tooling-and-net) | Tooling directory and .NET selection. |
+| [§5 Build, review, and record the DLL checksum](../dot/LOCAL_SETUP.md#5-build-review-and-record-the-dll-checksum) | Release build and DLL pin. `src/ChatBridge/bin/Release/net8.0/ChatBridge.dll` stays at that shared path. |
+| [§6 Create a separate, new receiver-only installation](../dot/LOCAL_SETUP.md#create-a-separate-new-receiver-only-installation) | Fresh receive-only config only. |
+| [§7 Check without starting anything](../dot/LOCAL_SETUP.md#7-check-without-starting-anything) | Offline `check`. |
+| [§8 Start, inspect, and stop](../dot/LOCAL_SETUP.md#8-start-inspect-and-stop) | `start`, `status`, and `stop`. |
+| [§11 Safe stop, restart, and recovery](../dot/LOCAL_SETUP.md#11-safe-stop-restart-and-recovery) | Bridge stop, release check, and one-bridge restart. `outbox-status` and `outbox-resolve` take the same flag substitutions. Keep durable outbox off on a fresh receive-only install. |
+| [§13 Troubleshooting](../dot/LOCAL_SETUP.md#13-troubleshooting) | Bridge failures: missing config, hash or DLL, .NET, writable tooling, connect, already running. |
+
+### Substitutions inside those sections
+
+| Dot guide | Grok Bot |
+|-----------|----------|
+| `codex/dot-vm-install` | `grok-vm-install` |
+| `source bots/dot/env.sh` | `source bots/grok/env.sh` |
+| `bash bots/dot/launch-bridge.sh` | `bash bots/grok/launch-bridge.sh` |
+| `cp bots/dot/config.example.json` | `cp bots/grok/config.example.json` |
+| `DOT_TOOLING_DIR` | `GROK_TOOLING_DIR` |
+| `DOT_BRIDGE_CONFIG` | `GROK_BRIDGE_CONFIG` |
+| `DOT_BRIDGE_SHA256` | `GROK_BRIDGE_SHA256` |
+| `DOT_BRIDGE_DLL` | `GROK_BRIDGE_DLL` |
+| `DOT_LOCAL_DIR` | `GROK_LOCAL_DIR` |
+| `$HOME/muse-dot-tooling` | `$HOME/muse-chief-tooling` |
+| `$HOME/muse-dot-local` | `$HOME/muse-chief-local` |
+| `DOTNET_BIN` | `DOTNET_BIN` (same name) |
+| nick `dot` | nick `chief` |
+| `dot_mode` | `chief_mode` |
 
 The launcher refuses a config whose `nick` is not `chief`. It reads
 participation mode from `chief_mode` only (default `receive-only` when the key
 is absent). `dot_mode` and `fuse_mode` are not this bot's mode key and are not
-reinterpreted into `chief_mode`.
+reinterpreted into `chief_mode`. In the fresh-config section, keep `nick`
+`chief` and `chief_mode` absent or `"receive-only"`.
+
+§4's default tooling path `bots/dot/runtime/tooling` is
+`bots/grok/runtime/tooling` here. §6's ignore-rule sentences name Dot's
+`config.json` and `runtime/` paths; this bot's rules are in
+[Private by design](#private-by-design).
 
 `bots/grok/config.example.json` sets `nick` to `chief` and `chief_mode` to
 `receive-only` so that mapping is visible. The channel value
 `your-channel-name` is a placeholder and fails validation until you replace it
 in a private copy.
+
+### Sections to skip
+
+Leave these Dot-only. Rewriting `bots/dot/` to `bots/grok/` in them points at
+files that do not exist:
+
+- [§1 What you are installing](../dot/LOCAL_SETUP.md#1-what-you-are-installing): the observer (`mention_hook.py`), independent wake, `./go`, `bots/dot/go.py`, and `bots/dot/run.sh`. This launcher is the bridge only.
+- [§6 Reuse an existing authorized installation](../dot/LOCAL_SETUP.md#reuse-an-existing-authorized-installation): that example is `bots/dot/config.json`. A live chief config with a hook block fails `check`. Use the fresh receive-only subsection.
+- [§9 Participation](../dot/LOCAL_SETUP.md#9-participation-is-a-separate-explicit-decision): `bots/dot/reply.py`, `dot_mode`, and approved recipients.
+- [§10 Observer setup](../dot/LOCAL_SETUP.md#10-observer-setup-is-not-independent-wake): `bots/dot/mention_hook.py`.
+- [§11](../dot/LOCAL_SETUP.md#11-safe-stop-restart-and-recovery) observer, adapter, mention-cursor, and SQLite sentences.
+- [§12 Run local tests](../dot/LOCAL_SETUP.md#12-run-local-tests-without-using-a-real-room): `test_setup.py`, `test_mention_hook.py`, `test_participation.py`, `test_hatch_adapter.py`, `test_portable_launcher.py`, and `unittest discover -s bots/dot`. Grok Bot's checks are [below](#local-checks).
+- [§13](../dot/LOCAL_SETUP.md#13-troubleshooting) "Connected bridge, but no assistant reply" and "Local Codex initialization finding".
+- [§14](../dot/LOCAL_SETUP.md#14-what-to-record-when-handing-off-an-installation) independent-wake, model, and reply-verification claims. Record the `grok-vm-install` commit, DLL hash, private config location, and the check/start/status/stop commands you actually ran.
 
 ## Quick commands
 
@@ -113,7 +171,10 @@ observer, a hook poller, a background process, or promise off-session uptime.
 ## Local checks
 
 ```sh
-bash -n bots/grok/env.sh bots/grok/launch-bridge.sh
+# bash -n checks one script. Extra filenames become positional parameters.
+for script in bots/grok/env.sh bots/grok/launch-bridge.sh; do
+  bash -n "$script"
+done
 python3 -m unittest discover -s bots/shared -p 'test_*.py'
 ```
 

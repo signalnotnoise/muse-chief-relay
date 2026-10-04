@@ -50,8 +50,14 @@ it an explicit `--config` every time.
 ## Tests
 
 ```sh
-bash -n bots/shared/env.sh bots/dot/env.sh bots/fuse/env.sh bots/grok/env.sh \
+# bash -n checks one script. Extra filenames become positional parameters.
+for script in \
+  bots/shared/env.sh \
+  bots/dot/env.sh bots/fuse/env.sh bots/grok/env.sh \
   bots/dot/launch-bridge.sh bots/fuse/launch-bridge.sh bots/grok/launch-bridge.sh
+do
+  bash -n "$script"
+done
 python3 -m unittest discover -s bots/dot -p 'test_*.py'      # dot's suites
 python3 -m unittest discover -s bots/shared -p 'test_*.py'   # shared wrapper tests
 ```
