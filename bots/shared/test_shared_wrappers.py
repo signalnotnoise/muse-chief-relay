@@ -1,4 +1,4 @@
-"""Thin-wrapper tests: both bots' wrappers drive the single shared launcher.
+"""Thin-wrapper tests: each bot's wrapper drives the single shared launcher.
 
 Runs the real committed wrappers against temporary synthetic configs/DLLs and
 a fake dotnet host. Never a relay, never the real runtimes, never the network.
@@ -120,6 +120,96 @@ class WrapperTests(unittest.TestCase):
             'FUSE_BRIDGE_DLL': str(self.dll)})
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_grok_wrapper_check_passes_offline(self):
+        self.write_config(self.base_config('chief'))
+        result = self.run_launcher('grok', 'check', extra_env={
+            'GROK_BRIDGE_CONFIG': str(self.config), 'GROK_BRIDGE_SHA256': self.digest,
+            'GROK_BRIDGE_DLL': str(self.dll)})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('Offline check only', result.stdout)
+        self.assertFalse(self.capture.exists())
+
+    def test_grok_wrapper_rejects_other_nick(self):
+        self.write_config(self.base_config('Grok'))
+        result = self.run_launcher('grok', 'check', extra_env={
+            'GROK_BRIDGE_CONFIG': str(self.config), 'GROK_BRIDGE_SHA256': self.digest,
+            'GROK_BRIDGE_DLL': str(self.dll)})
+        # Fail-closed like Fuse: the specific nick mismatch is not disclosed.
+        self.assert_refused(result, 'config safety validation failed')
+
+    def test_grok_wrapper_rejects_receive_only_with_durable_outbox(self):
+        cfg = self.base_config('chief')
+        cfg['durable_outbox'] = True
+        self.write_config(cfg)
+        result = self.run_launcher('grok', 'check', extra_env={
+            'GROK_BRIDGE_CONFIG': str(self.config), 'GROK_BRIDGE_SHA256': self.digest,
+            'GROK_BRIDGE_DLL': str(self.dll)})
+        self.assert_refused(result, 'receive-only mode must not enable durable_outbox')
+
+    def test_chief_mode_key_is_per_bot(self):
+        # dot_mode and fuse_mode are not chief's mode key: they are ignored,
+        # and a missing chief_mode stays receive-only.
+        cfg = self.base_config('chief')
+        cfg['dot_mode'] = 'participate'
+        cfg['fuse_mode'] = 'participate'
+        self.write_config(cfg)
+        result = self.run_launcher('grok', 'check', extra_env={
+            'GROK_BRIDGE_CONFIG': str(self.config), 'GROK_BRIDGE_SHA256': self.digest,
+            'GROK_BRIDGE_DLL': str(self.dll)})
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_chief_mode_participate_is_enforced(self):
+        # chief_mode is the key that governs. participate with a receive-only
+        # outbox symlink fails closed; dot_mode/fuse_mode do not override it.
+        cfg = self.base_config('chief')
+        cfg['dot_mode'] = 'receive-only'
+        cfg['fuse_mode'] = 'receive-only'
+        cfg['chief_mode'] = 'participate'
+        self.write_config(cfg)
+        result = self.run_launcher('grok', 'check', extra_env={
+            'GROK_BRIDGE_CONFIG': str(self.config), 'GROK_BRIDGE_SHA256': self.digest,
+            'GROK_BRIDGE_DLL': str(self.dll)})
+        self.assert_refused(result, 'config safety validation failed')
+
+    def test_chief_mode_participate_passes_when_explicit(self):
+        cfg = self.base_config('chief')
+        cfg['chief_mode'] = 'participate'
+        cfg['approved_recipients'] = ['fixture-owner']
+        cfg['durable_outbox'] = True
+        outbox = self.runtime / 'outbox.jsonl'
+        outbox.unlink()
+        outbox.write_text('')
+        self.write_config(cfg)
+        result = self.run_launcher('grok', 'check', extra_env={
+            'GROK_BRIDGE_CONFIG': str(self.config), 'GROK_BRIDGE_SHA256': self.digest,
+            'GROK_BRIDGE_DLL': str(self.dll)})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(self.capture.exists())
+
+    def test_grok_wrapper_refuses_hook_block(self):
+        # Shared validator refuses hook is not None. A live chief config that
+        # carries a hook block is not reinterpreted to pass.
+        cfg = self.base_config('chief')
+        cfg['hook'] = {'url_env': 'HOOK_URL_ENV', 'auth_env': 'HOOK_AUTH_ENV'}
+        self.write_config(cfg)
+        result = self.run_launcher('grok', 'check', extra_env={
+            'GROK_BRIDGE_CONFIG': str(self.config), 'GROK_BRIDGE_SHA256': self.digest,
+            'GROK_BRIDGE_DLL': str(self.dll)})
+        self.assert_refused(result, 'config safety validation failed')
+
+    def test_grok_example_is_hook_free_chief_receive_only(self):
+        example = json.loads((REPO / 'bots' / 'grok' / 'config.example.json').read_text())
+        self.assertEqual(example['nick'], 'chief')
+        self.assertNotIn('hook', example)
+        self.assertNotIn('dot_mode', example)
+        self.assertNotIn('fuse_mode', example)
+        self.assertEqual(example.get('chief_mode', 'receive-only'), 'receive-only')
+        self.assertEqual(example['channel'], 'your-channel-name')
+        self.assertEqual(example.get('pass', ''), '')
+        self.assertEqual(example.get('trip', ''), '')
+        self.assertIs(example['mentions']['enabled'], False)
+        self.assertNotIn('protocol_v2', example)
+
     def test_only_selected_environment_reaches_host(self):
         self.write_config(self.base_config('Fuse'))
         result = self.run_launcher('fuse', 'start', extra_env={
@@ -156,14 +246,16 @@ class WrapperTests(unittest.TestCase):
         # A relative tooling dir makes the shared helper return 2. The wrapper
         # must not mask it with the trailing cleanup's success (the old unset
         # returned 0, swallowing the 2 in a normally sourced shell).
-        for bot, var in (('dot', 'DOT_TOOLING_DIR'), ('fuse', 'FUSE_TOOLING_DIR')):
+        for bot, var in (('dot', 'DOT_TOOLING_DIR'), ('fuse', 'FUSE_TOOLING_DIR'),
+                         ('grok', 'GROK_TOOLING_DIR')):
             result = self.run_sourced(bot, f'{var}=relative/path; export {var}; ')
             self.assertEqual(result.returncode, 2,
                              f'{bot}: {result.stdout}{result.stderr}')
             self.assertIn('must be an absolute path', result.stderr)
 
     def test_env_wrapper_failure_breaks_and_chain(self):
-        for bot, var in (('dot', 'DOT_TOOLING_DIR'), ('fuse', 'FUSE_TOOLING_DIR')):
+        for bot, var in (('dot', 'DOT_TOOLING_DIR'), ('fuse', 'FUSE_TOOLING_DIR'),
+                         ('grok', 'GROK_TOOLING_DIR')):
             script = (f'{var}=relative/path; export {var}; '
                       f'source {REPO / "bots" / bot / "env.sh"} && echo CHAINED')
             result = subprocess.run(['bash', '-c', script], text=True,
@@ -173,7 +265,8 @@ class WrapperTests(unittest.TestCase):
             self.assertNotIn('CHAINED', result.stdout)
 
     def test_env_wrapper_success_continues_and_chain(self):
-        for bot, var in (('dot', 'DOT_TOOLING_DIR'), ('fuse', 'FUSE_TOOLING_DIR')):
+        for bot, var in (('dot', 'DOT_TOOLING_DIR'), ('fuse', 'FUSE_TOOLING_DIR'),
+                         ('grok', 'GROK_TOOLING_DIR')):
             script = f'source {REPO / "bots" / bot / "env.sh"} && echo CHAINED'
             result = subprocess.run(['bash', '-c', script], text=True,
                                     capture_output=True, timeout=15,
@@ -183,8 +276,8 @@ class WrapperTests(unittest.TestCase):
 
     def test_runtime_tooling_defaults_are_ignore_protected(self):
         # env.sh defaults tooling/cache inside the checkout; those paths must
-        # stay uncommitted, for both bots.
-        for bot in ('dot', 'fuse'):
+        # stay uncommitted, for every bot wrapper.
+        for bot in ('dot', 'fuse', 'grok'):
             probe = subprocess.run(
                 ['git', 'check-ignore', str(REPO / 'bots' / bot / 'runtime/tooling')],
                 cwd=REPO, text=True, capture_output=True, timeout=15)
@@ -192,7 +285,8 @@ class WrapperTests(unittest.TestCase):
                              f'{bot}/runtime/tooling is not git-ignored')
 
     def test_env_wrappers_select_private_tooling_dirs(self):
-        for bot, var in (('dot', 'DOT_TOOLING_DIR'), ('fuse', 'FUSE_TOOLING_DIR')):
+        for bot, var in (('dot', 'DOT_TOOLING_DIR'), ('fuse', 'FUSE_TOOLING_DIR'),
+                         ('grok', 'GROK_TOOLING_DIR')):
             script = (f'source {REPO / "bots" / bot / "env.sh"} && '
                       f'printf "%s\\n" "${var}" "$BRIDGE_TOOLING_VAR" '
                       '"$DOTNET_CLI_TELEMETRY_OPTOUT"')

@@ -8,11 +8,12 @@ command. This directory is the pattern for that wake path. It does not
 contain the box runner, and it does not use Muse's Hatch `wake()` hook
 (`bots/muse/always-on.md`).
 
-A separate portable launcher for a new local checkout is documented in
-[LOCAL_SETUP.md](LOCAL_SETUP.md) (`env.sh` and `launch-bridge.sh` on branch
-`grok-vm-install`). That launcher does not start the webhook wake path below,
-and it must not be pointed at an already-running chief/Grok bridge checkout
-with its own private config and `./hc` helper.
+This folder is Grok Bot. The portable launcher nick is `chief`, not `Grok`.
+Thin wrappers in `env.sh` and `launch-bridge.sh` delegate to `bots/shared/`.
+[LOCAL_SETUP.md](LOCAL_SETUP.md) is the operator guide. That launcher does not
+start the webhook wake path below, and it must not be pointed at an
+already-running chief/Grok bridge checkout with its own private config and
+`./hc` helper.
 
 `always-on.md` is the full path:
 

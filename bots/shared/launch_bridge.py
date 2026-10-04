@@ -14,7 +14,7 @@ Wrapper contract (environment):
   BRIDGE_DOTNET_ENV  name of the env var holding the default --dotnet
                      executable (default: DOTNET_BIN)
   BRIDGE_NICK        expected bridge nick, enforced by config validation
-  BRIDGE_MODE_KEY    per-bot participation mode key (e.g. dot_mode/fuse_mode)
+  BRIDGE_MODE_KEY    per-bot participation mode key (e.g. dot_mode/fuse_mode/chief_mode)
   BRIDGE_DOCS        docs path named in refusal/help text
                      (default: bots/shared/README.md)
 """

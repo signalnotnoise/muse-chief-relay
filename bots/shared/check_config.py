@@ -32,7 +32,7 @@ def validate(config, bot_dir, nick='dot', mode_key='dot_mode'):
         raise ValueError('Trip must be empty or a public six-character code')
     if config.get('durable_outbox') and config.get('protocol_v2'):
         raise ValueError('durable_outbox is for v1; v2 has a separate durable queue')
-    # The mode key is per-bot (dot_mode / fuse_mode); unknown values fail closed.
+    # The mode key is per-bot (dot_mode / fuse_mode / chief_mode); unknown values fail closed.
     mode = config.get(mode_key, 'receive-only')
     if mode not in ('receive-only', 'participate'):
         raise ValueError(f'Unknown {mode_key}')

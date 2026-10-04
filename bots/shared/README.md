@@ -34,7 +34,7 @@ A bot's `launch-bridge.sh` must export, then `exec python3` this file:
 | `BRIDGE_DLL_DEFAULT` | fallback DLL path (wrapper resolves it repo-relative)|
 | `BRIDGE_DOTNET_ENV`  | env var holding the default `--dotnet` (else `DOTNET_BIN`) |
 | `BRIDGE_NICK`        | nick the config must declare                         |
-| `BRIDGE_MODE_KEY`    | participation mode key (`dot_mode`, `fuse_mode`, …)  |
+| `BRIDGE_MODE_KEY`    | participation mode key (`dot_mode`, `fuse_mode`, `chief_mode`, …) |
 | `BRIDGE_DOCS`        | docs path named in help/refusal text                 |
 
 A bot's `env.sh` must set its `<PREFIX>_TOOLING_DIR` default, export
@@ -50,8 +50,8 @@ it an explicit `--config` every time.
 ## Tests
 
 ```sh
-bash -n bots/shared/env.sh bots/dot/env.sh bots/fuse/env.sh \
-  bots/dot/launch-bridge.sh bots/fuse/launch-bridge.sh
+bash -n bots/shared/env.sh bots/dot/env.sh bots/fuse/env.sh bots/grok/env.sh \
+  bots/dot/launch-bridge.sh bots/fuse/launch-bridge.sh bots/grok/launch-bridge.sh
 python3 -m unittest discover -s bots/dot -p 'test_*.py'      # dot's suites
 python3 -m unittest discover -s bots/shared -p 'test_*.py'   # shared wrapper tests
 ```
