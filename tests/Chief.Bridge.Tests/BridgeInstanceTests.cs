@@ -79,6 +79,38 @@ public class BridgeInstanceTests
     }
 
     [Fact]
+    public void Probe_names_the_owner_when_proc_locks_does_not()
+    {
+        using var dir = new TempDir();
+        using var sleep = Process.Start(new ProcessStartInfo("sleep", "120") { UseShellExecute = false })!;
+        var previous = Posix.ProcLocksPath;
+        Posix.ProcLocksPath = dir.File("missing-proc-locks");
+        try
+        {
+            var path = BridgeInstance.StateLockPath(dir.Path);
+            Directory.CreateDirectory(dir.Path);
+            File.WriteAllText(path, $"pid={sleep.Id}\n{PoisonSentinel}\n");
+
+            var idle = BridgeInstance.Probe(path);
+            Assert.False(idle.Held);
+            Assert.NotEqual(sleep.Id, idle.Pid);
+
+            using var held = InstanceFileLock.TryAcquire(path, InstanceLockKind.State);
+            Assert.NotNull(held);
+            var probe = BridgeInstance.Probe(path);
+            Assert.True(probe.Held);
+            Assert.Equal(Environment.ProcessId, probe.Pid);
+            Assert.False(sleep.HasExited);
+            Assert.DoesNotContain(PoisonSentinel, ReadNoLock(path));
+        }
+        finally
+        {
+            Posix.ProcLocksPath = previous;
+            try { sleep.Kill(); } catch (InvalidOperationException) { }
+        }
+    }
+
+    [Fact]
     public void A_stale_pid_hint_is_not_the_owner()
     {
         using var dir = new TempDir();

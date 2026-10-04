@@ -74,8 +74,9 @@ internal static class BridgeInstance
         if (holder.State == HolderState.NotHeld)
             return new InstanceProbe(false, null);
 
-        // /proc/locks or stat was unreadable. A non-blocking take that we immediately drop
-        // answers "is it free?" without staying the owner. Status uses this only then.
+        // /proc/locks did not name a holder, and neither did the fd table. A non-blocking
+        // take that we immediately drop answers "is it free?" without staying the owner.
+        // Status uses this only then.
         if (InstanceFileLock.TryAcquire(full, InstanceLockKind.Probe) is { } taken)
         {
             taken.Dispose();
@@ -267,6 +268,19 @@ internal readonly record struct HolderQuery(HolderState State, int? Pid);
 /// <summary>Linux flock/proc locks or macOS confined OFD locks. Owner checks do not trust a pid file.</summary>
 internal static class Posix
 {
+    /// <summary>
+    /// Linux owner source. Tests point this at a missing file on this thread to prove the
+    /// fd-table fallback still names the kernel owner and still ignores a stale pid hint.
+    /// </summary>
+    [ThreadStatic]
+    private static string? _procLocksOverride;
+
+    internal static string ProcLocksPath
+    {
+        get => _procLocksOverride ?? "/proc/locks";
+        set => _procLocksOverride = value;
+    }
+
     internal static int ELoop => OperatingSystem.IsMacOS() ? 62 : 40;
     internal const int ENoEnt = 2;
     private static int EAgain => OperatingSystem.IsMacOS() ? 35 : 11;
@@ -400,36 +414,168 @@ internal static class Posix
                 ? new HolderQuery(HolderState.NotHeld, null)
                 : new HolderQuery(HolderState.Held, record.Pid > 0 ? record.Pid : null);
         }
-        if (!TryStat(path, out _, out var major, out var minor, out var ino))
-            return new HolderQuery(HolderState.Unknown, null);
-
-        string text;
+        // /proc/locks is the fast path. A sandbox can hide that file, or statx's device id
+        // can disagree with the id printed there. Either one used to report a held lock
+        // with a null pid. The fd table is the same kernel fact: the process that holds
+        // the flock, not the pid hint written into the file.
+        string? text = null;
+        var locksReadable = false;
         try
         {
-            text = File.ReadAllText("/proc/locks");
+            text = File.ReadAllText(ProcLocksPath);
+            locksReadable = true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or DirectoryNotFoundException)
+        {
+            text = null;
+        }
+
+        if (locksReadable && text is not null && TryStat(path, out _, out var major, out var minor, out var ino))
+        {
+            var needle = $"{major:x2}:{minor:x2}:{ino}";
+            if (MatchProcLocks(text, needle) is int listed)
+                return new HolderQuery(HolderState.Held, listed);
+        }
+
+        if (MatchFdTable(path) is int owner)
+            return new HolderQuery(HolderState.Held, owner);
+
+        return locksReadable
+            ? new HolderQuery(HolderState.NotHeld, null)
+            : new HolderQuery(HolderState.Unknown, null);
+    }
+
+    private static int? MatchProcLocks(string text, string needle)
+    {
+        foreach (var raw in text.Split('\n'))
+        {
+            if (!TryParseFlockWrite(raw, out var pid, out var devIno))
+                continue;
+            if (devIno.Equals(needle, StringComparison.OrdinalIgnoreCase))
+                return pid;
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Find the process whose open file description holds a write flock on <paramref name="path"/>.
+    /// The pid comes from that process's <c>fdinfo</c> lock line.
+    /// </summary>
+    private static int? MatchFdTable(string path)
+    {
+        var full = Path.GetFullPath(path);
+        if (MatchProcessFds("/proc/self", full) is int self)
+            return self;
+
+        IEnumerable<string> procs;
+        try
+        {
+            procs = Directory.EnumerateDirectories("/proc");
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            return new HolderQuery(HolderState.Unknown, null);
+            return null;
         }
 
-        var needle = $"{major:x2}:{minor:x2}:{ino}";
-        foreach (var raw in text.Split('\n'))
+        foreach (var proc in procs)
         {
-            var parts = raw.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-            if (parts.Length < 6)
+            var name = Path.GetFileName(proc);
+            if (!int.TryParse(name, out var pid) || pid <= 0)
                 continue;
-            if (!parts[1].Equals("FLOCK", StringComparison.OrdinalIgnoreCase))
-                continue;
-            if (!parts[3].Equals("WRITE", StringComparison.OrdinalIgnoreCase))
-                continue;
-            if (!parts[5].Equals(needle, StringComparison.OrdinalIgnoreCase))
-                continue;
-            if (int.TryParse(parts[4], out var pid) && pid > 0)
-                return new HolderQuery(HolderState.Held, pid);
+            if (MatchProcessFds(proc, full) is int found)
+                return found;
         }
 
-        return new HolderQuery(HolderState.NotHeld, null);
+        return null;
+    }
+
+    private static int? MatchProcessFds(string procDir, string fullPath)
+    {
+        var fdDir = Path.Combine(procDir, "fd");
+        IEnumerable<string> fds;
+        try
+        {
+            fds = Directory.EnumerateFileSystemEntries(fdDir);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return null;
+        }
+
+        foreach (var fdPath in fds)
+        {
+            var opened = ReadProcLink(fdPath);
+            if (opened is null || !SameOpenedFile(opened, fullPath))
+                continue;
+            var infoPath = Path.Combine(procDir, "fdinfo", Path.GetFileName(fdPath));
+            string info;
+            try
+            {
+                info = File.ReadAllText(infoPath);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                continue;
+            }
+
+            foreach (var line in info.Split('\n'))
+            {
+                if (TryParseFlockWrite(line, out var pid, out _))
+                    return pid;
+            }
+        }
+
+        return null;
+    }
+
+    private static bool SameOpenedFile(string opened, string fullPath)
+    {
+        const string deleted = " (deleted)";
+        if (opened.EndsWith(deleted, StringComparison.Ordinal))
+            opened = opened[..^deleted.Length];
+        if (string.Equals(opened, fullPath, StringComparison.Ordinal))
+            return true;
+        if (!opened.StartsWith('/'))
+            return false;
+        try
+        {
+            return string.Equals(Path.GetFullPath(opened), fullPath, StringComparison.Ordinal);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
+    private static bool TryParseFlockWrite(string line, out int pid, out string devIno)
+    {
+        pid = 0;
+        devIno = "";
+        var trimmed = line.Trim();
+        if (trimmed.StartsWith("lock:", StringComparison.Ordinal))
+            trimmed = trimmed["lock:".Length..].Trim();
+        var parts = trimmed.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length < 5)
+            return false;
+        if (!parts[1].Equals("FLOCK", StringComparison.OrdinalIgnoreCase))
+            return false;
+        if (!parts[3].Equals("WRITE", StringComparison.OrdinalIgnoreCase))
+            return false;
+        if (!int.TryParse(parts[4], out pid) || pid <= 0)
+            return false;
+        if (parts.Length >= 6)
+            devIno = parts[5];
+        return true;
+    }
+
+    private static string? ReadProcLink(string path)
+    {
+        var buf = new byte[4096];
+        var n = sys_readlink(path, buf, (nuint)buf.Length);
+        if (n <= 0 || n >= buf.Length)
+            return null;
+        return Encoding.UTF8.GetString(buf, 0, (int)n);
     }
 
     public static bool SignalTerm(int pid)
@@ -538,4 +684,7 @@ internal static class Posix
 
     [DllImport("libc", EntryPoint = "kill", SetLastError = true)]
     private static extern int sys_kill(int pid, int sig);
+
+    [DllImport("libc", EntryPoint = "readlink", SetLastError = true)]
+    private static extern long sys_readlink(string pathname, byte[] buf, nuint bufsiz);
 }

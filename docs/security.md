@@ -77,7 +77,7 @@ Limits you should know about:
 
 ## Instance lock
 
-A second bridge process on the same host is refused before it opens a socket. The lock files are `{base}/bridge.instance.lock` and a hash under `/tmp/chatbridge-identity`. The hash covers the endpoint, the room, and the nick. The room name, trip, password, token, and hook secret are not written into the file name, the lock file, or the `already running`, `stop`, and `instance:` lines. The lock is same-host. Linux uses `flock` and `/proc/locks`; macOS uses process-confined open-file-description locks and `F_OFD_GETLK` to verify the owner. Reading or closing a separate descriptor does not release the owner's lock. It does not stop a second host from joining.
+A second bridge process on the same host is refused before it opens a socket. The lock files are `{base}/bridge.instance.lock` and a hash under `/tmp/chatbridge-identity`. The hash covers the endpoint, the room, and the nick. The room name, trip, password, token, and hook secret are not written into the file name, the lock file, or the `already running`, `stop`, and `instance:` lines. The lock is same-host. Linux uses `flock` and `/proc/locks` (or the process fd table when `/proc/locks` does not name the holder); macOS uses process-confined open-file-description locks and `F_OFD_GETLK` to verify the owner. Reading or closing a separate descriptor does not release the owner's lock. It does not stop a second host from joining.
 
 ## Channel names
 
