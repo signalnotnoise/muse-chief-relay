@@ -16,6 +16,8 @@ without private diagnostics in the guide's troubleshooting section.
 
 `run.sh` remains the legacy Debug/compatibility route. `./go` / `bots/dot/go.py`
 uses the remote MCP Events backend; it is not the local independent-wake adapter.
+See [MCP_EVENTS.md](MCP_EVENTS.md) for its callback locking, subscription races,
+bounded retry/restart behavior, and completion/export limitations.
 
 ## Status and durable-setup proposal — 2026-10-03
 
