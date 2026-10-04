@@ -79,6 +79,392 @@ public class BridgeInstanceTests
     }
 
     [Fact]
+    public void Overlay_device_id_mismatch_still_names_the_locks_owner()
+    {
+        using var dir = new TempDir();
+        using var sleep = Process.Start(new ProcessStartInfo("sleep", "120") { UseShellExecute = false })!;
+        var path = BridgeInstance.StateLockPath(dir.Path);
+        File.WriteAllText(path, $"pid={sleep.Id}\n{PoisonSentinel}\n");
+        var child = StartLockHolder(path);
+        try
+        {
+            var devIno = FlockDevIno(child.Id, path);
+            Assert.NotNull(devIno);
+            var bits = devIno!.Split(':');
+            var major = Convert.ToUInt32(bits[0], 16);
+            var minor = Convert.ToUInt32(bits[1], 16);
+            Posix.SetStatDeviceOverride(major, minor == uint.MaxValue ? minor - 1 : minor + 1);
+            var probe = BridgeInstance.Probe(path);
+            Assert.True(probe.Held);
+            Assert.Equal(child.Id, probe.Pid);
+            Assert.NotEqual(sleep.Id, probe.Pid);
+            Assert.False(child.HasExited);
+            Assert.False(sleep.HasExited);
+            Assert.Contains(PoisonSentinel, ReadNoLock(path), StringComparison.Ordinal);
+        }
+        finally
+        {
+            Posix.SetStatDeviceOverride(null, null);
+            try { if (!child.HasExited) child.Kill(); } catch (InvalidOperationException) { }
+            try { sleep.Kill(); } catch (InvalidOperationException) { }
+        }
+    }
+
+    [Fact]
+    public void Probe_names_the_owner_when_proc_locks_does_not()
+    {
+        using var dir = new TempDir();
+        using var sleep = Process.Start(new ProcessStartInfo("sleep", "120") { UseShellExecute = false })!;
+        var previous = Posix.ProcLocksPath;
+        Posix.ProcLocksPath = dir.File("missing-proc-locks");
+        try
+        {
+            var path = BridgeInstance.StateLockPath(dir.Path);
+            Directory.CreateDirectory(dir.Path);
+            File.WriteAllText(path, $"pid={sleep.Id}\n{PoisonSentinel}\n");
+
+            var idle = BridgeInstance.Probe(path);
+            Assert.False(idle.Held);
+            Assert.NotEqual(sleep.Id, idle.Pid);
+
+            using var held = InstanceFileLock.TryAcquire(path, InstanceLockKind.State);
+            Assert.NotNull(held);
+            var probe = BridgeInstance.Probe(path);
+            Assert.True(probe.Held);
+            Assert.Equal(Environment.ProcessId, probe.Pid);
+            Assert.False(sleep.HasExited);
+            Assert.DoesNotContain(PoisonSentinel, ReadNoLock(path));
+        }
+        finally
+        {
+            Posix.ProcLocksPath = previous;
+            try { sleep.Kill(); } catch (InvalidOperationException) { }
+        }
+    }
+
+    [Fact]
+    public void A_deleted_and_recreated_lock_file_is_not_owned_by_the_old_descriptor()
+    {
+        using var dir = new TempDir();
+        var path = BridgeInstance.StateLockPath(dir.Path);
+        File.WriteAllText(path, "pid=1\n");
+        var child = StartLockHolder(path);
+        try
+        {
+            var owned = BridgeInstance.Probe(path);
+            Assert.True(owned.Held);
+            Assert.Equal(child.Id, owned.Pid);
+
+            File.Delete(path);
+            File.WriteAllText(path, $"pid={child.Id}\n{PoisonSentinel}\n");
+
+            var query = Posix.QueryFlockHolder(path);
+            Assert.NotEqual(HolderState.Held, query.State);
+            Assert.NotEqual(child.Id, query.Pid);
+
+            var probe = BridgeInstance.Probe(path);
+            Assert.False(probe.Held);
+            Assert.NotEqual(child.Id, probe.Pid);
+            Assert.False(child.HasExited);
+            Assert.Contains(PoisonSentinel, ReadNoLock(path), StringComparison.Ordinal);
+        }
+        finally
+        {
+            try { if (!child.HasExited) child.Kill(); } catch (InvalidOperationException) { }
+        }
+    }
+
+    [Fact]
+    public void A_readable_proc_locks_device_mismatch_is_unknown_and_is_not_the_owner()
+    {
+        using var dir = new TempDir();
+        using var sleep = Process.Start(new ProcessStartInfo("sleep", "120") { UseShellExecute = false })!;
+        var path = BridgeInstance.StateLockPath(dir.Path);
+        File.WriteAllText(path, $"pid={sleep.Id}\n{PoisonSentinel}\n");
+        var fake = dir.File("locks");
+        File.WriteAllText(fake, $"1: FLOCK  ADVISORY  WRITE {sleep.Id} ff:ff:1 0 EOF\n");
+        var previous = Posix.ProcLocksPath;
+        Posix.ProcLocksPath = fake;
+        try
+        {
+            var query = Posix.QueryFlockHolder(path);
+            Assert.Equal(HolderState.Unknown, query.State);
+            Assert.Null(query.Pid);
+
+            var probe = BridgeInstance.Probe(path);
+            Assert.False(probe.Held);
+            Assert.NotEqual(sleep.Id, probe.Pid);
+            Assert.False(sleep.HasExited);
+            Assert.Contains(PoisonSentinel, ReadNoLock(path), StringComparison.Ordinal);
+        }
+        finally
+        {
+            Posix.ProcLocksPath = previous;
+            try { sleep.Kill(); } catch (InvalidOperationException) { }
+        }
+    }
+
+    [Fact]
+    public void An_incomplete_proc_locks_line_is_unknown_and_does_not_name_its_pid()
+    {
+        using var dir = new TempDir();
+        using var sleep = Process.Start(new ProcessStartInfo("sleep", "120") { UseShellExecute = false })!;
+        var path = BridgeInstance.StateLockPath(dir.Path);
+        File.WriteAllText(path, $"pid={sleep.Id}\n");
+        var fake = dir.File("locks");
+        File.WriteAllText(fake, $"1: FLOCK  ADVISORY  WRITE {sleep.Id}\n");
+        var previous = Posix.ProcLocksPath;
+        Posix.ProcLocksPath = fake;
+        try
+        {
+            var query = Posix.QueryFlockHolder(path);
+            Assert.Equal(HolderState.Unknown, query.State);
+            Assert.Null(query.Pid);
+
+            var probe = BridgeInstance.Probe(path);
+            Assert.False(probe.Held);
+            Assert.NotEqual(sleep.Id, probe.Pid);
+            Assert.False(sleep.HasExited);
+        }
+        finally
+        {
+            Posix.ProcLocksPath = previous;
+            try { sleep.Kill(); } catch (InvalidOperationException) { }
+        }
+    }
+
+    [Fact]
+    public void Hidden_fdinfo_keeps_a_held_lock_without_borrowing_a_mismatched_pid()
+    {
+        using var dir = new TempDir();
+        using var sleep = Process.Start(new ProcessStartInfo("sleep", "120") { UseShellExecute = false })!;
+        var path = BridgeInstance.StateLockPath(dir.Path);
+        using var held = InstanceFileLock.TryAcquire(path, InstanceLockKind.State);
+        Assert.NotNull(held);
+        var fake = dir.File("locks");
+        File.WriteAllText(fake, $"1: FLOCK  ADVISORY  WRITE {sleep.Id} ff:ff:1 0 EOF\n");
+        var previous = Posix.ProcLocksPath;
+        Posix.ProcLocksPath = fake;
+        Posix.SetHideFdInfo(true);
+        try
+        {
+            var query = Posix.QueryFlockHolder(path);
+            Assert.Equal(HolderState.Unknown, query.State);
+            Assert.Null(query.Pid);
+
+            var probe = BridgeInstance.Probe(path);
+            Assert.True(probe.Held);
+            Assert.Null(probe.Pid);
+            Assert.False(sleep.HasExited);
+        }
+        finally
+        {
+            Posix.ProcLocksPath = previous;
+            Posix.SetHideFdInfo(false);
+            try { sleep.Kill(); } catch (InvalidOperationException) { }
+        }
+    }
+
+    [Fact]
+    public void A_child_process_that_holds_the_flock_is_the_owner()
+    {
+        using var dir = new TempDir();
+        using var sleep = Process.Start(new ProcessStartInfo("sleep", "120") { UseShellExecute = false })!;
+        var path = BridgeInstance.StateLockPath(dir.Path);
+        File.WriteAllText(path, $"pid={sleep.Id}\n{PoisonSentinel}\n");
+        var child = StartLockHolder(path);
+        try
+        {
+            var query = Posix.QueryFlockHolder(path);
+            Assert.Equal(HolderState.Held, query.State);
+            Assert.Equal(child.Id, query.Pid);
+
+            var probe = BridgeInstance.Probe(path);
+            Assert.True(probe.Held);
+            Assert.Equal(child.Id, probe.Pid);
+            Assert.NotEqual(sleep.Id, probe.Pid);
+            Assert.False(child.HasExited);
+            Assert.False(sleep.HasExited);
+            Assert.Contains(PoisonSentinel, ReadNoLock(path), StringComparison.Ordinal);
+        }
+        finally
+        {
+            try { if (!child.HasExited) child.Kill(); } catch (InvalidOperationException) { }
+            try { sleep.Kill(); } catch (InvalidOperationException) { }
+        }
+    }
+
+    [Fact]
+    public void A_cross_mount_lexical_device_is_not_the_owner()
+    {
+        using var dir = new TempDir();
+        using var sleep = Process.Start(new ProcessStartInfo("sleep", "120") { UseShellExecute = false })!;
+        var path = BridgeInstance.StateLockPath(dir.Path);
+        File.WriteAllText(path, $"pid={sleep.Id}\n{PoisonSentinel}\n");
+        try
+        {
+            AssertDecoyMountIsNotOwner(path, sleep, symlinkParent: null);
+            Assert.Contains(PoisonSentinel, ReadNoLock(path), StringComparison.Ordinal);
+        }
+        finally
+        {
+            try { sleep.Kill(); } catch (InvalidOperationException) { }
+        }
+    }
+
+    [Fact]
+    public void A_symlink_parent_does_not_adopt_the_lexical_mount_device()
+    {
+        using var dir = new TempDir();
+        using var sleep = Process.Start(new ProcessStartInfo("sleep", "120") { UseShellExecute = false })!;
+        var real = dir.File("real");
+        Directory.CreateDirectory(real);
+        var link = dir.File("link");
+        Directory.CreateSymbolicLink(link, real);
+        var path = Path.Combine(link, BridgeInstance.StateLockName);
+        File.WriteAllText(path, $"pid={sleep.Id}\n{PoisonSentinel}\n");
+        try
+        {
+            AssertDecoyMountIsNotOwner(path, sleep, symlinkParent: link);
+            Assert.Contains(PoisonSentinel, ReadNoLock(path), StringComparison.Ordinal);
+            Assert.True((File.GetAttributes(link) & FileAttributes.ReparsePoint) != 0);
+            Assert.EndsWith($"{Path.DirectorySeparatorChar}link{Path.DirectorySeparatorChar}{BridgeInstance.StateLockName}", Path.GetFullPath(path));
+        }
+        finally
+        {
+            try { sleep.Kill(); } catch (InvalidOperationException) { }
+        }
+    }
+
+    [Fact]
+    public void Stop_refuses_to_signal_when_the_owner_pid_is_missing()
+    {
+        using var dir = new TempDir();
+        using var sleep = Process.Start(new ProcessStartInfo("sleep", "120") { UseShellExecute = false })!;
+        var cfg = RelayConfig.Load(WriteConfig(dir, "ws://127.0.0.1:9/relay", "room-" + Guid.NewGuid().ToString("N"), "n", null), false, dir.Path, _ => null);
+        var path = BridgeInstance.StateLockPath(cfg.BaseDir);
+        using var held = InstanceFileLock.TryAcquire(path, InstanceLockKind.State);
+        Assert.NotNull(held);
+        var previous = Posix.ProcLocksPath;
+        Posix.ProcLocksPath = dir.File("empty-locks");
+        File.WriteAllText(Posix.ProcLocksPath, "");
+        Posix.SetHideFdInfo(true);
+        try
+        {
+            var probe = BridgeInstance.Probe(path);
+            Assert.True(probe.Held);
+            Assert.Null(probe.Pid);
+
+            var stop = BridgeInstance.Stop(cfg);
+            Assert.Equal(InstanceStopKind.Blocked, stop.Kind);
+            Assert.Contains("could not be verified", stop.Detail);
+            Assert.False(sleep.HasExited);
+        }
+        finally
+        {
+            Posix.ProcLocksPath = previous;
+            Posix.SetHideFdInfo(false);
+            try { sleep.Kill(); } catch (InvalidOperationException) { }
+        }
+    }
+
+    [Fact]
+    public void Stop_refuses_to_signal_a_locks_pid_whose_descriptor_is_not_this_file()
+    {
+        using var dir = new TempDir();
+        using var sleep = Process.Start(new ProcessStartInfo("sleep", "120") { UseShellExecute = false })!;
+        var cfg = RelayConfig.Load(WriteConfig(dir, "ws://127.0.0.1:9/relay", "room-" + Guid.NewGuid().ToString("N"), "n", null), false, dir.Path, _ => null);
+        var path = BridgeInstance.StateLockPath(cfg.BaseDir);
+        var held = InstanceFileLock.TryAcquire(path, InstanceLockKind.State);
+        Assert.NotNull(held);
+        string? devIno = null;
+        foreach (var fd in Directory.EnumerateFileSystemEntries("/proc/self/fd"))
+        {
+            if (ReadLink(fd) != Path.GetFullPath(path))
+                continue;
+            var info = File.ReadAllText(Path.Combine("/proc/self/fdinfo", Path.GetFileName(fd)));
+            foreach (var line in info.Split('\n'))
+            {
+                var token = line.Split((char[])null!, StringSplitOptions.RemoveEmptyEntries)
+                    .FirstOrDefault(part => part.Split(':') is { Length: 3 } bits
+                        && bits[0].Length > 0 && bits[1].Length > 0 && bits[2].Length > 0
+                        && bits.All(bit => bit.All(Uri.IsHexDigit)));
+                if (line.Contains("FLOCK", StringComparison.Ordinal) && token is not null)
+                    devIno = token;
+            }
+        }
+
+        held!.Dispose();
+        Assert.NotNull(devIno);
+        Assert.False(Posix.OwnerDescriptorRefersTo(path, sleep.Id));
+
+        var fake = dir.File("locks");
+        File.WriteAllText(fake, $"1: FLOCK  ADVISORY  WRITE {sleep.Id} {devIno} 0 EOF\n");
+        var previous = Posix.ProcLocksPath;
+        Posix.ProcLocksPath = fake;
+        try
+        {
+            var query = Posix.QueryFlockHolder(path);
+            Assert.NotEqual(sleep.Id, query.Pid);
+
+            var probe = BridgeInstance.Probe(path);
+            Assert.False(probe.Held);
+            Assert.NotEqual(sleep.Id, probe.Pid);
+
+            var stop = BridgeInstance.Stop(cfg);
+            Assert.NotEqual(InstanceStopKind.Stopped, stop.Kind);
+            Assert.DoesNotContain("stopped", stop.Detail);
+            Assert.False(sleep.HasExited);
+        }
+        finally
+        {
+            Posix.ProcLocksPath = previous;
+            try { sleep.Kill(); } catch (InvalidOperationException) { }
+        }
+    }
+
+    [Fact]
+    public void Mac_os_ofd_owner_is_not_rejected_because_proc_is_absent()
+    {
+        // Simulation. Platform is selected here so Darwin does not take the host path,
+        // where OwnerConfirmed is already true before any override. SIGTERM stays
+        // suppressed, so this does not prove a real macOS stop or restart.
+        using var dir = new TempDir();
+        using var sleep = Process.Start(new ProcessStartInfo("sleep", "120") { UseShellExecute = false })!;
+        var cfg = RelayConfig.Load(WriteConfig(dir, "ws://127.0.0.1:9/relay", "room-" + Guid.NewGuid().ToString("N"), "n", null), false, dir.Path, _ => null);
+        var path = BridgeInstance.StateLockPath(cfg.BaseDir);
+        File.WriteAllText(path, $"pid={sleep.Id}\n");
+        BridgeInstance.TestStateProbe = new InstanceProbe(true, sleep.Id);
+        try
+        {
+            Posix.SetOwnerPlatform(Posix.OwnerPlatform.Linux);
+            Assert.False(Posix.OwnerDescriptorRefersTo(path, sleep.Id));
+            Assert.False(Posix.OwnerConfirmed(path, sleep.Id));
+
+            var blocked = BridgeInstance.Stop(cfg);
+            Assert.Equal(InstanceStopKind.Blocked, blocked.Kind);
+            Assert.Contains("could not be verified", blocked.Detail);
+            Assert.False(sleep.HasExited);
+
+            Posix.SetOwnerPlatform(Posix.OwnerPlatform.MacOs);
+            BridgeInstance.TestSuppressSignal = true;
+            Assert.True(Posix.OwnerConfirmed(path, sleep.Id));
+            var allowed = BridgeInstance.Stop(cfg);
+            Assert.Equal(InstanceStopKind.Stopped, allowed.Kind);
+            Assert.Contains("owner " + sleep.Id + " verified", allowed.Detail);
+            Assert.DoesNotContain("could not be verified", allowed.Detail);
+            Assert.False(sleep.HasExited);
+        }
+        finally
+        {
+            BridgeInstance.TestStateProbe = null;
+            BridgeInstance.TestSuppressSignal = false;
+            Posix.SetOwnerPlatform(Posix.OwnerPlatform.Host);
+            try { sleep.Kill(); } catch (InvalidOperationException) { }
+        }
+    }
+
+    [Fact]
     public void A_stale_pid_hint_is_not_the_owner()
     {
         using var dir = new TempDir();
@@ -430,6 +816,121 @@ public class BridgeInstanceTests
         finally
         {
             sys_close(fd);
+        }
+    }
+
+    private static void AssertDecoyMountIsNotOwner(string path, Process sleep, string? symlinkParent)
+    {
+        var inode = Inode(path);
+        var resolvedDir = Path.GetDirectoryName(Path.GetFullPath(path))!;
+        var tableDir = symlinkParent is null ? resolvedDir : Path.GetDirectoryName(symlinkParent)!;
+        var table = Path.Combine(tableDir, "mountinfo-" + Guid.NewGuid().ToString("N"));
+        var lines = $"50 1 255:238 / {resolvedDir} rw - ext4 /dev/wrong rw\n";
+        if (symlinkParent is not null)
+            lines += $"51 1 255:237 / {symlinkParent} rw - ext4 /dev/link rw\n";
+        File.WriteAllText(table, lines);
+
+        var locks = table + ".locks";
+        File.WriteAllText(locks,
+            $"1: FLOCK  ADVISORY  WRITE {sleep.Id} ff:ee:{inode} 0 EOF\n" +
+            $"2: FLOCK  ADVISORY  WRITE {sleep.Id} ff:ed:{inode} 0 EOF\n");
+
+        var previousLocks = Posix.ProcLocksPath;
+        var previousMounts = Posix.MountInfoPath;
+        Posix.ProcLocksPath = locks;
+        Posix.MountInfoPath = table;
+        try
+        {
+            var query = Posix.QueryFlockHolder(path);
+            Assert.NotEqual(HolderState.Held, query.State);
+            Assert.NotEqual(sleep.Id, query.Pid);
+
+            var probe = BridgeInstance.Probe(path);
+            Assert.False(probe.Held);
+            Assert.NotEqual(sleep.Id, probe.Pid);
+            Assert.False(sleep.HasExited);
+        }
+        finally
+        {
+            Posix.ProcLocksPath = previousLocks;
+            Posix.MountInfoPath = previousMounts;
+        }
+    }
+
+    private static string? FlockDevIno(int pid, string path)
+    {
+        var full = Path.GetFullPath(path);
+        var fdDir = "/proc/" + pid.ToString(System.Globalization.CultureInfo.InvariantCulture) + "/fd";
+        foreach (var fd in Directory.EnumerateFileSystemEntries(fdDir))
+        {
+            if (ReadLink(fd) != full)
+                continue;
+            var info = File.ReadAllText(Path.Combine("/proc/" + pid.ToString(System.Globalization.CultureInfo.InvariantCulture) + "/fdinfo", Path.GetFileName(fd)));
+            foreach (var line in info.Split('\n'))
+            {
+                var token = line.Split((char[])null!, StringSplitOptions.RemoveEmptyEntries)
+                    .FirstOrDefault(part => part.Split(':') is { Length: 3 } bits
+                        && bits[0].Length > 0 && bits[1].Length > 0 && bits[2].Length > 0
+                        && bits.All(bit => bit.All(Uri.IsHexDigit)));
+                if (line.Contains("FLOCK", StringComparison.Ordinal) && token is not null)
+                    return token;
+            }
+        }
+
+        return null;
+    }
+
+    private static ulong Inode(string path)
+    {
+        var psi = new ProcessStartInfo("stat")
+        {
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true
+        };
+        psi.ArgumentList.Add("-c");
+        psi.ArgumentList.Add("%i");
+        psi.ArgumentList.Add(path);
+        using var proc = Process.Start(psi)!;
+        var text = proc.StandardOutput.ReadToEnd();
+        var err = proc.StandardError.ReadToEnd();
+        proc.WaitForExit();
+        if (proc.ExitCode != 0 || !ulong.TryParse(text.Trim(), out var inode))
+            throw new InvalidOperationException($"stat inode failed for {path}: {err}");
+        return inode;
+    }
+
+    private static Process StartLockHolder(string path)
+    {
+        var script = Path.Combine(Path.GetDirectoryName(path)!, "hold-lock.py");
+        File.WriteAllText(script, """
+            import fcntl, os, sys, time
+            fd = os.open(sys.argv[1], os.O_RDWR)
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            print("ready", flush=True)
+            time.sleep(120)
+            """);
+        var psi = new ProcessStartInfo("python3")
+        {
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true
+        };
+        psi.ArgumentList.Add(script);
+        psi.ArgumentList.Add(path);
+        var proc = Process.Start(psi)!;
+        try
+        {
+            var ready = proc.StandardOutput.ReadLine();
+            if (ready == "ready")
+                return proc;
+            var err = proc.StandardError.ReadToEnd();
+            throw new InvalidOperationException($"lock holder did not lock ({ready}): {err}");
+        }
+        catch
+        {
+            try { if (!proc.HasExited) proc.Kill(); } catch (InvalidOperationException) { }
+            throw;
         }
     }
 

@@ -126,6 +126,16 @@
         "type": "error",
         "code": "lease_expired"
       }
+    },
+    {
+      "id": "rate_limited",
+      "evidence": "Explicit send rejection after bytes have left. retryAfterMs is the server delay in milliseconds. This frame is not an accept receipt. A missing delay uses the client default, and the delay is capped.",
+      "frame": {
+        "v": 2,
+        "type": "error",
+        "code": "rate_limited",
+        "retryAfterMs": 1000
+      }
     }
   ],
   "unresolved": [

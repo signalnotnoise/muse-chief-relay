@@ -201,6 +201,8 @@ internal sealed class RelayFixture : IAsyncDisposable
     public Action<string>? Stdout { get; set; }
     public double? ReceiveIdleSeconds { get; init; }
     public bool ProtocolV2 { get; init; }
+    public bool V2SendDedup { get; init; }
+    public bool V2EchoCompat { get; init; }
     public bool DurableOutbox { get; init; }
     public string? InboxOwnerEnv { get; init; }
     public Func<DateTimeOffset>? UtcNow { get; set; }
@@ -342,6 +344,10 @@ internal sealed class RelayFixture : IAsyncDisposable
             doc["receive_idle_s"] = idle;
         if (ProtocolV2)
             doc["protocol_v2"] = true;
+        if (V2SendDedup)
+            doc["v2_send_dedup"] = true;
+        if (V2EchoCompat)
+            doc["v2_echo_compat"] = true;
         if (DurableOutbox)
             doc["durable_outbox"] = true;
         if (!string.IsNullOrEmpty(InboxOwnerEnv))

@@ -69,20 +69,24 @@ internal static class BridgeInstance
             return new InstanceProbe(false, null);
 
         var holder = Posix.QueryFlockHolder(full);
-        if (holder.State == HolderState.Held)
-            return new InstanceProbe(true, holder.Pid);
         if (holder.State == HolderState.NotHeld)
             return new InstanceProbe(false, null);
+        // A verified pid is only returned together with Held when the device id or the
+        // live descriptor's inode matched this file. Held without a pid means the kernel
+        // probe found the lock and the owner could not be verified. Stop does not signal that.
+        if (holder.State == HolderState.Held && holder.Pid is int verified)
+            return new InstanceProbe(true, verified);
 
-        // /proc/locks or stat was unreadable. A non-blocking take that we immediately drop
-        // answers "is it free?" without staying the owner. Status uses this only then.
+        // Readable /proc/locks that did not match, a permission-denied fd table, or a
+        // device id that is not this file. The non-blocking take decides whether THIS
+        // inode is held. It does not stay the owner and it does not invent a pid.
         if (InstanceFileLock.TryAcquire(full, InstanceLockKind.Probe) is { } taken)
         {
             taken.Dispose();
             return new InstanceProbe(false, null);
         }
 
-        return new InstanceProbe(true, null);
+        return new InstanceProbe(true, Posix.DiscoverOwnerPid(full));
     }
 
     public static string StatusLine(RelayConfig cfg)
@@ -106,10 +110,34 @@ internal static class BridgeInstance
     /// Signal the process that currently holds this config's state lock.
     /// A connected socket is not a reason to skip the signal.
     /// </summary>
+    /// <summary>
+    /// Tests feed the probe macOS <c>F_OFD_GETLK</c> would return. Linux production leaves this unset.
+    /// </summary>
+    [ThreadStatic]
+    private static InstanceProbe? _testStateProbe;
+
+    internal static InstanceProbe? TestStateProbe
+    {
+        get => _testStateProbe;
+        set => _testStateProbe = value;
+    }
+
+    /// <summary>
+    /// Tests stop before <c>SIGTERM</c> once the owner has been confirmed.
+    /// </summary>
+    [ThreadStatic]
+    private static bool _testSuppressSignal;
+
+    internal static bool TestSuppressSignal
+    {
+        get => _testSuppressSignal;
+        set => _testSuppressSignal = value;
+    }
+
     public static InstanceStop Stop(RelayConfig cfg)
     {
         var statePath = StateLockPath(cfg.BaseDir);
-        var state = Probe(statePath);
+        var state = TestStateProbe ?? Probe(statePath);
         if (!state.Held)
         {
             var identity = Probe(IdentityLockPath(cfg));
@@ -123,8 +151,15 @@ internal static class BridgeInstance
             return InstanceStop.Absent("[chatbridge] stop: not running");
         }
 
-        if (state.Pid is not int owner || owner <= 1 || owner == Environment.ProcessId)
+        // Linux: a /proc/locks pid still needs a descriptor for this file.
+        // macOS: the preceding F_OFD_GETLK probe already named the owner.
+        // Stop trusts that pid. It does not read /proc and does not query OFD again.
+        if (state.Pid is not int owner || owner <= 1 || owner == Environment.ProcessId
+            || !Posix.OwnerConfirmed(statePath, owner))
             return InstanceStop.Block("[chatbridge] stop: the state lock is held, but the owner could not be verified");
+
+        if (TestSuppressSignal)
+            return InstanceStop.Stopped($"[chatbridge] stop: owner {owner} verified");
 
         if (!Posix.SignalTerm(owner))
         {
@@ -267,6 +302,75 @@ internal readonly record struct HolderQuery(HolderState State, int? Pid);
 /// <summary>Linux flock/proc locks or macOS confined OFD locks. Owner checks do not trust a pid file.</summary>
 internal static class Posix
 {
+    /// <summary>
+    /// Linux owner source. Tests point this at a missing file on this thread to prove the
+    /// fd-table fallback still names the kernel owner and still ignores a stale pid hint.
+    /// </summary>
+    [ThreadStatic]
+    private static string? _procLocksOverride;
+
+    internal static string ProcLocksPath
+    {
+        get => _procLocksOverride ?? "/proc/locks";
+        set => _procLocksOverride = value;
+    }
+
+    /// <summary>
+    /// Tests point this at a mount table where a longer path prefix is a different device.
+    /// A known statx mount id must not adopt that device.
+    /// </summary>
+    [ThreadStatic]
+    private static string? _mountInfoOverride;
+
+    internal static string MountInfoPath
+    {
+        get => _mountInfoOverride ?? "/proc/self/mountinfo";
+        set => _mountInfoOverride = value;
+    }
+
+    /// <summary>
+    /// When set, the statx device id is replaced for the /proc/locks needle only.
+    /// Mountinfo keeps the device id the kernel actually prints. Tests use this to
+    /// reproduce an overlay host where stx_dev_minor and the locks minor differ.
+    /// </summary>
+    [ThreadStatic]
+    private static uint? _statMajorOverride;
+
+    [ThreadStatic]
+    private static uint? _statMinorOverride;
+
+    internal static void SetStatDeviceOverride(uint? major, uint? minor)
+    {
+        _statMajorOverride = major;
+        _statMinorOverride = minor;
+    }
+
+    /// <summary>
+    /// Tests hide <c>fdinfo</c> so a readable <c>/proc/locks</c> miss cannot borrow a pid
+    /// from the fd table. The non-blocking probe still decides whether the file is held.
+    /// </summary>
+    [ThreadStatic]
+    private static bool _hideFdInfo;
+
+    internal static void SetHideFdInfo(bool hide) => _hideFdInfo = hide;
+
+    /// <summary>
+    /// Which owner check <see cref="OwnerConfirmed"/> uses. Production stays on
+    /// <see cref="OwnerPlatform.Host"/>. Tests select Linux or macOS so a Darwin host,
+    /// which already trusts the preceding OFD probe, can still exercise the rejection.
+    /// </summary>
+    internal enum OwnerPlatform
+    {
+        Host = 0,
+        Linux = 1,
+        MacOs = 2,
+    }
+
+    [ThreadStatic]
+    private static OwnerPlatform _testOwnerPlatform;
+
+    internal static void SetOwnerPlatform(OwnerPlatform platform) => _testOwnerPlatform = platform;
+
     internal static int ELoop => OperatingSystem.IsMacOS() ? 62 : 40;
     internal const int ENoEnt = 2;
     private static int EAgain => OperatingSystem.IsMacOS() ? 35 : 11;
@@ -290,6 +394,7 @@ internal static class Posix
     private const int AtFdcwd = -100;
     private const int AtSymlinkNoFollow = 0x100;
     private const int StatxBasic = 0x7ff;
+    private const int StatxMntId = 0x1000;
     private const int SigTerm = 15;
 
     private const ushort SIfmt = 0xF000;
@@ -381,7 +486,7 @@ internal static class Posix
     {
         if (OperatingSystem.IsMacOS())
             return new FileInfo(path).LinkTarget is not null;
-        if (!TryStat(path, out var mode, out _, out _, out _))
+        if (!TryStat(path, out var mode, out _, out _, out _, out _))
             return false;
         return (mode & SIfmt) == SIflnk;
     }
@@ -400,36 +505,376 @@ internal static class Posix
                 ? new HolderQuery(HolderState.NotHeld, null)
                 : new HolderQuery(HolderState.Held, record.Pid > 0 ? record.Pid : null);
         }
-        if (!TryStat(path, out _, out var major, out var minor, out var ino))
-            return new HolderQuery(HolderState.Unknown, null);
+        // /proc/locks prints the superblock device (the id findmnt shows). statx stx_dev
+        // on overlay can be a different minor, so a needle built only from stx_dev misses
+        // a lock that is actually held. That miss must not become NotHeld: TryAcquire
+        // never runs, and Probe reports the file free. A pid hint in the file is not consulted.
+        string? text = null;
+        var locksReadable = false;
+        try
+        {
+            text = File.ReadAllText(ProcLocksPath);
+            locksReadable = true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or DirectoryNotFoundException)
+        {
+            text = null;
+        }
 
+        var statOk = TryStat(path, out _, out var major, out var minor, out var ino, out var mntId);
+        if (_statMajorOverride is uint forcedMajor && _statMinorOverride is uint forcedMinor)
+        {
+            major = forcedMajor;
+            minor = forcedMinor;
+        }
+
+        var needles = new List<string>();
+        var comparedMount = false;
+        if (statOk)
+        {
+            needles.Add(FormatDevIno(major, minor, ino));
+            foreach (var mount in MountDevices(mntId, path))
+            {
+                comparedMount = true;
+                var needle = FormatDevIno(mount.Major, mount.Minor, ino);
+                if (!needles.Contains(needle, StringComparer.OrdinalIgnoreCase))
+                    needles.Add(needle);
+            }
+        }
+
+        var incomplete = false;
+        var deviceMismatch = false;
+        var unverifiedPid = false;
+        if (locksReadable && text is not null)
+        {
+            // A device:inode hit is not the owner until that pid's descriptor still
+            // refers to this file. Another filesystem can reuse the inode.
+            if (MatchVerifiedLock(text, path, needles, out var listed, out incomplete, out deviceMismatch, out unverifiedPid))
+                return new HolderQuery(HolderState.Held, listed);
+        }
+
+        var scan = MatchFdTable(path);
+        if (scan.Found)
+            return new HolderQuery(HolderState.Held, scan.Pid);
+
+        // A readable locks file that did not name this device:inode is not proof the
+        // file is free. Permission-denied fdinfo, a half-parsed line, and a locks pid
+        // whose descriptor is not this file are the same. Unknown lets Probe's
+        // non-blocking take decide, without adopting a pid.
+        if (!locksReadable || !statOk || !comparedMount || scan.Denied || incomplete || deviceMismatch || unverifiedPid)
+            return new HolderQuery(HolderState.Unknown, null);
+        return new HolderQuery(HolderState.NotHeld, null);
+    }
+
+    /// <summary>
+    /// Pid of a descriptor that still refers to <paramref name="path"/> and holds a write flock.
+    /// A deleted or replaced descriptor is not an owner. Null when none is visible.
+    /// </summary>
+    internal static int? DiscoverOwnerPid(string path)
+    {
+        var scan = MatchFdTable(path);
+        return scan.Found ? scan.Pid : null;
+    }
+
+    /// <summary>
+    /// True only when <paramref name="pid"/> has a write flock on a descriptor that is still
+    /// <paramref name="path"/>. Linux stop uses this. A /proc/locks pid whose descriptor is
+    /// missing, deleted, or a different file is not an owner.
+    /// </summary>
+    internal static bool OwnerDescriptorRefersTo(string path, int pid)
+    {
+        if (pid <= 1 || _hideFdInfo)
+            return false;
+        var scan = MatchProcessFds("/proc/" + pid.ToString(System.Globalization.CultureInfo.InvariantCulture), Path.GetFullPath(path));
+        return scan.Found && scan.Pid == pid;
+    }
+
+    /// <summary>
+    /// Whether stop may signal <paramref name="pid"/>. Linux re-checks the descriptor.
+    /// macOS trusts the pid from the preceding <c>F_OFD_GETLK</c> probe. It does not read
+    /// <c>/proc</c> and it does not issue a second OFD query.
+    /// </summary>
+    internal static bool OwnerConfirmed(string path, int pid)
+    {
+        if (pid <= 1)
+            return false;
+        if (TrustsPrecedingOfdOwner())
+            return true;
+        return OwnerDescriptorRefersTo(path, pid);
+    }
+
+    private static bool TrustsPrecedingOfdOwner() =>
+        _testOwnerPlatform switch
+        {
+            OwnerPlatform.MacOs => true,
+            OwnerPlatform.Linux => false,
+            _ => OperatingSystem.IsMacOS(),
+        };
+
+    private static bool MatchVerifiedLock(string text, string path, List<string> needles, out int pid, out bool incomplete, out bool deviceMismatch, out bool unverifiedPid)
+    {
+        pid = 0;
+        incomplete = false;
+        deviceMismatch = false;
+        unverifiedPid = false;
+        foreach (var raw in text.Split('\n'))
+        {
+            if (raw.IndexOf("FLOCK", StringComparison.OrdinalIgnoreCase) < 0)
+                continue;
+            if (!TryParseFlockWrite(raw, out var linePid, out var devIno) || devIno.Length == 0)
+            {
+                incomplete = true;
+                continue;
+            }
+
+            var matched = false;
+            foreach (var needle in needles)
+            {
+                if (!devIno.Equals(needle, StringComparison.OrdinalIgnoreCase))
+                    continue;
+                matched = true;
+                break;
+            }
+
+            if (!matched)
+            {
+                deviceMismatch = true;
+                continue;
+            }
+
+            if (OwnerDescriptorRefersTo(path, linePid))
+            {
+                pid = linePid;
+                return true;
+            }
+
+            unverifiedPid = true;
+        }
+
+        return false;
+    }
+
+    private readonly record struct DevId(uint Major, uint Minor);
+
+    private static string FormatDevIno(uint major, uint minor, ulong ino) =>
+        $"{major:x2}:{minor:x2}:{ino}";
+
+    /// <summary>
+    /// Device id for this path from mountinfo. When statx already reported a mount id, that
+    /// id's device is the only candidate. A longer lexical mount point can be a different
+    /// filesystem (a symlink parent, or a path that crosses a mount) and must not supply a
+    /// second device: the same inode there can belong to another owner. The path fallback
+    /// is used only when statx has no mount id.
+    /// </summary>
+    private static List<DevId> MountDevices(ulong mntId, string path)
+    {
+        var found = new List<DevId>();
         string text;
         try
         {
-            text = File.ReadAllText("/proc/locks");
+            text = File.ReadAllText(MountInfoPath);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            return new HolderQuery(HolderState.Unknown, null);
+            return found;
         }
 
-        var needle = $"{major:x2}:{minor:x2}:{ino}";
-        foreach (var raw in text.Split('\n'))
+        var idText = mntId == 0 ? null : mntId.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        var full = Path.GetFullPath(path);
+        DevId? byPath = null;
+        var bestLen = -1;
+        foreach (var line in text.Split('\n'))
         {
-            var parts = raw.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-            if (parts.Length < 6)
+            var parts = line.Split(' ');
+            if (parts.Length < 5 || !TryParseDev(parts[2], out var dev))
                 continue;
-            if (!parts[1].Equals("FLOCK", StringComparison.OrdinalIgnoreCase))
+            if (idText is not null)
+            {
+                if (parts[0] == idText)
+                {
+                    found.Add(dev);
+                    return found;
+                }
+
                 continue;
-            if (!parts[3].Equals("WRITE", StringComparison.OrdinalIgnoreCase))
-                continue;
-            if (!parts[5].Equals(needle, StringComparison.OrdinalIgnoreCase))
-                continue;
-            if (int.TryParse(parts[4], out var pid) && pid > 0)
-                return new HolderQuery(HolderState.Held, pid);
+            }
+
+            var mountPoint = UnescapeMount(parts[4]);
+            if (Covers(mountPoint, full) && mountPoint.Length > bestLen)
+            {
+                bestLen = mountPoint.Length;
+                byPath = dev;
+            }
         }
 
-        return new HolderQuery(HolderState.NotHeld, null);
+        if (idText is null && byPath is { } pathDev)
+            found.Add(pathDev);
+        return found;
+    }
+
+    private static bool TryParseDev(string text, out DevId dev)
+    {
+        dev = default;
+        var parts = text.Split(':');
+        if (parts.Length != 2)
+            return false;
+        if (!uint.TryParse(parts[0], out var major) || !uint.TryParse(parts[1], out var minor))
+            return false;
+        dev = new DevId(major, minor);
+        return true;
+    }
+
+    private static string UnescapeMount(string mountPoint) =>
+        mountPoint.Replace("\\040", " ", StringComparison.Ordinal)
+            .Replace("\\011", "\t", StringComparison.Ordinal)
+            .Replace("\\012", "\n", StringComparison.Ordinal)
+            .Replace("\\134", "\\", StringComparison.Ordinal);
+
+    private static bool Covers(string mountPoint, string fullPath)
+    {
+        if (mountPoint.Length == 0)
+            return false;
+        if (string.Equals(mountPoint, fullPath, StringComparison.Ordinal))
+            return true;
+        var root = mountPoint.EndsWith('/') ? mountPoint : mountPoint + "/";
+        return fullPath.StartsWith(root, StringComparison.Ordinal);
+    }
+
+    private readonly record struct FdScan(bool Found, bool Denied, int Pid);
+
+    /// <summary>
+    /// Find a write flock whose open file is still the current inode at <paramref name="path"/>.
+    /// <see cref="FdScan.Denied"/> means the fd table could not be read completely.
+    /// </summary>
+    private static FdScan MatchFdTable(string path)
+    {
+        if (_hideFdInfo)
+            return new FdScan(false, true, 0);
+
+        var full = Path.GetFullPath(path);
+        var self = MatchProcessFds("/proc/self", full);
+        if (self.Found)
+            return self;
+
+        var denied = self.Denied;
+        IEnumerable<string> procs;
+        try
+        {
+            procs = Directory.EnumerateDirectories("/proc");
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return new FdScan(false, true, 0);
+        }
+
+        foreach (var proc in procs)
+        {
+            var name = Path.GetFileName(proc);
+            if (!int.TryParse(name, out var pid) || pid <= 0)
+                continue;
+            var scan = MatchProcessFds(proc, full);
+            if (scan.Found)
+                return scan;
+            if (scan.Denied)
+                denied = true;
+        }
+
+        return new FdScan(false, denied, 0);
+    }
+
+    private static FdScan MatchProcessFds(string procDir, string fullPath)
+    {
+        var fdDir = Path.Combine(procDir, "fd");
+        IEnumerable<string> fds;
+        try
+        {
+            fds = Directory.EnumerateFileSystemEntries(fdDir);
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return new FdScan(false, true, 0);
+        }
+        catch (IOException)
+        {
+            return new FdScan(false, false, 0);
+        }
+
+        var denied = false;
+        foreach (var fdPath in fds)
+        {
+            var opened = ReadProcLink(fdPath);
+            if (!DescriptorIsCurrentFile(opened, fdPath, fullPath))
+                continue;
+            var infoPath = Path.Combine(procDir, "fdinfo", Path.GetFileName(fdPath));
+            string info;
+            try
+            {
+                info = File.ReadAllText(infoPath);
+            }
+            catch (UnauthorizedAccessException)
+            {
+                denied = true;
+                continue;
+            }
+            catch (IOException)
+            {
+                continue;
+            }
+
+            foreach (var line in info.Split('\n'))
+            {
+                if (TryParseFlockWrite(line, out var pid, out _) && pid > 0)
+                    return new FdScan(true, false, pid);
+            }
+        }
+
+        return new FdScan(false, denied, 0);
+    }
+
+    /// <summary>
+    /// The descriptor must still be the file at <paramref name="fullPath"/>.
+    /// A deleted path, or a descriptor whose device and inode are not the current
+    /// file, is a replaced lock file and is not the owner.
+    /// </summary>
+    private static bool DescriptorIsCurrentFile(string? opened, string fdProcPath, string fullPath)
+    {
+        if (opened is not null && opened.EndsWith(" (deleted)", StringComparison.Ordinal))
+            return false;
+        if (!TryStat(fdProcPath, out _, out var fdMajor, out var fdMinor, out var fdIno, out _, follow: true))
+            return false;
+        if (!TryStat(fullPath, out _, out var curMajor, out var curMinor, out var curIno, out _, follow: true))
+            return false;
+        return fdMajor == curMajor && fdMinor == curMinor && fdIno == curIno;
+    }
+
+    private static bool TryParseFlockWrite(string line, out int pid, out string devIno)
+    {
+        pid = 0;
+        devIno = "";
+        var trimmed = line.Trim();
+        if (trimmed.StartsWith("lock:", StringComparison.Ordinal))
+            trimmed = trimmed["lock:".Length..].Trim();
+        var parts = trimmed.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length < 5)
+            return false;
+        if (!parts[1].Equals("FLOCK", StringComparison.OrdinalIgnoreCase))
+            return false;
+        if (!parts[3].Equals("WRITE", StringComparison.OrdinalIgnoreCase))
+            return false;
+        if (!int.TryParse(parts[4], out pid) || pid <= 0)
+            return false;
+        if (parts.Length >= 6)
+            devIno = parts[5];
+        return true;
+    }
+
+    private static string? ReadProcLink(string path)
+    {
+        var buf = new byte[4096];
+        var n = sys_readlink(path, buf, (nuint)buf.Length);
+        if (n <= 0 || n >= buf.Length)
+            return null;
+        return Encoding.UTF8.GetString(buf, 0, (int)n);
     }
 
     public static bool SignalTerm(int pid)
@@ -463,17 +908,19 @@ internal static class Posix
         RuntimeInformation.ProcessArchitecture == Architecture.Arm64
             ? darwin_fcntl_lock(fd, cmd, 0, 0, 0, 0, 0, 0, ref record) : intel_fcntl_lock(fd, cmd, ref record);
 
-    private static bool TryStat(string path, out ushort mode, out uint major, out uint minor, out ulong ino)
+    private static bool TryStat(string path, out ushort mode, out uint major, out uint minor, out ulong ino, out ulong mntId, bool follow = false)
     {
         mode = 0;
         major = 0;
         minor = 0;
         ino = 0;
+        mntId = 0;
         var buf = new byte[256];
         var pinned = GCHandle.Alloc(buf, GCHandleType.Pinned);
         try
         {
-            if (sys_statx(AtFdcwd, path, AtSymlinkNoFollow, StatxBasic, pinned.AddrOfPinnedObject()) != 0)
+            var flags = follow ? 0 : AtSymlinkNoFollow;
+            if (sys_statx(AtFdcwd, path, flags, StatxBasic | StatxMntId, pinned.AddrOfPinnedObject()) != 0)
                 return false;
         }
         finally
@@ -485,6 +932,9 @@ internal static class Posix
         ino = BitConverter.ToUInt64(buf, 0x20);
         major = BitConverter.ToUInt32(buf, 0x88);
         minor = BitConverter.ToUInt32(buf, 0x8C);
+        var mask = BitConverter.ToUInt32(buf, 0);
+        if ((mask & StatxMntId) != 0)
+            mntId = BitConverter.ToUInt64(buf, 0x90);
         return true;
     }
 
@@ -538,4 +988,7 @@ internal static class Posix
 
     [DllImport("libc", EntryPoint = "kill", SetLastError = true)]
     private static extern int sys_kill(int pid, int sig);
+
+    [DllImport("libc", EntryPoint = "readlink", SetLastError = true)]
+    private static extern long sys_readlink(string pathname, byte[] buf, nuint bufsiz);
 }

@@ -33,6 +33,25 @@ internal sealed class RelayConfig
     public bool ProtocolV2 { get; set; }
 
     /// <summary>
+    /// When true, v2 chat frames carry <c>client_msg_id</c> and a rate-limit retry reuses it.
+    /// Default false. This does not make delivery exactly-once: §11 still has no server dedup,
+    /// and a retry after a missed <c>accepted</c> can store a second message.
+    /// </summary>
+    [JsonPropertyName("v2_send_dedup")]
+    public bool V2SendDedup { get; set; }
+
+    /// <summary>
+    /// Opt-in compatibility for a relay that echoes a chat and never sends <c>accepted</c>.
+    /// Default false. Own nick plus exact text is never server acceptance.
+    /// When true, one unambiguous echo of the single in-flight send on this session is parked
+    /// as <c>echo_observed</c> and the socket is fenced until reconnect. A welcome replay,
+    /// a second open row with the same text, or a row this session did not send does not
+    /// release the head.
+    /// </summary>
+    [JsonPropertyName("v2_echo_compat")]
+    public bool V2EchoCompat { get; set; }
+
+    /// <summary>
     /// Name of an environment variable that holds the §11 inbox owner secret.
     /// The secret is presented as <c>pass</c> on a v2 join and is never written to config,
     /// logs, or docs. Empty or omitted: the v2 join carries no owner secret.
