@@ -59,8 +59,11 @@ checkout) and edit the real room, trip, and paths there. Keep these out of git:
 - `runtime/` beside it (inbox, outbox, queues, seen-sets, databases)
 - the reviewed DLL SHA-256 binding for your build (pass via env or flag)
 
-`bots/fuse/.gitignore` is intentionally absent: nothing private should ever
-live under `bots/fuse/` in the first place.
+`bots/fuse/.gitignore` protects the single exception to the nothing-private-in-
+the-checkout rule: `runtime/`, the `env.sh` tooling default (dotnet CLI home,
+NuGet caches, XDG data). It is ignore-protected and never committed. Everything
+else private — the real `config.json`, the DLL SHA-256 binding — still belongs
+in a private location outside the checkout.
 
 ## Still Fuse-side (not in this draft)
 

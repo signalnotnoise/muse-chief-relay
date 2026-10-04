@@ -144,6 +144,53 @@ class WrapperTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn('BRIDGE_CONFIG_ENV', result.stderr)
 
+    def run_sourced(self, bot, setup=''):
+        # Source the wrapper directly in a plain (non-set -e) shell, the way an
+        # operator or an && chain does — no launcher errexit to lean on.
+        script = f'{setup}source {REPO / "bots" / bot / "env.sh"}'
+        return subprocess.run(['bash', '-c', script], text=True,
+                              capture_output=True, timeout=15,
+                              env={'PATH': os.defpath, 'HOME': str(self.root)})
+
+    def test_env_wrapper_failure_propagates_on_direct_source(self):
+        # A relative tooling dir makes the shared helper return 2. The wrapper
+        # must not mask it with the trailing cleanup's success (the old unset
+        # returned 0, swallowing the 2 in a normally sourced shell).
+        for bot, var in (('dot', 'DOT_TOOLING_DIR'), ('fuse', 'FUSE_TOOLING_DIR')):
+            result = self.run_sourced(bot, f'{var}=relative/path; export {var}; ')
+            self.assertEqual(result.returncode, 2,
+                             f'{bot}: {result.stdout}{result.stderr}')
+            self.assertIn('must be an absolute path', result.stderr)
+
+    def test_env_wrapper_failure_breaks_and_chain(self):
+        for bot, var in (('dot', 'DOT_TOOLING_DIR'), ('fuse', 'FUSE_TOOLING_DIR')):
+            script = (f'{var}=relative/path; export {var}; '
+                      f'source {REPO / "bots" / bot / "env.sh"} && echo CHAINED')
+            result = subprocess.run(['bash', '-c', script], text=True,
+                                    capture_output=True, timeout=15,
+                                    env={'PATH': os.defpath, 'HOME': str(self.root)})
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertNotIn('CHAINED', result.stdout)
+
+    def test_env_wrapper_success_continues_and_chain(self):
+        for bot, var in (('dot', 'DOT_TOOLING_DIR'), ('fuse', 'FUSE_TOOLING_DIR')):
+            script = f'source {REPO / "bots" / bot / "env.sh"} && echo CHAINED'
+            result = subprocess.run(['bash', '-c', script], text=True,
+                                    capture_output=True, timeout=15,
+                                    env={'PATH': os.defpath, 'HOME': str(self.root)})
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('CHAINED', result.stdout)
+
+    def test_runtime_tooling_defaults_are_ignore_protected(self):
+        # env.sh defaults tooling/cache inside the checkout; those paths must
+        # stay uncommitted, for both bots.
+        for bot in ('dot', 'fuse'):
+            probe = subprocess.run(
+                ['git', 'check-ignore', str(REPO / 'bots' / bot / 'runtime/tooling')],
+                cwd=REPO, text=True, capture_output=True, timeout=15)
+            self.assertEqual(probe.returncode, 0,
+                             f'{bot}/runtime/tooling is not git-ignored')
+
     def test_env_wrappers_select_private_tooling_dirs(self):
         for bot, var in (('dot', 'DOT_TOOLING_DIR'), ('fuse', 'FUSE_TOOLING_DIR')):
             script = (f'source {REPO / "bots" / bot / "env.sh"} && '
