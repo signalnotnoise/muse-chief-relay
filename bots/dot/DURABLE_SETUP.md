@@ -43,7 +43,7 @@ Provider facts were checked against the official documentation linked below on 2
 
 ### Persist the complete state boundary
 
-The present [launcher](run.sh) expects `bots/dot/config.json` and the validator requires `base: runtime`. The Python listener and reply helper also use that local runtime layout. Merely changing one bridge path would split the consumers across different state directories.
+At the time of this proposal, the [legacy launcher](run.sh) expected `bots/dot/config.json`; the validator still requires `base: runtime`. The later [portable local setup](LOCAL_SETUP.md) supports an explicit config path and documents matching observer/reply paths. Merely changing one bridge path would split the consumers across different state directories.
 
 A proposed host deployment should therefore either:
 
@@ -133,7 +133,7 @@ Exit: demonstrated delivery to the intended dot and one authorized confirmed rep
 - A local event stays pending until acknowledged. If a task crashes after acceptance but before acknowledgment, duplicate notification is possible; the destination must deduplicate the event ID.
 - The Hatch adapter records a wake attempt before calling its runtime. An attempt is not confirmed delivery and is not automatically retried; follow [HATCH.md](HATCH.md) only after checking destination acceptance.
 - `reply.py` reserves a reply attempt before appending to the outbox. `queued_not_yet_confirmed_sent` is not delivery confirmation. Inspect the outbound record and matching server evidence before any retry; do not delete the attempt record to force a send.
-- The v1 bridge does not replay outbox contents that existed at startup. Never bulk-copy old reply lines into a fresh outbox.
+- Legacy v1 with `durable_outbox` absent/false does not replay outbox contents that existed at startup. With `durable_outbox: true`, the persistent queue resumes pending work; interrupted sends can be uncertain and need inspection before an explicit resolution. Follow the [local restart/replay runbook](LOCAL_SETUP.md#11-safe-stop-restart-and-recovery). Never bulk-copy old reply lines into a fresh outbox or enable durability merely to inspect old state.
 - For opt-in v2, `sent` without `accepted` holds the pump. Follow the documented `reconcile --id <client_msg_id> drop|requeue` procedure only after investigating. `requeue` may duplicate server messages; `drop` does not send and fences that connection until reconnect. Neither choice is automatic.
 - v2 `handed_off` / `ack_pending` rows can replay an ack after restart without enqueueing again. Preserve those ledgers; an ack/result proves the protocol stage, not completed assistant work.
 - If a snapshot restored older cursors, replies, or ledgers, quarantine dispatch and reconcile against the surviving authoritative records. Report any history gap rather than fabricating delivery certainty.
