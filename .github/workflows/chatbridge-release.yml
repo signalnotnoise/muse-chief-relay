@@ -6,10 +6,13 @@
 # anywhere the bridge runs. SHA256SUMS.txt ships alongside for verification.
 #
 # Usage: push a tag like `chatbridge-v0.3.0`. The workflow publishes for all
-# RIDs, archives each, and creates the GitHub release with the assets.
+# RIDs, archives each publish output directory, and creates the GitHub release
+# with the assets.
 #
-# The launcher already accepts an alternate DLL/executable, so a release
-# archive is a drop-in: extract and point the launcher at the binary.
+# Each archive holds the complete publish output for its RID (the
+# self-contained native apphost plus PDB). The shared launcher
+# (bots/shared/launch_bridge.py) accepts the native apphost via --dll and
+# execs it directly — no .NET install needed on the launcher side either.
 
 name: ChatBridge release builds
 
@@ -78,15 +81,17 @@ jobs:
       - name: Archive (tar.gz)
         if: matrix.archive == 'tar.gz'
         run: |
+          # Archive the complete publish output directory (native apphost
+          # plus PDB), not just the apphost binary.
           tar -czf chatbridge-${{ steps.sanitize.outputs.safe_ref }}-${{ matrix.rid }}.tar.gz \
-            -C publish/${{ matrix.rid }} ChatBridge
+            -C publish/${{ matrix.rid }} .
 
       - name: Archive (zip)
         if: matrix.archive == 'zip'
         shell: pwsh
         run: |
           Compress-Archive `
-            -Path publish/${{ matrix.rid }}/ChatBridge.exe `
+            -Path publish/${{ matrix.rid }}/* `
             -DestinationPath chatbridge-${{ steps.sanitize.outputs.safe_ref }}-${{ matrix.rid }}.zip
 
       - name: Upload archive
@@ -120,7 +125,14 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "${{ github.ref_name }}" dist/* \
-            --title "ChatBridge ${{ github.ref_name }}" \
-            --clobber \
-            --notes "Self-contained ChatBridge builds — no .NET install required. Extract the archive for your OS/CPU and point the launcher at the binary. Verify downloads against SHA256SUMS.txt."
+          NOTES="Self-contained ChatBridge builds — no .NET install required. Each archive holds the complete publish output for its OS/CPU (native apphost plus PDB): extract it and point the shared launcher's --dll at the native binary, which the launcher execs directly. Verify downloads against SHA256SUMS.txt."
+          if gh release view "${{ github.ref_name }}" >/dev/null 2>&1; then
+            # Tag re-pushed over an existing release: replace the assets.
+            # (--clobber is a gh release upload flag; gh release create rejects it.)
+            echo "Release ${{ github.ref_name }} already exists; uploading assets (replacing)."
+            gh release upload "${{ github.ref_name }}" dist/* --clobber
+          else
+            gh release create "${{ github.ref_name }}" dist/* \
+              --title "ChatBridge ${{ github.ref_name }}" \
+              --notes "$NOTES"
+          fi

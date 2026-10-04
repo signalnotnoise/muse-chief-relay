@@ -92,6 +92,39 @@ class WrapperTests(unittest.TestCase):
         self.assertIn('Offline check only', result.stdout)
         self.assertFalse(self.capture.exists())
 
+    def test_native_apphost_check_passes_without_dotnet(self):
+        # A self-contained native apphost (no .dll suffix) must not require a
+        # dotnet host at all: check succeeds even with an unusable DOTNET_BIN.
+        native = self.root / 'ChatBridge'
+        native.write_bytes(b'fixture native apphost; never executed here')
+        digest = hashlib.sha256(native.read_bytes()).hexdigest()
+        self.write_config(self.base_config('Fuse'))
+        result = self.run_launcher('fuse', 'check', extra_env={
+            'FUSE_BRIDGE_CONFIG': str(self.config), 'FUSE_BRIDGE_SHA256': digest,
+            'FUSE_BRIDGE_DLL': str(native), 'DOTNET_BIN': '/nonexistent-dotnet'})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('no dotnet required', result.stdout)
+        self.assertFalse(self.capture.exists())
+
+    def test_native_apphost_start_execs_binary_directly(self):
+        # start on a native apphost execs the binary itself with no dotnet
+        # prefix: argv is [binary, action..., --config, config] ('start'
+        # contributes no subcommand token, same as the dotnet path).
+        native = self.root / 'ChatBridge'
+        native.write_text(
+            f'#!{sys.executable}\n'
+            'import json, pathlib, sys\n'
+            f'pathlib.Path({str(self.capture)!r}).write_text(json.dumps(sys.argv[1:]))\n')
+        native.chmod(0o700)
+        digest = hashlib.sha256(native.read_bytes()).hexdigest()
+        self.write_config(self.base_config('Fuse'))
+        result = self.run_launcher('fuse', 'start', extra_env={
+            'FUSE_BRIDGE_CONFIG': str(self.config), 'FUSE_BRIDGE_SHA256': digest,
+            'FUSE_BRIDGE_DLL': str(native)})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        argv = json.loads(self.capture.read_text())
+        self.assertEqual(argv, ['--config', str(self.config)])
+
     def test_fuse_wrapper_rejects_other_nick(self):
         self.write_config(self.base_config('dot'))
         result = self.run_launcher('fuse', 'check', extra_env={

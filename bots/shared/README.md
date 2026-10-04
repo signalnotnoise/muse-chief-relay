@@ -17,10 +17,13 @@ changes land once, in this directory.
   trip format, mode/outbox shape. The expected `nick` and the participation
   mode key are parameters (`nick='dot'`, `mode_key='dot_mode'` defaults).
 - **Launch lifecycle** (`launch_bridge.py`): explicit `--config`, reviewed
-  DLL SHA-256 pin, lowercase/unique JSON keys, ordinary `runtime/` directory,
+  binary SHA-256 pin, lowercase/unique JSON keys, ordinary `runtime/` directory,
   `os.umask(0o077)`, restricted child environment, mirror forced off, and
   `check`/`start`/`status`/`stop`/`outbox-status`/`outbox-resolve` forwarding
-  to the selected dotnet host. `check` never executes .NET or contacts a room.
+  to the bridge binary. `--dll` ending in `.dll` launches via the selected
+  dotnet host; anything else (e.g. a self-contained native apphost from a
+  ChatBridge release archive) is exec'd directly with no .NET required.
+  `check` never executes .NET or contacts a room.
 
 ## Wrapper contract
 
@@ -29,10 +32,10 @@ A bot's `launch-bridge.sh` must export, then `exec python3` this file:
 | Variable             | Meaning                                              |
 |----------------------|------------------------------------------------------|
 | `BRIDGE_CONFIG_ENV`  | env var holding the default `--config` path          |
-| `BRIDGE_SHA256_ENV`  | env var holding the default expected DLL hash        |
+| `BRIDGE_SHA256_ENV`  | env var holding the default expected binary hash     |
 | `BRIDGE_DLL_ENV`     | env var holding the default `--dll` path             |
-| `BRIDGE_DLL_DEFAULT` | fallback DLL path (wrapper resolves it repo-relative)|
-| `BRIDGE_DOTNET_ENV`  | env var holding the default `--dotnet` (else `DOTNET_BIN`) |
+| `BRIDGE_DLL_DEFAULT` | fallback bridge-binary path (wrapper resolves it repo-relative); `.dll` → dotnet, anything else → native exec |
+| `BRIDGE_DOTNET_ENV`  | env var holding the default `--dotnet` (else `DOTNET_BIN`); unused for native apphosts |
 | `BRIDGE_NICK`        | nick the config must declare                         |
 | `BRIDGE_MODE_KEY`    | participation mode key (`dot_mode`, `fuse_mode`, `chief_mode`, …) |
 | `BRIDGE_DOCS`        | docs path named in help/refusal text                 |

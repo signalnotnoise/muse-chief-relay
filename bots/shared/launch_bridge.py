@@ -7,12 +7,15 @@ it parses argv and execs the bridge on success.
 
 Wrapper contract (environment):
   BRIDGE_CONFIG_ENV  name of the env var holding the default --config path
-  BRIDGE_SHA256_ENV  name of the env var holding the default expected DLL hash
+  BRIDGE_SHA256_ENV  name of the env var holding the default expected binary hash
   BRIDGE_DLL_ENV     name of the env var holding the default --dll path
-  BRIDGE_DLL_DEFAULT default DLL path used when neither --dll nor the env var
-                     is set (the wrapper resolves it repo-relative)
+  BRIDGE_DLL_DEFAULT default bridge-binary path used when neither --dll nor the
+                     env var is set (the wrapper resolves it repo-relative);
+                     a path ending in .dll launches via dotnet, anything else
+                     is exec'd directly as a self-contained native apphost
+                     (e.g. from a ChatBridge release archive)
   BRIDGE_DOTNET_ENV  name of the env var holding the default --dotnet
-                     executable (default: DOTNET_BIN)
+                     executable (default: DOTNET_BIN); unused for native apphosts
   BRIDGE_NICK        expected bridge nick, enforced by config validation
   BRIDGE_MODE_KEY    per-bot participation mode key (e.g. dot_mode/fuse_mode/chief_mode)
   BRIDGE_DOCS        docs path named in refusal/help text
@@ -63,10 +66,13 @@ parser.add_argument('decision', nargs='?', choices=('requeue', 'drop'), help='On
 parser.add_argument('--config', default=os.environ.get(CONFIG_ENV),
                     help=f'Required explicit config path, or {CONFIG_ENV}')
 parser.add_argument('--sha256', default=os.environ.get(SHA256_ENV),
-                    help=f'Required expected DLL SHA-256, or {SHA256_ENV}')
-parser.add_argument('--dll', default=os.environ.get(DLL_ENV) or DLL_DEFAULT)
+                    help=f'Required expected bridge-binary SHA-256, or {SHA256_ENV}')
+parser.add_argument('--dll', default=os.environ.get(DLL_ENV) or DLL_DEFAULT,
+                    help=f'Bridge DLL (launched via dotnet) or self-contained native '
+                         f'apphost (exec\'d directly), or {DLL_ENV} (default: {DLL_DEFAULT})')
 parser.add_argument('--dotnet', default=os.environ.get(DOTNET_ENV) or 'dotnet',
-                    help=f'Executable path/name, or {DOTNET_ENV} (default: dotnet on PATH)')
+                    help=f'Executable path/name, or {DOTNET_ENV} (default: dotnet on PATH); '
+                         f'only used when --dll points at a .dll')
 args = parser.parse_args()
 
 
@@ -131,11 +137,15 @@ except (ValueError, TypeError, KeyError, AttributeError):
     # Do not print invalid JSON or values that could contain private room data.
     refuse(f'config safety validation failed; see {DOCS} and check_config.py')
 
-dotnet = shutil.which(os.path.expanduser(args.dotnet))
-if not dotnet:
-    refuse('selected dotnet executable is unavailable; install .NET 8 or select --dotnet/'
-           + DOTNET_ENV)
-dotnet = str(Path(dotnet).resolve())
+# Self-contained release builds are native apphosts: exec them directly with no
+# .NET host. Only managed .dll launches require dotnet.
+is_native = dll.suffix.lower() != '.dll'
+if not is_native:
+    dotnet = shutil.which(os.path.expanduser(args.dotnet))
+    if not dotnet:
+        refuse('selected dotnet executable is unavailable; install .NET 8 or select --dotnet/'
+               + DOTNET_ENV)
+    dotnet = str(Path(dotnet).resolve())
 
 # Deliberately do not forward credentials, plugin state, alternate bridge config,
 # or model-provider variables. Proxies/CA paths retain the intended VM networking.
@@ -151,7 +161,11 @@ env = {key: value for key, value in os.environ.items() if key in keys}
 env['HIVEMIND_MESSAGE_MIRROR'] = '0'
 
 if args.action == 'check':
-    print('Verified DLL hash, explicit config, local safety controls, and dotnet executable.')
+    if is_native:
+        print('Verified binary hash, explicit config, and local safety controls '
+              '(native apphost; no dotnet required).')
+    else:
+        print('Verified DLL hash, explicit config, local safety controls, and dotnet executable.')
     print('Offline check only: no connection, runtime-version check, observer, or independent wake tested.')
     raise SystemExit(0)
 
@@ -160,10 +174,17 @@ commands = {
     'outbox-status': ['outbox', 'status'],
     'outbox-resolve': ['outbox', 'resolve', args.reply_id, args.decision],
 }
-command = [dotnet, str(dll), *commands[args.action], '--config', str(config_path)]
+if is_native:
+    # Self-contained native apphost: exec it directly with the same argv shape
+    # (the apphost takes the config path argument itself).
+    executable = str(dll)
+    command = [str(dll), *commands[args.action], '--config', str(config_path)]
+else:
+    executable = dotnet
+    command = [dotnet, str(dll), *commands[args.action], '--config', str(config_path)]
 try:
     # Stable working directory; base=runtime remains relative to the config file.
     os.chdir(config_path.parent)
-    os.execve(dotnet, command, env)
+    os.execve(executable, command, env)
 except OSError:
-    refuse('could not execute the selected dotnet host; check its permissions and installation')
+    refuse('could not execute the selected bridge binary; check its permissions and installation')
