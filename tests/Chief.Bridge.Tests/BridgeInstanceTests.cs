@@ -84,52 +84,28 @@ public class BridgeInstanceTests
         using var dir = new TempDir();
         using var sleep = Process.Start(new ProcessStartInfo("sleep", "120") { UseShellExecute = false })!;
         var path = BridgeInstance.StateLockPath(dir.Path);
-        var held = InstanceFileLock.TryAcquire(path, InstanceLockKind.State);
-        Assert.NotNull(held);
-        string? devIno = null;
-        foreach (var fd in Directory.EnumerateFileSystemEntries("/proc/self/fd"))
-        {
-            if (ReadLink(fd) != Path.GetFullPath(path))
-                continue;
-            var info = File.ReadAllText(Path.Combine("/proc/self/fdinfo", Path.GetFileName(fd)));
-            foreach (var line in info.Split('\n'))
-            {
-                var token = line.Split((char[])null!, StringSplitOptions.RemoveEmptyEntries)
-                    .FirstOrDefault(part => part.Split(':') is { Length: 3 } bits
-                        && bits[0].Length > 0 && bits[1].Length > 0 && bits[2].Length > 0
-                        && bits.All(bit => bit.All(Uri.IsHexDigit)));
-                if (line.Contains("FLOCK", StringComparison.Ordinal) && token is not null)
-                    devIno = token;
-            }
-        }
-
-        held!.Dispose();
-        Assert.False(BridgeInstance.Probe(path).Held);
-        Assert.NotNull(devIno);
-
-        var bits = devIno!.Split(':');
-        var major = Convert.ToUInt32(bits[0], 16);
-        var minor = Convert.ToUInt32(bits[1], 16);
-        var fake = dir.File("locks");
-        File.WriteAllText(fake, $"1: FLOCK  ADVISORY  WRITE {sleep.Id} {devIno} 0 EOF\n");
-        File.WriteAllText(path, $"pid={Environment.ProcessId}\n{PoisonSentinel}\n");
-
-        var previous = Posix.ProcLocksPath;
-        Posix.ProcLocksPath = fake;
-        Posix.SetStatDeviceOverride(major, minor == uint.MaxValue ? minor - 1 : minor + 1);
+        File.WriteAllText(path, $"pid={sleep.Id}\n{PoisonSentinel}\n");
+        var child = StartLockHolder(path);
         try
         {
+            var devIno = FlockDevIno(child.Id, path);
+            Assert.NotNull(devIno);
+            var bits = devIno!.Split(':');
+            var major = Convert.ToUInt32(bits[0], 16);
+            var minor = Convert.ToUInt32(bits[1], 16);
+            Posix.SetStatDeviceOverride(major, minor == uint.MaxValue ? minor - 1 : minor + 1);
             var probe = BridgeInstance.Probe(path);
             Assert.True(probe.Held);
-            Assert.Equal(sleep.Id, probe.Pid);
-            Assert.NotEqual(Environment.ProcessId, probe.Pid);
+            Assert.Equal(child.Id, probe.Pid);
+            Assert.NotEqual(sleep.Id, probe.Pid);
+            Assert.False(child.HasExited);
             Assert.False(sleep.HasExited);
             Assert.Contains(PoisonSentinel, ReadNoLock(path), StringComparison.Ordinal);
         }
         finally
         {
-            Posix.ProcLocksPath = previous;
             Posix.SetStatDeviceOverride(null, null);
+            try { if (!child.HasExited) child.Kill(); } catch (InvalidOperationException) { }
             try { sleep.Kill(); } catch (InvalidOperationException) { }
         }
     }
@@ -428,13 +404,15 @@ public class BridgeInstanceTests
         Posix.ProcLocksPath = fake;
         try
         {
+            var query = Posix.QueryFlockHolder(path);
+            Assert.NotEqual(sleep.Id, query.Pid);
+
             var probe = BridgeInstance.Probe(path);
-            Assert.True(probe.Held);
-            Assert.Equal(sleep.Id, probe.Pid);
+            Assert.False(probe.Held);
+            Assert.NotEqual(sleep.Id, probe.Pid);
 
             var stop = BridgeInstance.Stop(cfg);
-            Assert.Equal(InstanceStopKind.Blocked, stop.Kind);
-            Assert.Contains("could not be verified", stop.Detail);
+            Assert.NotEqual(InstanceStopKind.Stopped, stop.Kind);
             Assert.DoesNotContain("stopped", stop.Detail);
             Assert.False(sleep.HasExited);
         }
@@ -836,6 +814,29 @@ public class BridgeInstanceTests
             Posix.ProcLocksPath = previousLocks;
             Posix.MountInfoPath = previousMounts;
         }
+    }
+
+    private static string? FlockDevIno(int pid, string path)
+    {
+        var full = Path.GetFullPath(path);
+        var fdDir = "/proc/" + pid.ToString(System.Globalization.CultureInfo.InvariantCulture) + "/fd";
+        foreach (var fd in Directory.EnumerateFileSystemEntries(fdDir))
+        {
+            if (ReadLink(fd) != full)
+                continue;
+            var info = File.ReadAllText(Path.Combine("/proc/" + pid.ToString(System.Globalization.CultureInfo.InvariantCulture) + "/fdinfo", Path.GetFileName(fd)));
+            foreach (var line in info.Split('\n'))
+            {
+                var token = line.Split((char[])null!, StringSplitOptions.RemoveEmptyEntries)
+                    .FirstOrDefault(part => part.Split(':') is { Length: 3 } bits
+                        && bits[0].Length > 0 && bits[1].Length > 0 && bits[2].Length > 0
+                        && bits.All(bit => bit.All(Uri.IsHexDigit)));
+                if (line.Contains("FLOCK", StringComparison.Ordinal) && token is not null)
+                    return token;
+            }
+        }
+
+        return null;
     }
 
     private static ulong Inode(string path)

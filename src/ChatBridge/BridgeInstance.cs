@@ -500,9 +500,12 @@ internal static class Posix
 
         var incomplete = false;
         var deviceMismatch = false;
+        var unverifiedPid = false;
         if (locksReadable && text is not null)
         {
-            if (MatchVerifiedLock(text, needles, out var listed, out incomplete, out deviceMismatch))
+            // A device:inode hit is not the owner until that pid's descriptor still
+            // refers to this file. Another filesystem can reuse the inode.
+            if (MatchVerifiedLock(text, path, needles, out var listed, out incomplete, out deviceMismatch, out unverifiedPid))
                 return new HolderQuery(HolderState.Held, listed);
         }
 
@@ -511,9 +514,10 @@ internal static class Posix
             return new HolderQuery(HolderState.Held, scan.Pid);
 
         // A readable locks file that did not name this device:inode is not proof the
-        // file is free. Permission-denied fdinfo and a half-parsed line are the same.
-        // Unknown lets Probe's non-blocking take decide, without adopting a pid.
-        if (!locksReadable || !statOk || !comparedMount || scan.Denied || incomplete || deviceMismatch)
+        // file is free. Permission-denied fdinfo, a half-parsed line, and a locks pid
+        // whose descriptor is not this file are the same. Unknown lets Probe's
+        // non-blocking take decide, without adopting a pid.
+        if (!locksReadable || !statOk || !comparedMount || scan.Denied || incomplete || deviceMismatch || unverifiedPid)
             return new HolderQuery(HolderState.Unknown, null);
         return new HolderQuery(HolderState.NotHeld, null);
     }
@@ -541,11 +545,12 @@ internal static class Posix
         return scan.Found && scan.Pid == pid;
     }
 
-    private static bool MatchVerifiedLock(string text, List<string> needles, out int pid, out bool incomplete, out bool deviceMismatch)
+    private static bool MatchVerifiedLock(string text, string path, List<string> needles, out int pid, out bool incomplete, out bool deviceMismatch, out bool unverifiedPid)
     {
         pid = 0;
         incomplete = false;
         deviceMismatch = false;
+        unverifiedPid = false;
         foreach (var raw in text.Split('\n'))
         {
             if (raw.IndexOf("FLOCK", StringComparison.OrdinalIgnoreCase) < 0)
@@ -561,14 +566,23 @@ internal static class Posix
             {
                 if (!devIno.Equals(needle, StringComparison.OrdinalIgnoreCase))
                     continue;
-                pid = linePid;
                 matched = true;
                 break;
             }
 
-            if (matched)
+            if (!matched)
+            {
+                deviceMismatch = true;
+                continue;
+            }
+
+            if (OwnerDescriptorRefersTo(path, linePid))
+            {
+                pid = linePid;
                 return true;
-            deviceMismatch = true;
+            }
+
+            unverifiedPid = true;
         }
 
         return false;
