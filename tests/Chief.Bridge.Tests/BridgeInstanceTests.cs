@@ -319,6 +319,133 @@ public class BridgeInstanceTests
     }
 
     [Fact]
+    public void A_cross_mount_lexical_device_is_not_the_owner()
+    {
+        using var dir = new TempDir();
+        using var sleep = Process.Start(new ProcessStartInfo("sleep", "120") { UseShellExecute = false })!;
+        var path = BridgeInstance.StateLockPath(dir.Path);
+        File.WriteAllText(path, $"pid={sleep.Id}\n{PoisonSentinel}\n");
+        try
+        {
+            AssertDecoyMountIsNotOwner(path, sleep, symlinkParent: null);
+            Assert.Contains(PoisonSentinel, ReadNoLock(path), StringComparison.Ordinal);
+        }
+        finally
+        {
+            try { sleep.Kill(); } catch (InvalidOperationException) { }
+        }
+    }
+
+    [Fact]
+    public void A_symlink_parent_does_not_adopt_the_lexical_mount_device()
+    {
+        using var dir = new TempDir();
+        using var sleep = Process.Start(new ProcessStartInfo("sleep", "120") { UseShellExecute = false })!;
+        var real = dir.File("real");
+        Directory.CreateDirectory(real);
+        var link = dir.File("link");
+        Directory.CreateSymbolicLink(link, real);
+        var path = Path.Combine(link, BridgeInstance.StateLockName);
+        File.WriteAllText(path, $"pid={sleep.Id}\n{PoisonSentinel}\n");
+        try
+        {
+            AssertDecoyMountIsNotOwner(path, sleep, symlinkParent: link);
+            Assert.Contains(PoisonSentinel, ReadNoLock(path), StringComparison.Ordinal);
+            Assert.True((File.GetAttributes(link) & FileAttributes.ReparsePoint) != 0);
+            Assert.EndsWith($"{Path.DirectorySeparatorChar}link{Path.DirectorySeparatorChar}{BridgeInstance.StateLockName}", Path.GetFullPath(path));
+        }
+        finally
+        {
+            try { sleep.Kill(); } catch (InvalidOperationException) { }
+        }
+    }
+
+    [Fact]
+    public void Stop_refuses_to_signal_when_the_owner_pid_is_missing()
+    {
+        using var dir = new TempDir();
+        using var sleep = Process.Start(new ProcessStartInfo("sleep", "120") { UseShellExecute = false })!;
+        var cfg = RelayConfig.Load(WriteConfig(dir, "ws://127.0.0.1:9/relay", "room-" + Guid.NewGuid().ToString("N"), "n", null), false, dir.Path, _ => null);
+        var path = BridgeInstance.StateLockPath(cfg.BaseDir);
+        using var held = InstanceFileLock.TryAcquire(path, InstanceLockKind.State);
+        Assert.NotNull(held);
+        var previous = Posix.ProcLocksPath;
+        Posix.ProcLocksPath = dir.File("empty-locks");
+        File.WriteAllText(Posix.ProcLocksPath, "");
+        Posix.SetHideFdInfo(true);
+        try
+        {
+            var probe = BridgeInstance.Probe(path);
+            Assert.True(probe.Held);
+            Assert.Null(probe.Pid);
+
+            var stop = BridgeInstance.Stop(cfg);
+            Assert.Equal(InstanceStopKind.Blocked, stop.Kind);
+            Assert.Contains("could not be verified", stop.Detail);
+            Assert.False(sleep.HasExited);
+        }
+        finally
+        {
+            Posix.ProcLocksPath = previous;
+            Posix.SetHideFdInfo(false);
+            try { sleep.Kill(); } catch (InvalidOperationException) { }
+        }
+    }
+
+    [Fact]
+    public void Stop_refuses_to_signal_a_locks_pid_whose_descriptor_is_not_this_file()
+    {
+        using var dir = new TempDir();
+        using var sleep = Process.Start(new ProcessStartInfo("sleep", "120") { UseShellExecute = false })!;
+        var cfg = RelayConfig.Load(WriteConfig(dir, "ws://127.0.0.1:9/relay", "room-" + Guid.NewGuid().ToString("N"), "n", null), false, dir.Path, _ => null);
+        var path = BridgeInstance.StateLockPath(cfg.BaseDir);
+        var held = InstanceFileLock.TryAcquire(path, InstanceLockKind.State);
+        Assert.NotNull(held);
+        string? devIno = null;
+        foreach (var fd in Directory.EnumerateFileSystemEntries("/proc/self/fd"))
+        {
+            if (ReadLink(fd) != Path.GetFullPath(path))
+                continue;
+            var info = File.ReadAllText(Path.Combine("/proc/self/fdinfo", Path.GetFileName(fd)));
+            foreach (var line in info.Split('\n'))
+            {
+                var token = line.Split((char[])null!, StringSplitOptions.RemoveEmptyEntries)
+                    .FirstOrDefault(part => part.Split(':') is { Length: 3 } bits
+                        && bits[0].Length > 0 && bits[1].Length > 0 && bits[2].Length > 0
+                        && bits.All(bit => bit.All(Uri.IsHexDigit)));
+                if (line.Contains("FLOCK", StringComparison.Ordinal) && token is not null)
+                    devIno = token;
+            }
+        }
+
+        held!.Dispose();
+        Assert.NotNull(devIno);
+        Assert.False(Posix.OwnerDescriptorRefersTo(path, sleep.Id));
+
+        var fake = dir.File("locks");
+        File.WriteAllText(fake, $"1: FLOCK  ADVISORY  WRITE {sleep.Id} {devIno} 0 EOF\n");
+        var previous = Posix.ProcLocksPath;
+        Posix.ProcLocksPath = fake;
+        try
+        {
+            var probe = BridgeInstance.Probe(path);
+            Assert.True(probe.Held);
+            Assert.Equal(sleep.Id, probe.Pid);
+
+            var stop = BridgeInstance.Stop(cfg);
+            Assert.Equal(InstanceStopKind.Blocked, stop.Kind);
+            Assert.Contains("could not be verified", stop.Detail);
+            Assert.DoesNotContain("stopped", stop.Detail);
+            Assert.False(sleep.HasExited);
+        }
+        finally
+        {
+            Posix.ProcLocksPath = previous;
+            try { sleep.Kill(); } catch (InvalidOperationException) { }
+        }
+    }
+
+    [Fact]
     public void A_stale_pid_hint_is_not_the_owner()
     {
         using var dir = new TempDir();
@@ -671,6 +798,64 @@ public class BridgeInstanceTests
         {
             sys_close(fd);
         }
+    }
+
+    private static void AssertDecoyMountIsNotOwner(string path, Process sleep, string? symlinkParent)
+    {
+        var inode = Inode(path);
+        var resolvedDir = Path.GetDirectoryName(Path.GetFullPath(path))!;
+        var tableDir = symlinkParent is null ? resolvedDir : Path.GetDirectoryName(symlinkParent)!;
+        var table = Path.Combine(tableDir, "mountinfo-" + Guid.NewGuid().ToString("N"));
+        var lines = $"50 1 255:238 / {resolvedDir} rw - ext4 /dev/wrong rw\n";
+        if (symlinkParent is not null)
+            lines += $"51 1 255:237 / {symlinkParent} rw - ext4 /dev/link rw\n";
+        File.WriteAllText(table, lines);
+
+        var locks = table + ".locks";
+        File.WriteAllText(locks,
+            $"1: FLOCK  ADVISORY  WRITE {sleep.Id} ff:ee:{inode} 0 EOF\n" +
+            $"2: FLOCK  ADVISORY  WRITE {sleep.Id} ff:ed:{inode} 0 EOF\n");
+
+        var previousLocks = Posix.ProcLocksPath;
+        var previousMounts = Posix.MountInfoPath;
+        Posix.ProcLocksPath = locks;
+        Posix.MountInfoPath = table;
+        try
+        {
+            var query = Posix.QueryFlockHolder(path);
+            Assert.NotEqual(HolderState.Held, query.State);
+            Assert.NotEqual(sleep.Id, query.Pid);
+
+            var probe = BridgeInstance.Probe(path);
+            Assert.False(probe.Held);
+            Assert.NotEqual(sleep.Id, probe.Pid);
+            Assert.False(sleep.HasExited);
+        }
+        finally
+        {
+            Posix.ProcLocksPath = previousLocks;
+            Posix.MountInfoPath = previousMounts;
+        }
+    }
+
+    private static ulong Inode(string path)
+    {
+        var psi = new ProcessStartInfo("stat")
+        {
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true
+        };
+        psi.ArgumentList.Add("-c");
+        psi.ArgumentList.Add("%i");
+        psi.ArgumentList.Add(path);
+        using var proc = Process.Start(psi)!;
+        var text = proc.StandardOutput.ReadToEnd();
+        var err = proc.StandardError.ReadToEnd();
+        proc.WaitForExit();
+        if (proc.ExitCode != 0 || !ulong.TryParse(text.Trim(), out var inode))
+            throw new InvalidOperationException($"stat inode failed for {path}: {err}");
+        return inode;
     }
 
     private static Process StartLockHolder(string path)

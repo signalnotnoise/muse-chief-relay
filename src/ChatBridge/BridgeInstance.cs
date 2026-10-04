@@ -127,7 +127,11 @@ internal static class BridgeInstance
             return InstanceStop.Absent("[chatbridge] stop: not running");
         }
 
-        if (state.Pid is not int owner || owner <= 1 || owner == Environment.ProcessId)
+        // A /proc/locks pid is not enough. The process must still have a descriptor
+        // for this file. A missing pid, or a descriptor that was deleted or replaced,
+        // is not signaled.
+        if (state.Pid is not int owner || owner <= 1 || owner == Environment.ProcessId
+            || !Posix.OwnerDescriptorRefersTo(statePath, owner))
             return InstanceStop.Block("[chatbridge] stop: the state lock is held, but the owner could not be verified");
 
         if (!Posix.SignalTerm(owner))
@@ -282,6 +286,19 @@ internal static class Posix
     {
         get => _procLocksOverride ?? "/proc/locks";
         set => _procLocksOverride = value;
+    }
+
+    /// <summary>
+    /// Tests point this at a mount table where a longer path prefix is a different device.
+    /// A known statx mount id must not adopt that device.
+    /// </summary>
+    [ThreadStatic]
+    private static string? _mountInfoOverride;
+
+    internal static string MountInfoPath
+    {
+        get => _mountInfoOverride ?? "/proc/self/mountinfo";
+        set => _mountInfoOverride = value;
     }
 
     /// <summary>
@@ -511,6 +528,19 @@ internal static class Posix
         return scan.Found ? scan.Pid : null;
     }
 
+    /// <summary>
+    /// True only when <paramref name="pid"/> has a write flock on a descriptor that is still
+    /// <paramref name="path"/>. Stop calls this before any signal. A /proc/locks pid whose
+    /// descriptor is missing, deleted, or a different file is not an owner.
+    /// </summary>
+    internal static bool OwnerDescriptorRefersTo(string path, int pid)
+    {
+        if (pid <= 1 || _hideFdInfo)
+            return false;
+        var scan = MatchProcessFds("/proc/" + pid.ToString(System.Globalization.CultureInfo.InvariantCulture), Path.GetFullPath(path));
+        return scan.Found && scan.Pid == pid;
+    }
+
     private static bool MatchVerifiedLock(string text, List<string> needles, out int pid, out bool incomplete, out bool deviceMismatch)
     {
         pid = 0;
@@ -550,8 +580,11 @@ internal static class Posix
         $"{major:x2}:{minor:x2}:{ino}";
 
     /// <summary>
-    /// Device ids for this path from <c>/proc/self/mountinfo</c>. The mount id's device
-    /// comes first, then the longest mount point that covers the path (what findmnt -T prints).
+    /// Device id for this path from mountinfo. When statx already reported a mount id, that
+    /// id's device is the only candidate. A longer lexical mount point can be a different
+    /// filesystem (a symlink parent, or a path that crosses a mount) and must not supply a
+    /// second device: the same inode there can belong to another owner. The path fallback
+    /// is used only when statx has no mount id.
     /// </summary>
     private static List<DevId> MountDevices(ulong mntId, string path)
     {
@@ -559,15 +592,15 @@ internal static class Posix
         string text;
         try
         {
-            text = File.ReadAllText("/proc/self/mountinfo");
+            text = File.ReadAllText(MountInfoPath);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             return found;
         }
 
+        var idText = mntId == 0 ? null : mntId.ToString(System.Globalization.CultureInfo.InvariantCulture);
         var full = Path.GetFullPath(path);
-        DevId? byId = null;
         DevId? byPath = null;
         var bestLen = -1;
         foreach (var line in text.Split('\n'))
@@ -575,8 +608,17 @@ internal static class Posix
             var parts = line.Split(' ');
             if (parts.Length < 5 || !TryParseDev(parts[2], out var dev))
                 continue;
-            if (mntId != 0 && parts[0] == mntId.ToString(System.Globalization.CultureInfo.InvariantCulture))
-                byId = dev;
+            if (idText is not null)
+            {
+                if (parts[0] == idText)
+                {
+                    found.Add(dev);
+                    return found;
+                }
+
+                continue;
+            }
+
             var mountPoint = UnescapeMount(parts[4]);
             if (Covers(mountPoint, full) && mountPoint.Length > bestLen)
             {
@@ -585,9 +627,7 @@ internal static class Posix
             }
         }
 
-        if (byId is { } idDev)
-            found.Add(idDev);
-        if (byPath is { } pathDev && !found.Contains(pathDev))
+        if (idText is null && byPath is { } pathDev)
             found.Add(pathDev);
         return found;
     }
