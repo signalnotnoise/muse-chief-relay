@@ -31,6 +31,11 @@ from mention_hook import open_db, poll
 
 NAME = 'dot.mention.created'
 VERSION = '2026-07-28'
+MAX_ATTEMPTS = 8
+
+
+def retry_delay(attempt):
+    return min(300, 2 ** (attempt - 1))
 
 
 def canonical(value):
@@ -77,6 +82,8 @@ def callback_target(url):
         if not addresses or any(not ipaddress.ip_address(a[4][0]).is_global for a in addresses):
             raise ProtocolError(-32015, 'non_public_callback')
         return target, addresses
+    except ProtocolError:
+        raise
     except (OSError, ValueError):
         raise ProtocolError(-32015, 'callback_resolution_failed') from None
 
@@ -134,25 +141,41 @@ class Events:
                 sub TEXT NOT NULL, event TEXT NOT NULL, payload TEXT NOT NULL,
                 state TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, next_at REAL NOT NULL DEFAULT 0,
                 reply TEXT, exported INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(sub,event));
+            CREATE TABLE IF NOT EXISTS subscription_checks (
+                id TEXT PRIMARY KEY, attempt TEXT NOT NULL);
         ''')
-        self.db.execute("UPDATE deliveries SET state='pending' WHERE state='delivering'")
-        self.db.commit()
+        # Additive migration preserves existing subscriptions, replies and retry counts.
+        for table, column in (('deliveries', 'claim'), ('subscriptions', 'generation')):
+            if column not in {row[1] for row in self.db.execute('PRAGMA table_info(' + table + ')')}:
+                self.db.execute('ALTER TABLE ' + table + ' ADD COLUMN ' + column + ' TEXT')
+        # main() holds the exclusive runtime lock. Recovery is for a stopped owner,
+        # never a lease timeout that might race a still-running callback.
+        with self.db:
+            self.db.execute('DELETE FROM subscription_checks')
+            self.db.execute("""UPDATE deliveries SET state=CASE WHEN attempts>=? THEN 'exhausted'
+                ELSE 'pending' END,claim=NULL WHERE state IN ('delivering','pending')""", (MAX_ATTEMPTS,))
 
     def close(self):
-        self.db.close()
+        with self.gate:
+            self.db.close()
 
     def config(self):
-        cfg = load_config(self.path)
-        validate(cfg, self.path.parent)
-        if cfg.get('dot_mode') != 'participate' or cfg.get('durable_outbox') is not True or cfg.get('protocol_v2'):
-            raise ValueError('MCP Events requires participate mode, durable_outbox: true, and v1')
-        mcp = cfg.get('mcp_events', {})
-        if not isinstance(mcp.get('principal'), str) or not mcp['principal']:
-            raise ValueError('Configure a single authenticated mcp_events.principal')
-        token = os.environ.get(mcp.get('auth_token_env', 'DOT_MCP_GATEWAY_TOKEN'), '')
-        if len(token) < 32:
-            raise ValueError('Configure the gateway backend token in the environment (32+ characters)')
-        return cfg, mcp, token
+        try:
+            cfg = load_config(self.path)
+            validate(cfg, self.path.parent)
+            if cfg.get('dot_mode') != 'participate' or cfg.get('durable_outbox') is not True or cfg.get('protocol_v2'):
+                raise ValueError('MCP Events requires participate mode, durable_outbox: true, and v1')
+            mcp = cfg.get('mcp_events', {})
+            if not isinstance(mcp.get('principal'), str) or not mcp['principal']:
+                raise ValueError('Configure a single authenticated mcp_events.principal')
+            token = os.environ.get(mcp.get('auth_token_env', 'DOT_MCP_GATEWAY_TOKEN'), '')
+            if len(token) < 32:
+                raise ValueError('Configure the gateway backend token in the environment (32+ characters)')
+            return cfg, mcp, token
+        except (AttributeError, TypeError):
+            # A structurally invalid hot reload must use the same fail-closed
+            # error path as invalid JSON, rather than kill the dispatch thread.
+            raise ValueError('invalid_configuration_structure') from None
 
     def scope(self):
         cfg, mcp, _ = self.config()
@@ -180,50 +203,95 @@ class Events:
         return cfg, owner, args, delivery, 'sub_' + ident
 
     def subscribe(self, params):
-        _, owner, args, delivery, ident = self.identity(params)
-        secret = delivery.get('secret')
-        key(secret)
-        callback_target(delivery['url'])
-        ttl = params.get('ttlMs', 86400000)
-        if ttl is None:
-            ttl = 86400000  # this server grants finite lifetimes only
-        if isinstance(ttl, bool) or not isinstance(ttl, (int, float)) or not math.isfinite(ttl) or ttl <= 0:
-            raise ProtocolError(-32602, 'invalid_lifetime')
-        now = self.clock()
-        expires = now + min(ttl / 1000, 86400)
+        # Reserve a durable verification generation, then release the service lock
+        # before DNS/TLS/HTTP. The newest request wins; unsubscribe invalidates it.
+        with self.gate:
+            _, owner, args, delivery, ident = self.identity(params)
+            secret = delivery.get('secret')
+            key(secret)
+            ttl = params.get('ttlMs', 86400000)
+            if ttl is None:
+                ttl = 86400000  # this server grants finite lifetimes only
+            if isinstance(ttl, bool) or not isinstance(ttl, (int, float)) or not math.isfinite(ttl) or ttl <= 0:
+                raise ProtocolError(-32602, 'invalid_lifetime')
+            now = self.clock()
+            expires = now + min(ttl / 1000, 86400)
+            attempt = secrets.token_hex(16)
+            with self.db:
+                self.db.execute('INSERT OR REPLACE INTO subscription_checks VALUES (?,?)', (ident, attempt))
         challenge = secrets.token_urlsafe(32)
         body = canonical({'type': 'verification', 'challenge': challenge}).encode()
         try:
+            callback_target(delivery['url'])
             status, result = self.sender(delivery['url'], body,
-                signed_headers('msg_verification_' + secrets.token_hex(16), ident, secret, body, int(now)))
+                signed_headers('msg_verification_' + attempt, ident, secret, body, int(now)))
             challenge_doc = json.loads(result)
             returned = challenge_doc.get('challenge') if isinstance(challenge_doc, dict) else None
             if not 200 <= status < 300 or not isinstance(returned, str) or not hmac.compare_digest(returned, challenge):
                 raise ProtocolError(-32015, 'challenge_failed')
+            with self.gate:
+                current = self.db.execute('SELECT attempt FROM subscription_checks WHERE id=?', (ident,)).fetchone()
+                if current != (attempt,):
+                    raise ProtocolError(-32015, 'subscription_superseded')
+                # Configuration may have changed while the callback was in flight.
+                if self.identity(params)[-1] != ident:
+                    raise ProtocolError(-32602, 'subscription_not_authorized')
+                finished = self.clock()
+                if expires <= finished:
+                    raise ProtocolError(-32015, 'subscription_expired')
+                self._invalidate_deliveries(*self.scope(), finished)
+                prior = self.db.execute('SELECT secret,starts,active,expires FROM subscriptions WHERE id=?', (ident,)).fetchone()
+                starts = prior[1] if prior and prior[2] and prior[3] > finished else finished
+                old = prior[0] if prior and prior[0] != secret else None
+                with self.db:
+                    self.db.execute('''INSERT OR REPLACE INTO subscriptions
+                        (id,owner,arguments,url,secret,old_secret,rotate_until,expires,starts,active,generation)
+                        VALUES (?,?,?,?,?,?,?,?,?,1,?)''',
+                        (ident, owner, canonical(args), delivery['url'], secret, old,
+                         finished + 300 if old else 0, expires, starts, attempt))
+            return {'id': ident, 'refreshBefore': iso(expires), 'cursor': None, 'truncated': False}
         except (OSError, ValueError, http.client.HTTPException) as exc:
             if isinstance(exc, ProtocolError):
                 raise
             raise ProtocolError(-32015, 'callback_failed') from None
-        prior = self.db.execute('SELECT secret,starts,active,expires FROM subscriptions WHERE id=?', (ident,)).fetchone()
-        starts = prior[1] if prior and prior[2] and prior[3] > now else now
-        old = prior[0] if prior and prior[0] != secret else None
-        with self.db:
-            self.db.execute('INSERT OR REPLACE INTO subscriptions VALUES (?,?,?,?,?,?,?,?,?,1)',
-                (ident, owner, canonical(args), delivery['url'], secret, old, now + 300 if old else 0, expires, starts))
-        return {'id': ident, 'refreshBefore': iso(expires), 'cursor': None, 'truncated': False}
+        finally:
+            with self.gate, self.db:
+                self.db.execute('DELETE FROM subscription_checks WHERE id=? AND attempt=?', (ident, attempt))
 
     def unsubscribe(self, params):
-        *_, ident = self.identity(params)
+        with self.gate:
+            *_, ident = self.identity(params)
+            with self.db:
+                self.db.execute('DELETE FROM subscription_checks WHERE id=?', (ident,))
+                self.db.execute('UPDATE subscriptions SET active=0 WHERE id=?', (ident,))
+                self.db.execute("""UPDATE deliveries SET state='cancelled',claim=NULL
+                    WHERE sub=? AND state IN ('pending','delivering','accepted')""", (ident,))
+            return {}
+
+    def _invalidate_deliveries(self, cfg, owner, room, now):
+        # Called only under gate. Terminal rows (especially completed) are immutable.
+        rows = self.db.execute("""SELECT d.sub,d.event,d.payload,s.owner,s.arguments,s.active,s.expires
+            FROM deliveries d JOIN subscriptions s ON d.sub=s.id
+            WHERE d.state IN ('pending','delivering','accepted')""").fetchall()
         with self.db:
-            self.db.execute('UPDATE subscriptions SET active=0 WHERE id=?', (ident,))
-            self.db.execute("UPDATE deliveries SET state='cancelled' WHERE sub=? AND state IN ('pending','delivering')", (ident,))
-        return {}
+            for sub, ident, payload, principal, arguments, active, expires in rows:
+                state = None
+                if not active:
+                    state = 'cancelled'
+                elif expires <= now:
+                    state = 'expired'
+                elif principal != owner or json.loads(arguments)['room_key'] != room or \
+                        json.loads(payload)['data']['message']['nick'] not in cfg['approved_recipients']:
+                    state = 'revoked'
+                if state:
+                    self.db.execute('UPDATE deliveries SET state=?,claim=NULL WHERE sub=? AND event=?', (state, sub, ident))
 
     def tick(self):
         with self.gate:
             cfg, owner, room = self.scope()  # recheck authorization before each delivery
             poll(self.runtime / 'inbox.jsonl', self.dbpath, cfg['approved_recipients'])
             now = self.clock()
+            self._invalidate_deliveries(cfg, owner, room, now)
             for sub, arguments, starts in self.db.execute('SELECT id,arguments,starts FROM subscriptions WHERE active=1 AND expires>? AND owner=?', (now, owner)).fetchall():
                 filters = json.loads(arguments)
                 if filters['room_key'] != room:
@@ -237,38 +305,70 @@ class Events:
                     self.db.execute("INSERT OR IGNORE INTO deliveries(sub,event,payload,state) VALUES (?,?,?,'pending')", (sub, ident, payload))
             self.db.commit()
             self.export()
-            row = self.db.execute('''SELECT d.sub,d.event,d.payload,d.attempts,s.url,s.secret,s.old_secret,s.rotate_until,s.arguments
+            row = self.db.execute('''SELECT d.sub,d.event,d.payload,d.attempts,s.url,s.secret,s.old_secret,s.rotate_until,s.arguments,s.generation
                 FROM deliveries d JOIN subscriptions s ON d.sub=s.id
                 WHERE d.state='pending' AND d.next_at<=? AND s.active=1 AND s.expires>? AND s.owner=?
                 ORDER BY d.next_at,d.event LIMIT 1''', (now, now, owner)).fetchone()
             if row is None:
                 return 'idle'
-            sub, ident, payload, attempts, url, secret, old, rotate_until, arguments = row
+            sub, ident, payload, attempts, url, secret, old, rotate_until, arguments, generation = row
             data = json.loads(payload)['data']
             if json.loads(arguments)['room_key'] != room or data['message']['nick'] not in cfg['approved_recipients']:
                 with self.db:
                     self.db.execute("UPDATE deliveries SET state='revoked' WHERE sub=? AND event=?", (sub, ident))
                 return 'revoked'
+            attempt = attempts + 1
+            claim = secrets.token_hex(16)
             with self.db:
-                self.db.execute("UPDATE deliveries SET state='delivering',attempts=attempts+1 WHERE sub=? AND event=?", (sub, ident))
-            body = payload.encode()
-            status = 413
-            if len(body) <= 262144:
-                try:
-                    status, _ = self.sender(url, body, signed_headers('evt_' + ident, sub, secret, body, int(now), old if rotate_until > now else None))
-                except (OSError, ValueError, http.client.HTTPException):
-                    status = 0
-            state = 'accepted' if 200 <= status < 300 else 'rejected' if status in (410, 413) else 'exhausted' if attempts >= 7 else 'pending'
+                claimed = self.db.execute("""UPDATE deliveries SET state='delivering',attempts=?,claim=?,next_at=?
+                    WHERE sub=? AND event=? AND state='pending' AND attempts=?""",
+                    (attempt, claim, now + retry_delay(attempt), sub, ident, attempts)).rowcount
+            if not claimed:
+                return 'idle'
+        # No service lock or database transaction spans external callback I/O.
+        body = payload.encode()
+        status = 413
+        if len(body) <= 262144:
+            try:
+                status, _ = self.sender(url, body, signed_headers('evt_' + ident, sub, secret, body, int(now), old if rotate_until > now else None))
+            except (OSError, ValueError, http.client.HTTPException):
+                status = 0
+        state = 'accepted' if 200 <= status < 300 else 'rejected' if status in (410, 413) else 'exhausted' if attempt >= MAX_ATTEMPTS else 'pending'
+        with self.gate:
+            finished = self.clock()
+            try:
+                self._invalidate_deliveries(*self.scope(), finished)
+            except (ValueError, OSError, KeyError, TypeError):
+                # Fail closed on a bad reload, but do not strand a live claim.
+                # Its attempt is consumed; retries keep the same webhook ID.
+                with self.db:
+                    self.db.execute("""UPDATE deliveries SET state=?,next_at=?,claim=NULL
+                        WHERE sub=? AND event=? AND state='delivering' AND claim=? AND attempts=?""",
+                        ('exhausted' if attempt >= MAX_ATTEMPTS else 'pending',
+                         finished + retry_delay(attempt), sub, ident, claim, attempt))
+                raise
+            # A completion/cancellation/revocation during HTTP wins over this result.
             with self.db:
-                self.db.execute('UPDATE deliveries SET state=?,next_at=? WHERE sub=? AND event=?',
-                    (state, now + min(300, 2 ** attempts), sub, ident))
-                if status == 410:
-                    self.db.execute('UPDATE subscriptions SET active=0 WHERE id=?', (sub,))
-            return state
+                finalized = self.db.execute("""UPDATE deliveries SET state=?,next_at=?,claim=NULL
+                    WHERE sub=? AND event=? AND state='delivering' AND claim=? AND attempts=?""",
+                    (state, finished + retry_delay(attempt), sub, ident, claim, attempt)).rowcount
+                if finalized and status == 410:
+                    # A stale 410 must not deactivate a successfully refreshed subscription.
+                    self.db.execute('UPDATE subscriptions SET active=0 WHERE id=? AND generation IS ?', (sub, generation))
+            self._invalidate_deliveries(*self.scope(), finished)
+            return self.db.execute('SELECT state FROM deliveries WHERE sub=? AND event=?', (sub, ident)).fetchone()[0]
 
     def export(self):
-        cfg, _, _ = self.scope()
-        for sub, ident, reply in self.db.execute("SELECT sub,event,reply FROM deliveries WHERE state='completed' AND exported=0").fetchall():
+        with self.gate:
+            self._export()
+
+    def _export(self):
+        cfg, owner, room = self.scope()
+        for sub, ident, reply, arguments in self.db.execute("""SELECT d.sub,d.event,d.reply,s.arguments
+                FROM deliveries d JOIN subscriptions s ON d.sub=s.id
+                WHERE d.state='completed' AND d.exported=0 AND s.owner=?""", (owner,)).fetchall():
+            if json.loads(arguments)['room_key'] != room:
+                continue
             event = self.db.execute('SELECT payload FROM events WHERE id=?', (ident,)).fetchone()
             recipient = json.loads(event[0])['message']['nick']
             if recipient not in cfg['approved_recipients']:
@@ -279,40 +379,56 @@ class Events:
                 self.db.execute('UPDATE deliveries SET exported=1 WHERE sub=? AND event=?', (sub, ident))
 
     def complete(self, args):
+        with self.gate:
+            return self._complete(args)
+
+    def _complete(self, args):
+        if not isinstance(args, dict):
+            raise ProtocolError(-32602, 'invalid_params')
         ident = args.get('event_id', '')
         reply = args.get('reply')
         if reply is not None and (not isinstance(reply, str) or not reply.strip() or len(reply) > 4000):
             raise ProtocolError(-32602, 'invalid_reply')
         cfg, owner, room = self.scope()
-        row = self.db.execute('''SELECT d.state,d.reply,e.payload,s.arguments FROM deliveries d
+        now = self.clock()
+        self._invalidate_deliveries(cfg, owner, room, now)
+        rows = self.db.execute('''SELECT d.sub,d.state,d.reply,e.payload,s.arguments FROM deliveries d
             JOIN subscriptions s ON d.sub=s.id JOIN events e ON d.event=e.id
-            WHERE d.event=? AND s.owner=? AND s.active=1 AND s.expires>? LIMIT 1''', (ident, owner, self.clock())).fetchone()
-        if row is None or json.loads(row[3])['room_key'] != room or json.loads(row[2])['message']['nick'] not in cfg['approved_recipients']:
+            WHERE d.event=? AND s.owner=? AND s.active=1 AND s.expires>?''', (ident, owner, now)).fetchall()
+        authorized = [row for row in rows if json.loads(row[4])['room_key'] == room and
+                      json.loads(row[3])['message']['nick'] in cfg['approved_recipients']]
+        if not authorized:
             raise ProtocolError(-32602, 'event_not_authorized')
-        if row[0] == 'completed' and row[1] != reply:
-            raise ProtocolError(-32602, 'completion_conflict')
-        if row[0] not in ('delivering', 'accepted', 'completed'):
+        eligible = [row for row in authorized if row[1] in ('delivering', 'accepted', 'completed')]
+        if not eligible:
             raise ProtocolError(-32602, 'event_not_delivered')
+        # The bridge request is immutable by event ID, even across subscriptions.
+        prior = self.db.execute("SELECT reply FROM deliveries WHERE event=? AND state='completed'", (ident,)).fetchall()
+        if any(row[0] != reply for row in prior):
+            raise ProtocolError(-32602, 'completion_conflict')
         with self.db:
-            self.db.execute("UPDATE deliveries SET state='completed',reply=? WHERE event=? AND sub IN (SELECT id FROM subscriptions WHERE owner=?)", (reply, ident, owner))
+            for sub, *_ in eligible:
+                self.db.execute("UPDATE deliveries SET state='completed',reply=?,claim=NULL WHERE event=? AND sub=?", (reply, ident, sub))
             self.db.execute('UPDATE events SET delivered=1 WHERE id=?', (ident,))
         self.export()
         return {'status': 'completed', 'reply': 'durably_queued' if reply is not None else 'none', 'event_id': ident}
 
     def rpc(self, request):
+        # Subscribe owns its short locked phases; wrapping it here would keep the
+        # RLock held through verification and block callback-initiated RPCs.
+        method, params = request.get('method'), request.get('params', {})
+        if not isinstance(params, dict):
+            raise ProtocolError(-32602, 'invalid_params')
+        if method == 'events/subscribe':
+            return self.subscribe(params)
         with self.gate:
             self.scope()
-            method, params = request.get('method'), request.get('params', {})
-            if not isinstance(params, dict):
-                raise ProtocolError(-32602, 'invalid_params')
             if method == 'server/discover':
                 return {'resultType': 'complete', 'supportedVersions': [VERSION], 'capabilities': {'tools': {}, 'events': {}}}
             if method == 'initialize':
                 return {'protocolVersion': VERSION, 'capabilities': {'tools': {}, 'events': {}}, 'serverInfo': {'name': 'dot-relay', 'version': '0.1.0'}}
             if method == 'events/list':
                 return {'events': [self.definition()]}
-            if method == 'events/subscribe':
-                return self.subscribe(params)
             if method == 'events/unsubscribe':
                 return self.unsubscribe(params)
             if method == 'tools/list':
