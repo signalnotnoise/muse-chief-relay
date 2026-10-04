@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """Dot-local entry point for the shared config validator.
 
-The single implementation lives in bots/shared/check_config.py. This file
-keeps the existing `from check_config import validate` imports (go.py,
-mcp_events.py, reply.py, run.sh, tests) working unchanged. It loads the
-shared module from its file location so the module name never collides with
-this re-export.
+The single implementation lives in bots/shared/check_config.py, including
+strict load_config(). This file re-exports it so existing imports keep working:
+
+    from check_config import load_config, validate
+
+used by go.py, mcp_events.py, reply.py, run.sh, and the dot tests. It loads
+the shared module from its file location so the module name never collides
+with this re-export.
 """
 import importlib.util
 import os
@@ -22,6 +25,7 @@ def _load():
 
 
 _loaded = _load()
+load_config = _loaded.load_config
 validate = _loaded.validate
 main = _loaded.main
 del _loaded

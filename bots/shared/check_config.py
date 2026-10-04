@@ -4,12 +4,33 @@
 Validates the configured receiver or explicitly authorized participation mode.
 The expected nick is a parameter so each bot's thin wrapper enforces its own
 identity while the validation logic stays in this one implementation.
+
+load_config() is the strict parser. Bot-local check_config.py files re-export
+it; they do not keep a second copy.
 """
 import json
 from pathlib import Path
 import re
 import sys
 from urllib.parse import urlsplit
+
+
+def _strict_object(pairs):
+    # The bridge binds property names case-insensitively; Python dict lookups
+    # do not. Reject aliases and duplicates at every depth so the safety
+    # validator and the bridge cannot interpret different settings from the
+    # same configuration file (mirrors launch_bridge.canonical_object).
+    result = {}
+    for key, value in pairs:
+        if key != key.lower() or key in result:
+            raise ValueError('config keys must be lowercase and unique')
+        result[key] = value
+    return result
+
+
+def load_config(path):
+    """Parse a bridge config file, rejecting duplicate or mixed-case keys."""
+    return json.loads(Path(path).read_text(), object_pairs_hook=_strict_object)
 
 
 def validate(config, bot_dir, nick='dot', mode_key='dot_mode'):
@@ -53,7 +74,7 @@ def validate(config, bot_dir, nick='dot', mode_key='dot_mode'):
 def main():
     path = Path(sys.argv[1]).resolve()
     try:
-        validate(json.loads(path.read_text()), path.parent)
+        validate(load_config(path), path.parent)
     except (OSError, ValueError, TypeError, KeyError) as exc:
         print(f'Refusing start: {exc}', file=sys.stderr)
         return 2

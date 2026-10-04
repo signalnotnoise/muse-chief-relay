@@ -12,7 +12,7 @@ import subprocess
 import sys
 import time
 import urllib.request
-from check_config import validate
+from check_config import load_config, validate
 
 BOT = Path(__file__).resolve().parent
 REPO = BOT.parent.parent
@@ -25,7 +25,7 @@ def setup(path, room=None, approved=None):
     if runtime.is_symlink():
         raise ValueError('Runtime must be an ordinary persistent directory')
     if path.exists():
-        cfg = json.loads(path.read_text())
+        cfg = load_config(path)
         validate(cfg, path.parent)  # preserve existing configuration; never silently opt it in
         if cfg.get('dot_mode') != 'participate' or cfg.get('durable_outbox') is not True:
             raise ValueError('Existing config preserved. Enable participate and durable_outbox as described in AGENTS.md')
@@ -35,7 +35,7 @@ def setup(path, room=None, approved=None):
         approved = [item.strip() for item in approved if item.strip()]
         if not room or not approved:
             raise ValueError('Room and explicitly approved participants are required')
-        cfg = json.loads((BOT / 'config.example.json').read_text())
+        cfg = load_config(BOT / 'config.example.json')
         cfg.update(channel=room, dot_mode='participate', approved_recipients=approved,
                    durable_outbox=True, mcp_events={'principal': 'local-owner', 'auth_token_env': 'DOT_MCP_GATEWAY_TOKEN'})
         unread = runtime / 'unread.jsonl'

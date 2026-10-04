@@ -25,7 +25,7 @@ import ssl
 import threading
 import time
 from urllib.parse import urlsplit
-from check_config import validate
+from check_config import load_config, validate
 from durable_reply import publish
 from mention_hook import open_db, poll
 
@@ -142,7 +142,7 @@ class Events:
         self.db.close()
 
     def config(self):
-        cfg = json.loads(self.path.read_text())
+        cfg = load_config(self.path)
         validate(cfg, self.path.parent)
         if cfg.get('dot_mode') != 'participate' or cfg.get('durable_outbox') is not True or cfg.get('protocol_v2'):
             raise ValueError('MCP Events requires participate mode, durable_outbox: true, and v1')
@@ -171,7 +171,8 @@ class Events:
         cfg, owner, room = self.scope()
         args, delivery = params.get('arguments'), params.get('delivery', {})
         if params.get('name') != NAME or not isinstance(args, dict) or set(args) != {'room_key', 'mention_only'} or \
-                args.get('room_key') != room or not isinstance(args.get('mention_only'), bool):
+                args.get('room_key') != room or not isinstance(args.get('mention_only'), bool) or \
+                not isinstance(delivery, dict):
             raise ProtocolError(-32602, 'invalid_or_unauthorized_filters')
         if delivery.get('mode') != 'webhook' or not isinstance(delivery.get('url'), str):
             raise ProtocolError(-32602, 'webhook_delivery_required')
@@ -195,7 +196,8 @@ class Events:
         try:
             status, result = self.sender(delivery['url'], body,
                 signed_headers('msg_verification_' + secrets.token_hex(16), ident, secret, body, int(now)))
-            returned = json.loads(result).get('challenge')
+            challenge_doc = json.loads(result)
+            returned = challenge_doc.get('challenge') if isinstance(challenge_doc, dict) else None
             if not 200 <= status < 300 or not isinstance(returned, str) or not hmac.compare_digest(returned, challenge):
                 raise ProtocolError(-32015, 'challenge_failed')
         except (OSError, ValueError, http.client.HTTPException) as exc:
