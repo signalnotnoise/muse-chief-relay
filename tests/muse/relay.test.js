@@ -54,8 +54,8 @@ test("join sends a public trip and never a nick#password", async () => {
 });
 
 test("public relay answers hello and does not require a join", async () => {
-  const url = "wss://ws.voizel.com/relay";
-  const health = await fetch("https://ws.voizel.com/health");
+  const url = "wss://relay.example.com/relay";
+  const health = await fetch("https://relay.example.com/health");
   assert.equal(health.status, 200);
   const body = await health.json();
   assert.equal(body.ok, true);

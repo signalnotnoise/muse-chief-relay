@@ -125,8 +125,8 @@ final class WireTests: XCTestCase {
         XCTAssertNil(secret.relayURL)
         XCTAssertNotNil(secret.urlError)
 
-        let ok = ClientSettings.load(relayURL: "wss://ws.voizel.com/relay", room: "  ", nick: " Muse ", publicTrip: " Ab12Cd ")
-        XCTAssertEqual(ok.relayURL?.absoluteString, "wss://ws.voizel.com/relay")
+        let ok = ClientSettings.load(relayURL: "wss://relay.example.com/relay", room: "  ", nick: " Muse ", publicTrip: " Ab12Cd ")
+        XCTAssertEqual(ok.relayURL?.absoluteString, "wss://relay.example.com/relay")
         XCTAssertEqual(ok.nick, "Muse")
         XCTAssertEqual(ok.room, "")
     }
