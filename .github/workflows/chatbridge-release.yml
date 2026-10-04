@@ -120,7 +120,14 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # gh release create has no --clobber; delete a pre-existing release
+          # first so re-pushed tags don't fail.
+          if gh release view "${{ github.ref_name }}" >/dev/null 2>&1; then
+            gh release delete "${{ github.ref_name }}" --yes --cleanup-tag
+            git push origin ":refs/tags/${{ github.ref_name }}" || true
+            git tag -f "${{ github.ref_name }}"
+            git push origin "refs/tags/${{ github.ref_name }}"
+          fi
           gh release create "${{ github.ref_name }}" dist/* \
             --title "ChatBridge ${{ github.ref_name }}" \
-            --clobber \
             --notes "Self-contained ChatBridge builds — no .NET install required. Extract the archive for your OS/CPU and point the launcher at the binary. Verify downloads against SHA256SUMS.txt."
