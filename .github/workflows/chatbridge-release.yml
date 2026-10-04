@@ -1,0 +1,126 @@
+# Versioned ChatBridge release builds.
+#
+# Room decision 2026-10-04 (Alex go): ship a versioned archive of the
+# complete .NET 8 publish output, one archive per OS/CPU, attached to each
+# release. Self-contained single-file executables — no .NET install needed
+# anywhere the bridge runs. SHA256SUMS.txt ships alongside for verification.
+#
+# Usage: push a tag like `chatbridge-v0.3.0`. The workflow publishes for all
+# RIDs, archives each, and creates the GitHub release with the assets.
+#
+# The launcher already accepts an alternate DLL/executable, so a release
+# archive is a drop-in: extract and point the launcher at the binary.
+
+name: ChatBridge release builds
+
+on:
+  push:
+    tags:
+      - "chatbridge-v*"
+  pull_request:
+    paths:
+      - "src/ChatBridge/**"
+      - ".github/workflows/chatbridge-release.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - rid: linux-x64
+            archive: tar.gz
+          - rid: linux-arm64
+            archive: tar.gz
+          - rid: osx-x64
+            archive: tar.gz
+          - rid: osx-arm64
+            archive: tar.gz
+          - rid: win-x64
+            archive: zip
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Sanitize ref name for filenames
+        id: sanitize
+        run: |
+          # PR runs have ref_name like "85/merge" — the slash breaks archive
+          # paths. Tag names (chatbridge-v0.3.0) contain no slash and are
+          # unaffected, but PR validation gates merge, so sanitize always.
+          echo "safe_ref=${GITHUB_REF_NAME//\//-}" >> "$GITHUB_OUTPUT"
+
+      - name: Publish self-contained
+        run: |
+          # On tag builds, stamp the assembly version from the tag
+          # (chatbridge-v0.3.0 -> 0.3.0). PR validation keeps the csproj default.
+          VERSION_ARGS=()
+          if [[ "${GITHUB_REF}" == refs/tags/chatbridge-v* ]]; then
+            VERSION_ARGS+=(-p:Version="${GITHUB_REF_NAME#chatbridge-v}")
+          fi
+          dotnet publish src/ChatBridge/ChatBridge.csproj \
+            -c Release \
+            -r ${{ matrix.rid }} \
+            --self-contained true \
+            -p:PublishSingleFile=true \
+            "${VERSION_ARGS[@]}" \
+            -o publish/${{ matrix.rid }}
+
+      - name: Archive (tar.gz)
+        if: matrix.archive == 'tar.gz'
+        run: |
+          tar -czf chatbridge-${{ steps.sanitize.outputs.safe_ref }}-${{ matrix.rid }}.tar.gz \
+            -C publish/${{ matrix.rid }} ChatBridge
+
+      - name: Archive (zip)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          Compress-Archive `
+            -Path publish/${{ matrix.rid }}/ChatBridge.exe `
+            -DestinationPath chatbridge-${{ steps.sanitize.outputs.safe_ref }}-${{ matrix.rid }}.zip
+
+      - name: Upload archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: chatbridge-${{ matrix.rid }}
+          path: |
+            chatbridge-*.tar.gz
+            chatbridge-*.zip
+
+  release:
+    # Tag pushes only — never cut a release from a pull request run.
+    if: startsWith(github.ref, 'refs/tags/chatbridge-v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download archives
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        run: |
+          cd dist
+          sha256sum chatbridge-*.tar.gz chatbridge-*.zip > SHA256SUMS.txt
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ github.ref_name }}" dist/* \
+            --title "ChatBridge ${{ github.ref_name }}" \
+            --clobber \
+            --notes "Self-contained ChatBridge builds — no .NET install required. Extract the archive for your OS/CPU and point the launcher at the binary. Verify downloads against SHA256SUMS.txt."
