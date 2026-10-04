@@ -424,6 +424,43 @@ public class BridgeInstanceTests
     }
 
     [Fact]
+    public void Mac_os_ofd_owner_is_not_rejected_because_proc_is_absent()
+    {
+        using var dir = new TempDir();
+        using var sleep = Process.Start(new ProcessStartInfo("sleep", "120") { UseShellExecute = false })!;
+        var cfg = RelayConfig.Load(WriteConfig(dir, "ws://127.0.0.1:9/relay", "room-" + Guid.NewGuid().ToString("N"), "n", null), false, dir.Path, _ => null);
+        var path = BridgeInstance.StateLockPath(cfg.BaseDir);
+        File.WriteAllText(path, $"pid={sleep.Id}\n");
+        BridgeInstance.TestStateProbe = new InstanceProbe(true, sleep.Id);
+        try
+        {
+            Assert.False(Posix.OwnerDescriptorRefersTo(path, sleep.Id));
+            Assert.False(Posix.OwnerConfirmed(path, sleep.Id));
+
+            var blocked = BridgeInstance.Stop(cfg);
+            Assert.Equal(InstanceStopKind.Blocked, blocked.Kind);
+            Assert.Contains("could not be verified", blocked.Detail);
+            Assert.False(sleep.HasExited);
+
+            Posix.SetTrustOfdOwner(true);
+            BridgeInstance.TestSuppressSignal = true;
+            Assert.True(Posix.OwnerConfirmed(path, sleep.Id));
+            var allowed = BridgeInstance.Stop(cfg);
+            Assert.Equal(InstanceStopKind.Stopped, allowed.Kind);
+            Assert.Contains("owner " + sleep.Id + " verified", allowed.Detail);
+            Assert.DoesNotContain("could not be verified", allowed.Detail);
+            Assert.False(sleep.HasExited);
+        }
+        finally
+        {
+            BridgeInstance.TestStateProbe = null;
+            BridgeInstance.TestSuppressSignal = false;
+            Posix.SetTrustOfdOwner(false);
+            try { sleep.Kill(); } catch (InvalidOperationException) { }
+        }
+    }
+
+    [Fact]
     public void A_stale_pid_hint_is_not_the_owner()
     {
         using var dir = new TempDir();

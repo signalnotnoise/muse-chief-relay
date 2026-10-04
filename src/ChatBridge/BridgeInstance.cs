@@ -110,10 +110,34 @@ internal static class BridgeInstance
     /// Signal the process that currently holds this config's state lock.
     /// A connected socket is not a reason to skip the signal.
     /// </summary>
+    /// <summary>
+    /// Tests feed the probe macOS <c>F_OFD_GETLK</c> would return. Linux production leaves this unset.
+    /// </summary>
+    [ThreadStatic]
+    private static InstanceProbe? _testStateProbe;
+
+    internal static InstanceProbe? TestStateProbe
+    {
+        get => _testStateProbe;
+        set => _testStateProbe = value;
+    }
+
+    /// <summary>
+    /// Tests stop before <c>SIGTERM</c> once the owner has been confirmed.
+    /// </summary>
+    [ThreadStatic]
+    private static bool _testSuppressSignal;
+
+    internal static bool TestSuppressSignal
+    {
+        get => _testSuppressSignal;
+        set => _testSuppressSignal = value;
+    }
+
     public static InstanceStop Stop(RelayConfig cfg)
     {
         var statePath = StateLockPath(cfg.BaseDir);
-        var state = Probe(statePath);
+        var state = TestStateProbe ?? Probe(statePath);
         if (!state.Held)
         {
             var identity = Probe(IdentityLockPath(cfg));
@@ -127,12 +151,15 @@ internal static class BridgeInstance
             return InstanceStop.Absent("[chatbridge] stop: not running");
         }
 
-        // A /proc/locks pid is not enough. The process must still have a descriptor
-        // for this file. A missing pid, or a descriptor that was deleted or replaced,
-        // is not signaled.
+        // Linux: a /proc/locks pid still needs a descriptor for this file.
+        // macOS: F_OFD_GETLK already named the owner. /proc/<pid>/fd is not there,
+        // so that check must not veto stop or restart.
         if (state.Pid is not int owner || owner <= 1 || owner == Environment.ProcessId
-            || !Posix.OwnerDescriptorRefersTo(statePath, owner))
+            || !Posix.OwnerConfirmed(statePath, owner))
             return InstanceStop.Block("[chatbridge] stop: the state lock is held, but the owner could not be verified");
+
+        if (TestSuppressSignal)
+            return InstanceStop.Stopped($"[chatbridge] stop: owner {owner} verified");
 
         if (!Posix.SignalTerm(owner))
         {
@@ -326,6 +353,15 @@ internal static class Posix
     private static bool _hideFdInfo;
 
     internal static void SetHideFdInfo(bool hide) => _hideFdInfo = hide;
+
+    /// <summary>
+    /// Tests take the macOS stop path: <c>F_OFD_GETLK</c> already named the pid, so a missing
+    /// <c>/proc</c> fd table must not reject it. Linux production leaves this false.
+    /// </summary>
+    [ThreadStatic]
+    private static bool _testTrustOfdOwner;
+
+    internal static void SetTrustOfdOwner(bool trust) => _testTrustOfdOwner = trust;
 
     internal static int ELoop => OperatingSystem.IsMacOS() ? 62 : 40;
     internal const int ENoEnt = 2;
@@ -534,8 +570,8 @@ internal static class Posix
 
     /// <summary>
     /// True only when <paramref name="pid"/> has a write flock on a descriptor that is still
-    /// <paramref name="path"/>. Stop calls this before any signal. A /proc/locks pid whose
-    /// descriptor is missing, deleted, or a different file is not an owner.
+    /// <paramref name="path"/>. Linux stop uses this. A /proc/locks pid whose descriptor is
+    /// missing, deleted, or a different file is not an owner.
     /// </summary>
     internal static bool OwnerDescriptorRefersTo(string path, int pid)
     {
@@ -543,6 +579,19 @@ internal static class Posix
             return false;
         var scan = MatchProcessFds("/proc/" + pid.ToString(System.Globalization.CultureInfo.InvariantCulture), Path.GetFullPath(path));
         return scan.Found && scan.Pid == pid;
+    }
+
+    /// <summary>
+    /// Whether stop may signal <paramref name="pid"/>. Linux re-checks the descriptor.
+    /// macOS trusts the <c>F_OFD_GETLK</c> pid and does not read <c>/proc</c>.
+    /// </summary>
+    internal static bool OwnerConfirmed(string path, int pid)
+    {
+        if (pid <= 1)
+            return false;
+        if (OperatingSystem.IsMacOS() || _testTrustOfdOwner)
+            return true;
+        return OwnerDescriptorRefersTo(path, pid);
     }
 
     private static bool MatchVerifiedLock(string text, string path, List<string> needles, out int pid, out bool incomplete, out bool deviceMismatch, out bool unverifiedPid)
