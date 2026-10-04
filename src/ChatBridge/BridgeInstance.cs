@@ -69,21 +69,24 @@ internal static class BridgeInstance
             return new InstanceProbe(false, null);
 
         var holder = Posix.QueryFlockHolder(full);
-        if (holder.State == HolderState.Held)
-            return new InstanceProbe(true, holder.Pid);
         if (holder.State == HolderState.NotHeld)
             return new InstanceProbe(false, null);
+        // A verified pid is only returned together with Held when the device id or the
+        // live descriptor's inode matched this file. Held without a pid means the kernel
+        // probe found the lock and the owner could not be verified. Stop does not signal that.
+        if (holder.State == HolderState.Held && holder.Pid is int verified)
+            return new InstanceProbe(true, verified);
 
-        // /proc/locks did not name a holder, and neither did the fd table. A non-blocking
-        // take that we immediately drop answers "is it free?" without staying the owner.
-        // Status uses this only then.
+        // Readable /proc/locks that did not match, a permission-denied fd table, or a
+        // device id that is not this file. The non-blocking take decides whether THIS
+        // inode is held. It does not stay the owner and it does not invent a pid.
         if (InstanceFileLock.TryAcquire(full, InstanceLockKind.Probe) is { } taken)
         {
             taken.Dispose();
             return new InstanceProbe(false, null);
         }
 
-        return new InstanceProbe(true, null);
+        return new InstanceProbe(true, Posix.DiscoverOwnerPid(full));
     }
 
     public static string StatusLine(RelayConfig cfg)
@@ -298,6 +301,15 @@ internal static class Posix
         _statMinorOverride = minor;
     }
 
+    /// <summary>
+    /// Tests hide <c>fdinfo</c> so a readable <c>/proc/locks</c> miss cannot borrow a pid
+    /// from the fd table. The non-blocking probe still decides whether the file is held.
+    /// </summary>
+    [ThreadStatic]
+    private static bool _hideFdInfo;
+
+    internal static void SetHideFdInfo(bool hide) => _hideFdInfo = hide;
+
     internal static int ELoop => OperatingSystem.IsMacOS() ? 62 : 40;
     internal const int ENoEnt = 2;
     private static int EAgain => OperatingSystem.IsMacOS() ? 35 : 11;
@@ -455,30 +467,81 @@ internal static class Posix
             minor = forcedMinor;
         }
 
+        var needles = new List<string>();
         var comparedMount = false;
-        if (locksReadable && text is not null && statOk)
+        if (statOk)
         {
-            if (MatchProcLocks(text, FormatDevIno(major, minor, ino)) is int listed)
-                return new HolderQuery(HolderState.Held, listed);
-
+            needles.Add(FormatDevIno(major, minor, ino));
             foreach (var mount in MountDevices(mntId, path))
             {
                 comparedMount = true;
-                if (MatchProcLocks(text, FormatDevIno(mount.Major, mount.Minor, ino)) is int mounted)
-                    return new HolderQuery(HolderState.Held, mounted);
+                var needle = FormatDevIno(mount.Major, mount.Minor, ino);
+                if (!needles.Contains(needle, StringComparer.OrdinalIgnoreCase))
+                    needles.Add(needle);
             }
         }
 
-        if (MatchFdTable(path) is int owner)
-            return new HolderQuery(HolderState.Held, owner);
+        var incomplete = false;
+        var deviceMismatch = false;
+        if (locksReadable && text is not null)
+        {
+            if (MatchVerifiedLock(text, needles, out var listed, out incomplete, out deviceMismatch))
+                return new HolderQuery(HolderState.Held, listed);
+        }
 
-        // A statx needle miss is not NotHeld until the mount device has been checked.
-        // Without that device, Probe's non-blocking take is the only way to tell a
-        // free file from a held one. Once the mount id was searched and nothing
-        // matched, the file is not held.
-        if (!locksReadable || !statOk || !comparedMount)
+        var scan = MatchFdTable(path);
+        if (scan.Found)
+            return new HolderQuery(HolderState.Held, scan.Pid);
+
+        // A readable locks file that did not name this device:inode is not proof the
+        // file is free. Permission-denied fdinfo and a half-parsed line are the same.
+        // Unknown lets Probe's non-blocking take decide, without adopting a pid.
+        if (!locksReadable || !statOk || !comparedMount || scan.Denied || incomplete || deviceMismatch)
             return new HolderQuery(HolderState.Unknown, null);
         return new HolderQuery(HolderState.NotHeld, null);
+    }
+
+    /// <summary>
+    /// Pid of a descriptor that still refers to <paramref name="path"/> and holds a write flock.
+    /// A deleted or replaced descriptor is not an owner. Null when none is visible.
+    /// </summary>
+    internal static int? DiscoverOwnerPid(string path)
+    {
+        var scan = MatchFdTable(path);
+        return scan.Found ? scan.Pid : null;
+    }
+
+    private static bool MatchVerifiedLock(string text, List<string> needles, out int pid, out bool incomplete, out bool deviceMismatch)
+    {
+        pid = 0;
+        incomplete = false;
+        deviceMismatch = false;
+        foreach (var raw in text.Split('\n'))
+        {
+            if (raw.IndexOf("FLOCK", StringComparison.OrdinalIgnoreCase) < 0)
+                continue;
+            if (!TryParseFlockWrite(raw, out var linePid, out var devIno) || devIno.Length == 0)
+            {
+                incomplete = true;
+                continue;
+            }
+
+            var matched = false;
+            foreach (var needle in needles)
+            {
+                if (!devIno.Equals(needle, StringComparison.OrdinalIgnoreCase))
+                    continue;
+                pid = linePid;
+                matched = true;
+                break;
+            }
+
+            if (matched)
+                return true;
+            deviceMismatch = true;
+        }
+
+        return false;
     }
 
     private readonly record struct DevId(uint Major, uint Minor);
@@ -557,29 +620,23 @@ internal static class Posix
         return fullPath.StartsWith(root, StringComparison.Ordinal);
     }
 
-    private static int? MatchProcLocks(string text, string needle)
-    {
-        foreach (var raw in text.Split('\n'))
-        {
-            if (!TryParseFlockWrite(raw, out var pid, out var devIno))
-                continue;
-            if (devIno.Equals(needle, StringComparison.OrdinalIgnoreCase))
-                return pid;
-        }
-
-        return null;
-    }
+    private readonly record struct FdScan(bool Found, bool Denied, int Pid);
 
     /// <summary>
-    /// Find the process whose open file description holds a write flock on <paramref name="path"/>.
-    /// The pid comes from that process's <c>fdinfo</c> lock line.
+    /// Find a write flock whose open file is still the current inode at <paramref name="path"/>.
+    /// <see cref="FdScan.Denied"/> means the fd table could not be read completely.
     /// </summary>
-    private static int? MatchFdTable(string path)
+    private static FdScan MatchFdTable(string path)
     {
+        if (_hideFdInfo)
+            return new FdScan(false, true, 0);
+
         var full = Path.GetFullPath(path);
-        if (MatchProcessFds("/proc/self", full) is int self)
+        var self = MatchProcessFds("/proc/self", full);
+        if (self.Found)
             return self;
 
+        var denied = self.Denied;
         IEnumerable<string> procs;
         try
         {
@@ -587,7 +644,7 @@ internal static class Posix
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            return null;
+            return new FdScan(false, true, 0);
         }
 
         foreach (var proc in procs)
@@ -595,14 +652,17 @@ internal static class Posix
             var name = Path.GetFileName(proc);
             if (!int.TryParse(name, out var pid) || pid <= 0)
                 continue;
-            if (MatchProcessFds(proc, full) is int found)
-                return found;
+            var scan = MatchProcessFds(proc, full);
+            if (scan.Found)
+                return scan;
+            if (scan.Denied)
+                denied = true;
         }
 
-        return null;
+        return new FdScan(false, denied, 0);
     }
 
-    private static int? MatchProcessFds(string procDir, string fullPath)
+    private static FdScan MatchProcessFds(string procDir, string fullPath)
     {
         var fdDir = Path.Combine(procDir, "fd");
         IEnumerable<string> fds;
@@ -610,15 +670,20 @@ internal static class Posix
         {
             fds = Directory.EnumerateFileSystemEntries(fdDir);
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        catch (UnauthorizedAccessException)
         {
-            return null;
+            return new FdScan(false, true, 0);
+        }
+        catch (IOException)
+        {
+            return new FdScan(false, false, 0);
         }
 
+        var denied = false;
         foreach (var fdPath in fds)
         {
             var opened = ReadProcLink(fdPath);
-            if (opened is null || !SameOpenedFile(opened, fullPath))
+            if (!DescriptorIsCurrentFile(opened, fdPath, fullPath))
                 continue;
             var infoPath = Path.Combine(procDir, "fdinfo", Path.GetFileName(fdPath));
             string info;
@@ -626,38 +691,40 @@ internal static class Posix
             {
                 info = File.ReadAllText(infoPath);
             }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            catch (UnauthorizedAccessException)
+            {
+                denied = true;
+                continue;
+            }
+            catch (IOException)
             {
                 continue;
             }
 
             foreach (var line in info.Split('\n'))
             {
-                if (TryParseFlockWrite(line, out var pid, out _))
-                    return pid;
+                if (TryParseFlockWrite(line, out var pid, out _) && pid > 0)
+                    return new FdScan(true, false, pid);
             }
         }
 
-        return null;
+        return new FdScan(false, denied, 0);
     }
 
-    private static bool SameOpenedFile(string opened, string fullPath)
+    /// <summary>
+    /// The descriptor must still be the file at <paramref name="fullPath"/>.
+    /// A deleted path, or a descriptor whose device and inode are not the current
+    /// file, is a replaced lock file and is not the owner.
+    /// </summary>
+    private static bool DescriptorIsCurrentFile(string? opened, string fdProcPath, string fullPath)
     {
-        const string deleted = " (deleted)";
-        if (opened.EndsWith(deleted, StringComparison.Ordinal))
-            opened = opened[..^deleted.Length];
-        if (string.Equals(opened, fullPath, StringComparison.Ordinal))
-            return true;
-        if (!opened.StartsWith('/'))
+        if (opened is not null && opened.EndsWith(" (deleted)", StringComparison.Ordinal))
             return false;
-        try
-        {
-            return string.Equals(Path.GetFullPath(opened), fullPath, StringComparison.Ordinal);
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
+        if (!TryStat(fdProcPath, out _, out var fdMajor, out var fdMinor, out var fdIno, out _, follow: true))
             return false;
-        }
+        if (!TryStat(fullPath, out _, out var curMajor, out var curMinor, out var curIno, out _, follow: true))
+            return false;
+        return fdMajor == curMajor && fdMinor == curMinor && fdIno == curIno;
     }
 
     private static bool TryParseFlockWrite(string line, out int pid, out string devIno)
@@ -721,7 +788,7 @@ internal static class Posix
         RuntimeInformation.ProcessArchitecture == Architecture.Arm64
             ? darwin_fcntl_lock(fd, cmd, 0, 0, 0, 0, 0, 0, ref record) : intel_fcntl_lock(fd, cmd, ref record);
 
-    private static bool TryStat(string path, out ushort mode, out uint major, out uint minor, out ulong ino, out ulong mntId)
+    private static bool TryStat(string path, out ushort mode, out uint major, out uint minor, out ulong ino, out ulong mntId, bool follow = false)
     {
         mode = 0;
         major = 0;
@@ -732,7 +799,8 @@ internal static class Posix
         var pinned = GCHandle.Alloc(buf, GCHandleType.Pinned);
         try
         {
-            if (sys_statx(AtFdcwd, path, AtSymlinkNoFollow, StatxBasic | StatxMntId, pinned.AddrOfPinnedObject()) != 0)
+            var flags = follow ? 0 : AtSymlinkNoFollow;
+            if (sys_statx(AtFdcwd, path, flags, StatxBasic | StatxMntId, pinned.AddrOfPinnedObject()) != 0)
                 return false;
         }
         finally
