@@ -23,6 +23,10 @@ class PortableLauncherTests(unittest.TestCase):
         source = Path(__file__).parent
         for name in ('env.sh', 'launch-bridge.sh', 'check_config.py'):
             shutil.copyfile(source / name, self.bot / name)
+        # The thin wrappers delegate to bots/shared; mirror the repo layout so
+        # the relocated copy resolves ../shared exactly like the real checkout.
+        shutil.copytree(source.parent / 'shared', self.repo / 'bots/shared',
+                        ignore=shutil.ignore_patterns('__pycache__', 'test_*'))
         self.launcher = self.bot / 'launch-bridge.sh'
         self.dll = self.repo / 'src/ChatBridge/bin/Release/net8.0/ChatBridge.dll'
         self.dll.parent.mkdir(parents=True)
